@@ -1,0 +1,10 @@
+build/
+install/
+log/
+.cache/
+
+src/odin1_firmware_update_pack_0.10.0_20260209/
+
+src/odin_ros_driver/log/
+src/odin_ros_driver/map/
+src/odin_ros_driver/config/calib.yaml
