@@ -52,15 +52,23 @@ def main() -> None:
 
     motor_manager = MotorManager(joints_cfg, serial_port)
     joy_proc = None
+    _cleaned_up = False
+
+    def _cleanup() -> None:
+        nonlocal _cleaned_up
+        if _cleaned_up:
+            return
+        _cleaned_up = True
+        motor_manager.shutdown()
+        if joy_proc is not None:
+            joy_proc.terminate()
+        rclpy.shutdown()
 
     # Signal handler: zero torque + exit on Ctrl+C
     def _sigint(sig, frame):
         ui.warn('\nCtrl+C — zeroing all motors and exiting.')
         motor_manager.zero_torque()
-        motor_manager.shutdown()
-        if joy_proc is not None:
-            joy_proc.terminate()
-        rclpy.shutdown()
+        _cleanup()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _sigint)
@@ -96,10 +104,7 @@ def main() -> None:
     except SystemExit as e:
         raise
     finally:
-        motor_manager.shutdown()
-        if joy_proc is not None:
-            joy_proc.terminate()
-        rclpy.shutdown()
+        _cleanup()
 
 
 if __name__ == '__main__':
