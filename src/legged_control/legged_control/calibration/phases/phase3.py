@@ -43,7 +43,7 @@ def _tune_kp(default_q: dict[str, float], ros_client,
     ui.info('Watch for vibration/oscillation. The script will auto-detect and stop.')
 
     kp = KP_START
-    last_stable_kp = KP_START
+    last_stable_kp = 0  # 0 = no stable step confirmed yet; safe fallback is zero torque
 
     while kp <= KP_MAX:
         pause_ctrl.check()
@@ -89,14 +89,20 @@ def _tune_kd(kp: float, default_q: dict[str, float], ros_client,
     kd = KD_START
     test_joint = _STEP_TEST_JOINT
 
+    if test_joint not in default_q:
+        ui.warn(f'{test_joint} not found in joints_cfg; skipping step test, keeping kd={kd}.')
+        return kd
+
     motor_manager.launch(kp=kp, kd=kd, targets=default_q)
     time.sleep(0.5)
 
     # Step: perturb then revert
+    pause_ctrl.check()
     step_target = dict(default_q)
     step_target[test_joint] = default_q[test_joint] + _STEP_SIZE
     ros_client.send_command(step_target)
     time.sleep(0.2)
+    pause_ctrl.check()
     ros_client.send_command(default_q)
 
     # Record response for 1 second
