@@ -88,10 +88,11 @@ def _setup_gamepad(config_path: str, ros_client) -> int:
     ui.info(f'Button {button_index} detected.')
 
     ui.info(f'Press button {button_index} again to confirm.')
-    confirmed = _wait_for_button_press(ros_client)
-
-    if confirmed != button_index:
-        ui.warn('Different button pressed. Using first button as ESTOP.')
+    while True:
+        confirmed = _wait_for_button_press(ros_client)
+        if confirmed == button_index:
+            break
+        ui.warn(f'Expected button {button_index} but got button {confirmed}. Try again.')
 
     ConfigIO(config_path).patch({'teleop': {'btn_emergency_stop': button_index}})
     ui.set_estop_label(f'[BTN{button_index}=ESTOP]')

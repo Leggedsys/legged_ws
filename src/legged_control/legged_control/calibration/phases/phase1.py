@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 
 from legged_control.calibration import ui
+from legged_control.calibration.config_io import ConfigIO
 
 
 DETECTION_ORDER = [
@@ -15,9 +16,9 @@ _WIGGLE_THRESHOLD = 0.3
 _MAX_RETRIES = 3
 
 
-def run(joints_cfg: list[dict], ros_client, motor_manager,
+def run(joints_cfg: list[dict], config_path: str, ros_client, motor_manager,
         pause_ctrl) -> dict[str, int]:
-    """Guide user through motor ID mapping. Returns {joint_name: motor_id}."""
+    """Guide user through motor ID mapping, writes to robot.yaml. Returns {joint_name: motor_id}."""
     ui.phase_banner(1, 'Motor ID Mapping (suspended)')
     ui.info('All motors will be set to zero-torque so you can wiggle joints freely.')
     input('Confirm robot is suspended off the ground, then press Enter.')
@@ -36,6 +37,21 @@ def run(joints_cfg: list[dict], ros_client, motor_manager,
         baseline = ros_client.get_joint_positions()
 
     _resolve_conflicts(joints_cfg, mapping, available_ids)
+
+    # Final gate: all 12 must be uniquely assigned before we can proceed
+    all_names = [j['name'] for j in joints_cfg]
+    gaps, dupes = validate_mapping(all_names, mapping)
+    if gaps or dupes:
+        ui.warn(f'Mapping incomplete after resolution — gaps={gaps}, dupes={dupes}')
+        ui.info('Continuing with partial mapping. Edit robot.yaml manually if needed.')
+    else:
+        ui.success('All 12 motor IDs verified unique.')
+
+    # Write to robot.yaml
+    io = ConfigIO(config_path)
+    for name, mid in mapping.items():
+        io.patch_joint(name, 'motor_id', mid)
+
     ui.success('Motor ID mapping complete.')
     _print_mapping(mapping)
     return mapping
@@ -54,14 +70,6 @@ def _detect_one_joint(joint_name: str, baseline: dict[str, float],
 
         detected_name, delta = result
         ui.info(f'  Detected: [{detected_name}] moved Δ={delta:.3f} rad')
-
-        if detected_name in mapping.values():
-            existing = [k for k, v in mapping.items() if v == detected_name]
-            ans = ui.prompt(
-                f'  motor corresponding to [{detected_name}] already assigned to {existing}. '
-                f'Overwrite or re-wiggle? [o/r]:')
-            if ans.lower() == 'r':
-                continue
 
         if ui.confirm(f'  Is this [{joint_name}]?'):
             motor_id = _next_available_id(available_ids)
@@ -110,7 +118,27 @@ def _resolve_conflicts(joints_cfg: list[dict], mapping: dict[str, int],
     if dupes:
         ui.warn(f'  Duplicate motor_ids: {dupes}')
 
-    ui.info('Resolve each unassigned joint manually.')
+    # Resolve duplicate motor_ids: keep one joint, reassign the others
+    for dup_id in dupes:
+        conflicting = [n for n, mid in mapping.items() if mid == dup_id]
+        ui.info(f'\n  motor_id={dup_id} is assigned to: {conflicting}')
+        ui.info(f'  Which joint should keep motor_id={dup_id}? Enter joint name:')
+        for name in conflicting:
+            ui.info(f'    {name}')
+        keeper = ui.prompt('  Keep [joint name]:')
+        to_reassign = [n for n in conflicting if n != keeper]
+        for name in to_reassign:
+            remaining = sorted(available_ids)
+            ui.info(f'  Available motor_ids for {name}: {remaining}')
+            raw = ui.prompt(f'  Enter motor_id for [{name}]:')
+            try:
+                mid = int(raw)
+                mapping[name] = mid
+                available_ids.discard(mid)
+            except ValueError:
+                ui.error(f'Invalid input; skipping {name}.')
+
+    # Resolve gaps (unassigned joints)
     for joint_name in gaps:
         remaining = sorted(available_ids)
         ui.info(f'  Available motor_ids: {remaining}')
