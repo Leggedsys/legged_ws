@@ -29,12 +29,18 @@ Applied globally throughout all phases:
 | Mechanism | Detail |
 |-----------|--------|
 | Joint limit clamp | Every outgoing command is clamped to `q_min`/`q_max` before sending |
-| Emergency stop | Ctrl+C → signal handler sends `kp=0, kd=0, tau=0` to all motors, then exits |
+| Ctrl+C | Signal handler sends `kp=0, kd=0, tau=0` to all motors, then exits |
+| Gamepad emergency stop | Dedicated button (configured in Phase 0) → zero torque + pause |
+| Pause behavior | After emergency stop: motors hold zero torque; prompt "Continue? [y/n]". `y` resumes current phase from last checkpoint; `n` exits cleanly |
 | Oscillation detection | If a joint's velocity sign reverses >3 times/sec → kp halved automatically |
 | kp hard cap | Script refuses to raise kp above 40 under any circumstances |
 | kd hard cap | Script refuses to raise kd above 2.0 |
 
-## Phase 0 — Environment Check
+The gamepad emergency stop button is monitored in a **background thread** from the
+end of Phase 0 onwards. The bound button name is shown on every prompt line,
+e.g. `[LB=ESTOP]`.
+
+## Phase 0 — Environment Check + Gamepad Setup
 
 Runs automatically on startup. Checks:
 
@@ -44,6 +50,18 @@ Runs automatically on startup. Checks:
 4. Required Python packages available (`rclpy`, `ruamel.yaml`)
 
 Any failure prints a specific fix instruction and exits immediately.
+
+### Gamepad initialization (after env checks pass)
+
+5. Detect `/dev/input/js0`; if absent, warn and offer to continue keyboard-only
+   (Ctrl+C remains the only emergency stop in that case)
+6. Start `joy_node` subprocess
+7. Display live button input: "Press the button you want as EMERGENCY STOP"
+8. Record first button press → `button_index`
+9. Confirm: "Button X will be EMERGENCY STOP. Press it again to confirm."
+10. Write `teleop.btn_emergency_stop: X` to `robot.yaml`
+11. Start background ESTOP listener thread
+12. Display: "✓ Emergency stop armed on button X. Press it any time to pause."
 
 ## Phase 1 — Suspended · Motor ID Mapping
 
