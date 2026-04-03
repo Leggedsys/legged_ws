@@ -24,7 +24,14 @@ def run(joints_cfg: list[dict], config_path: str,
         input('\nAdjust pose, then press Enter to sample...')
         pause_ctrl.check()
 
-        default_q = _sample(ros_client, duration=0.5, rate_hz=50.0)
+        expected_names = {j['name'] for j in joints_cfg}
+        default_q = _sample(ros_client, expected_names, duration=0.5, rate_hz=50.0)
+        if not default_q:
+            ui.warn('No joint data received from motors. Are the motor nodes running?')
+            continue
+        missing = expected_names - set(default_q)
+        if missing:
+            ui.warn(f'No data for joints: {sorted(missing)}. Their default_q will not be updated.')
         _print_table(default_q)
 
         if ui.confirm('Write these as default_q to robot.yaml?'):
@@ -34,15 +41,17 @@ def run(joints_cfg: list[dict], config_path: str,
         ui.info('Resampling...')
 
 
-def _sample(ros_client, duration: float, rate_hz: float) -> dict[str, float]:
-    """Continuously sample joint positions and return per-joint mean."""
+def _sample(ros_client, expected_names: set[str],
+            duration: float, rate_hz: float) -> dict[str, float]:
+    """Continuously sample joint positions for configured joints and return per-joint mean."""
     samples: dict[str, list[float]] = {}
-    n = int(duration * rate_hz)
+    n = max(1, int(duration * rate_hz))
     for _ in range(n):
         for name, val in ros_client.get_joint_positions().items():
-            samples.setdefault(name, []).append(val)
+            if name in expected_names:
+                samples.setdefault(name, []).append(val)
         time.sleep(1.0 / rate_hz)
-    return {name: sum(vals) / len(vals) for name, vals in samples.items()}
+    return {name: sum(vals) / len(vals) for name, vals in samples.items() if vals}
 
 
 def _print_table(default_q: dict[str, float]) -> None:

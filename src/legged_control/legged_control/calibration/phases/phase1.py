@@ -26,14 +26,19 @@ def run(joints_cfg: list[dict], config_path: str, ros_client, motor_manager,
     motor_manager.zero_torque()
     time.sleep(0.5)
 
+    # Build lookup: configured joint_name → configured motor_id
+    # These hardware motor_ids (bus addresses) are assumed correct even if
+    # joint names are wrong; Phase 1 corrects the name→id mapping.
+    initial_id_map: dict[str, int] = {j['name']: j['motor_id'] for j in joints_cfg}
+
     baseline = ros_client.get_joint_positions()
-    available_ids = set(range(12))
+    available_ids = set(j['motor_id'] for j in joints_cfg)
     mapping: dict[str, int] = {}
 
     for joint_name in DETECTION_ORDER:
         pause_ctrl.check()
         _detect_one_joint(joint_name, baseline, ros_client,
-                          available_ids, mapping, pause_ctrl)
+                          initial_id_map, available_ids, mapping, pause_ctrl)
         baseline = ros_client.get_joint_positions()
 
     _resolve_conflicts(joints_cfg, mapping, available_ids)
@@ -58,7 +63,8 @@ def run(joints_cfg: list[dict], config_path: str, ros_client, motor_manager,
 
 
 def _detect_one_joint(joint_name: str, baseline: dict[str, float],
-                      ros_client, available_ids: set[int],
+                      ros_client, initial_id_map: dict[str, int],
+                      available_ids: set[int],
                       mapping: dict[str, int], pause_ctrl) -> None:
     for attempt in range(_MAX_RETRIES):
         pause_ctrl.check()
@@ -69,13 +75,16 @@ def _detect_one_joint(joint_name: str, baseline: dict[str, float],
             continue
 
         detected_name, delta = result
-        ui.info(f'  Detected: [{detected_name}] moved Δ={delta:.3f} rad')
+        # Look up the hardware motor_id for the node that reported the movement.
+        # The node's initial joint_name (from its parameter at launch) tells us
+        # which physical bus address moved.
+        motor_id = initial_id_map.get(detected_name)
+        if motor_id is None:
+            ui.warn(f'  [{detected_name}] not found in initial config; skip.')
+            continue
+        ui.info(f'  Detected: [{detected_name}] (motor_id={motor_id}) moved Δ={delta:.3f} rad')
 
         if ui.confirm(f'  Is this [{joint_name}]?'):
-            motor_id = _next_available_id(available_ids)
-            if motor_id is None:
-                ui.warn('No available motor IDs left; mark as pending.')
-                return
             mapping[joint_name] = motor_id
             available_ids.discard(motor_id)
             ui.success(f'  {joint_name} → motor_id={motor_id}')
@@ -96,12 +105,6 @@ def _wait_for_wiggle(baseline: dict[str, float], ros_client,
             return result
         time.sleep(1.0 / poll_hz)
     return None
-
-
-def _next_available_id(available_ids: set[int]) -> int | None:
-    if not available_ids:
-        return None
-    return min(available_ids)
 
 
 def _resolve_conflicts(joints_cfg: list[dict], mapping: dict[str, int],
@@ -126,6 +129,9 @@ def _resolve_conflicts(joints_cfg: list[dict], mapping: dict[str, int],
         for name in conflicting:
             ui.info(f'    {name}')
         keeper = ui.prompt('  Keep [joint name]:')
+        if keeper not in conflicting:
+            ui.error(f'"{keeper}" is not in the conflicting set; skipping resolution for motor_id={dup_id}.')
+            continue
         to_reassign = [n for n in conflicting if n != keeper]
         for name in to_reassign:
             remaining = sorted(available_ids)
@@ -133,18 +139,25 @@ def _resolve_conflicts(joints_cfg: list[dict], mapping: dict[str, int],
             raw = ui.prompt(f'  Enter motor_id for [{name}]:')
             try:
                 mid = int(raw)
+                if mid not in available_ids:
+                    ui.error(f'motor_id={mid} is not in the available set {remaining}; skipping {name}.')
+                    continue
                 mapping[name] = mid
                 available_ids.discard(mid)
             except ValueError:
                 ui.error(f'Invalid input; skipping {name}.')
 
     # Resolve gaps (unassigned joints)
+    all_motor_ids = set(range(12))
     for joint_name in gaps:
-        remaining = sorted(available_ids)
+        remaining = sorted(all_motor_ids - set(mapping.values()))
         ui.info(f'  Available motor_ids: {remaining}')
         raw = ui.prompt(f'  Enter motor_id for [{joint_name}]:')
         try:
             mid = int(raw)
+            if mid not in all_motor_ids:
+                ui.error(f'motor_id={mid} out of range (0–11); skipping {joint_name}.')
+                continue
             mapping[joint_name] = mid
             available_ids.discard(mid)
         except ValueError:

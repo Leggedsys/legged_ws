@@ -9,11 +9,12 @@ from legged_control.calibration import ui
 from legged_control.calibration.config_io import ConfigIO
 
 
-def run(config_path: str, ros_client) -> int:
+def run(config_path: str, ros_client) -> tuple[int, 'subprocess.Popen | None']:
     """Run environment checks and bind ESTOP button.
 
-    Returns the button index bound as ESTOP, or -1 if no gamepad found
-    and user chose keyboard-only mode.
+    Returns (button_index, joy_proc) where:
+    - button_index is the bound ESTOP button index, or -1 for keyboard-only mode
+    - joy_proc is the joy_node subprocess (caller must terminate on exit), or None
 
     Raises SystemExit on any unrecoverable check failure.
     """
@@ -71,12 +72,12 @@ def _check_python_deps() -> None:
     ui.success('Python dependencies present.')
 
 
-def _setup_gamepad(config_path: str, ros_client) -> int:
+def _setup_gamepad(config_path: str, ros_client) -> tuple[int, 'subprocess.Popen | None']:
     if not os.path.exists('/dev/input/js0'):
         ui.warn('No gamepad found at /dev/input/js0.')
         if not ui.confirm('Continue in keyboard-only mode? (Ctrl+C = only ESTOP)'):
             raise SystemExit(0)
-        return -1
+        return -1, None
 
     joy_proc = subprocess.Popen(
         ['ros2', 'run', 'joy', 'joy_node'],
@@ -97,12 +98,11 @@ def _setup_gamepad(config_path: str, ros_client) -> int:
     ConfigIO(config_path).patch({'teleop': {'btn_emergency_stop': button_index}})
     ui.set_estop_label(f'[BTN{button_index}=ESTOP]')
     ui.success(f'Emergency stop armed on button {button_index}.')
-    return button_index
+    return button_index, joy_proc
 
 
 def _wait_for_button_press(ros_client, timeout: float = 30.0) -> int:
     """Block until any Joy button is pressed. Returns button index."""
-    import time
     deadline = time.time() + timeout
     prev_buttons: list[int] = []
     while time.time() < deadline:
