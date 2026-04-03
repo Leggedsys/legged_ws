@@ -52,6 +52,7 @@ def main() -> None:
 
     motor_manager = MotorManager(joints_cfg, serial_port)
     joy_proc = None
+    estop_monitor = None
     _cleaned_up = False
 
     def _cleanup() -> None:
@@ -59,6 +60,8 @@ def main() -> None:
         if _cleaned_up:
             return
         _cleaned_up = True
+        if estop_monitor is not None:
+            estop_monitor.stop()
         motor_manager.shutdown()
         if joy_proc is not None:
             joy_proc.terminate()
@@ -80,18 +83,21 @@ def main() -> None:
         btn_index, joy_proc = phase0.run(config_path, ros_client)
 
         if btn_index >= 0:
-            estop = EStopMonitor(ros_client, btn_index, pause_ctrl.trigger)
-            estop.start()
+            estop_monitor = EStopMonitor(ros_client, btn_index, pause_ctrl.trigger)
+            estop_monitor.start()
 
         # Phase 1: motor ID mapping (writes to robot.yaml internally)
         phase1.run(joints_cfg, config_path, ros_client, motor_manager, pause_ctrl)
-        # Reload joints_cfg with updated motor_ids
+        # Reload joints_cfg with updated motor_ids; reconstruct MotorManager so
+        # all subsequent launches use the corrected hardware motor_id assignments.
         joints_cfg = ConfigIO(config_path).read()['joints']
+        motor_manager = MotorManager(joints_cfg, serial_port)
 
         # Phase 2: default_q sampling
         phase2.run(joints_cfg, config_path, ros_client, motor_manager, pause_ctrl)
         # Reload default_q after write
         joints_cfg = ConfigIO(config_path).read()['joints']
+        motor_manager = MotorManager(joints_cfg, serial_port)
 
         # Phase 3: PD gain tuning (still suspended)
         phase3.run(joints_cfg, config_path, ros_client, motor_manager, pause_ctrl)
