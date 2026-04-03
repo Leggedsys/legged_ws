@@ -154,13 +154,13 @@ def suggest_kd_from_overshoot(current_kd: float, peak_overshoot: float,
                                step: float) -> float:
     """Heuristic kd suggestion based on peak overshoot fraction of step size.
 
-    overshoot_frac > 1.5 → increase kd by 50%
-    overshoot_frac < 0.5 → decrease kd by 30%
-    else                → keep current
+    overshoot_frac > 1.0 → increase kd by 50% (overshoot exceeds full step size)
+    overshoot_frac < 0.20 → decrease kd by 30% (less than 20% overshoot → overdamped)
+    else                  → keep current
     """
     frac = peak_overshoot / step if step > 0 else 0.0
-    if frac > 1.5:
+    if frac > 1.0:
         return round(min(current_kd * 1.5, KD_MAX), 3)
-    if frac < 0.5:
+    if frac < 0.20:
         return round(current_kd * 0.7, 3)
     return current_kd
