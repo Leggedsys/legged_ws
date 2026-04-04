@@ -4,13 +4,17 @@ locomotion.launch.py — full first-level RL locomotion stack.
 Starts:
   - 12 motor driver nodes (unitree_actuator_sdk)
   - joint_aggregator (legged_control)
+  - joy_node         (joy)
   - teleop_node      (legged_control)
   - policy_node      (legged_control)
+  - watchdog_node    (legged_control)
   - odin1 lidar      (odin_ros_driver, optional via launch arg)
 
 Launch args:
-  with_lidar   [true]   Start Odin1 lidar driver (needs USB connection)
-  model_path   ['']     Path to TorchScript .pt policy file; empty = stand-still
+  with_lidar      [true]              Start Odin1 lidar driver (needs USB connection)
+  model_path      ['']                Path to TorchScript .pt policy file; empty = stand-still
+  joy_device      [/dev/input/js0]    Joystick device path
+  watchdog_timeout [0.5]              Seconds of policy silence before fallback triggers
 """
 
 import os
@@ -48,9 +52,17 @@ def generate_launch_description():
     model_path_arg = DeclareLaunchArgument(
         'model_path', default_value='',
         description='TorchScript .pt policy file; empty = stand-still')
+    joy_device_arg = DeclareLaunchArgument(
+        'joy_device', default_value='/dev/input/js0',
+        description='Joystick device path')
+    watchdog_timeout_arg = DeclareLaunchArgument(
+        'watchdog_timeout', default_value='0.5',
+        description='Seconds of policy silence before fallback triggers')
 
-    with_lidar  = LaunchConfiguration('with_lidar')
-    model_path  = LaunchConfiguration('model_path')
+    with_lidar       = LaunchConfiguration('with_lidar')
+    model_path       = LaunchConfiguration('model_path')
+    joy_device       = LaunchConfiguration('joy_device')
+    watchdog_timeout = LaunchConfiguration('watchdog_timeout')
 
     # ---------- motor nodes (one per joint) ----------
     motor_nodes = []
@@ -88,6 +100,14 @@ def generate_launch_description():
         output='screen',
     )
 
+    joy = Node(
+        package='joy',
+        executable='joy_node',
+        name='joy_node',
+        parameters=[{'device': joy_device}],
+        output='screen',
+    )
+
     teleop = Node(
         package='legged_control',
         executable='teleop_node',
@@ -103,6 +123,14 @@ def generate_launch_description():
         output='screen',
     )
 
+    watchdog = Node(
+        package='legged_control',
+        executable='watchdog_node',
+        name='watchdog_node',
+        parameters=[{'timeout': watchdog_timeout}],
+        output='screen',
+    )
+
     # ---------- optional lidar ----------
     odin_launch_dir = os.path.join(
         get_package_share_directory('odin_ros_driver'), 'launch_ROS2')
@@ -115,9 +143,13 @@ def generate_launch_description():
     return LaunchDescription([
         with_lidar_arg,
         model_path_arg,
+        joy_device_arg,
+        watchdog_timeout_arg,
         *motor_nodes,
         joint_aggregator,
+        joy,
         teleop,
         policy,
+        watchdog,
         lidar,
     ])

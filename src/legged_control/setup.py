@@ -19,6 +19,7 @@ setup(
             'joint_aggregator = legged_control.joint_aggregator:main',
             'teleop_node      = legged_control.teleop_node:main',
             'policy_node      = legged_control.policy_node:main',
+            'watchdog_node    = legged_control.watchdog_node:main',
         ],
     },
 )
