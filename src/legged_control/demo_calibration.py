@@ -215,34 +215,6 @@ def run_demo(phase_num: int, config_path: str) -> None:
         ui.warn('No gamepad found at /dev/input/js0.')
         ui.info('  [demo: skipping gamepad binding]')
 
-    elif phase_num == 1:
-        # Phase 1: interactive joint wiggle detection
-        # Pre-seed 3 joints as already moved so detection triggers quickly
-        from legged_control.calibration.phases import phase1
-
-        ui.phase_banner(1, 'Motor ID Mapping  [DEMO — wiggle simulated]')
-        ui.info('Joints will "auto-wiggle" after a short pause to simulate detection.')
-
-        # Monkey-patch _wait_for_wiggle to auto-trigger after 1 second
-        original_wait = phase1._wait_for_wiggle
-        def auto_wiggle(baseline, rc, pc, **kw):
-            time.sleep(0.8)
-            # Return the first joint in baseline that has moved significantly
-            import random
-            name = list(baseline.keys())[0] if baseline else 'FR_calf'
-            return name, 0.45
-        phase1._wait_for_wiggle = auto_wiggle
-
-        # Only do first 3 joints for brevity, then restore
-        original_order = phase1.DETECTION_ORDER
-        phase1.DETECTION_ORDER = original_order[:3]
-
-        try:
-            mapping = phase1.run(joints_cfg, config_path, ros_client, motor_mgr, pause_ctrl)
-        finally:
-            phase1._wait_for_wiggle = original_wait
-            phase1.DETECTION_ORDER = original_order
-
     elif phase_num == 2:
         from legged_control.calibration.phases import phase2
         phase2.run(joints_cfg, config_path, ros_client, motor_mgr, pause_ctrl)
@@ -263,10 +235,11 @@ def run_demo(phase_num: int, config_path: str) -> None:
         run_demo(4, config_path)
 
 
+
 def main():
     parser = argparse.ArgumentParser(description='Calibration UI demo (no ROS needed)')
     parser.add_argument('--phase', type=int, default=2,
-                        choices=[0, 1, 2, 3, 4],
+                        choices=[0, 2, 3, 4],
                         help='Which phase to demo (default: 2 = default_q sampling)')
     args = parser.parse_args()
 

@@ -20,7 +20,7 @@ from legged_control.calibration.config_io import ConfigIO
 from legged_control.calibration.ros_client import RosClient
 from legged_control.calibration.motor_manager import MotorManager
 from legged_control.calibration.estop import EStopMonitor, PauseController
-from legged_control.calibration.phases import phase0, phase1, phase2, phase3, phase4
+from legged_control.calibration.phases import phase0, phase2, phase3, phase4
 
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -85,13 +85,6 @@ def main() -> None:
         if btn_index >= 0:
             estop_monitor = EStopMonitor(ros_client, btn_index, pause_ctrl.trigger)
             estop_monitor.start()
-
-        # Phase 1: motor ID mapping (writes to robot.yaml internally)
-        phase1.run(joints_cfg, config_path, ros_client, motor_manager, pause_ctrl)
-        # Reload joints_cfg with updated motor_ids; reconstruct MotorManager so
-        # all subsequent launches use the corrected hardware motor_id assignments.
-        joints_cfg = ConfigIO(config_path).read()['joints']
-        motor_manager = MotorManager(joints_cfg, serial_port)
 
         # Phase 2: default_q sampling
         phase2.run(joints_cfg, config_path, ros_client, motor_manager, pause_ctrl)

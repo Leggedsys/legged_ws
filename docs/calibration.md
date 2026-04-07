@@ -39,7 +39,7 @@ python3 src/legged_control/scripts/calibrate.py
 python3 src/legged_control/scripts/calibrate.py --config /path/to/robot.yaml
 ```
 
-脚本会顺序执行五个阶段，每个阶段开始前都会等待你确认，中途按 **Ctrl+C** 或手柄急停键可以随时暂停。
+脚本会顺序执行四个阶段，每个阶段开始前都会等待你确认，中途按 **Ctrl+C** 或手柄急停键可以随时暂停。
 
 ---
 
@@ -61,28 +61,6 @@ python3 src/legged_control/scripts/calibrate.py --config /path/to/robot.yaml
 3. 按键编号写入 `robot.yaml`，此后所有阶段的提示行都会显示急停键名称
 
 若未检测到手柄，脚本进入**仅键盘模式**（Ctrl+C 是唯一急停方式）。
-
----
-
-### Phase 1 — 悬挂状态 · 电机 ID 映射
-
-**前提：机器狗悬挂在空中，四肢不着地。**
-
-所有电机设为零力矩（可自由转动）。脚本按以下顺序逐个确认关节：
-
-```
-小腿（calf）× 4 → 大腿（thigh）× 4 → 髋关节（hip）× 4
-```
-
-每个关节的流程：
-1. 脚本提示：「请大幅摆动你认为是 `[关节名]` 的关节」
-2. 自动检测哪个关节移动超过 0.3 rad
-3. 显示检测结果，等待你确认 `[y/n]`
-4. 确认后记录 `motor_id`，继续下一个
-
-若检测失败（超时或不确认），最多重试 3 次；仍失败则标记为「待手动解决」，Phase 1 结束时统一处理冲突。
-
-**输出：** `robot.yaml` 中每个关节的 `motor_id` 字段更新完毕。
 
 ---
 
@@ -214,7 +192,6 @@ python3 demo_calibration.py --phase 4
 
 | 字段 | 阶段 |
 |------|------|
-| `joints[*].motor_id` | Phase 1 |
 | `joints[*].default_q` | Phase 2 |
 | `control.kp` | Phase 3 / Phase 4 |
 | `control.kd` | Phase 3 / Phase 4 |
