@@ -15,6 +15,8 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'passive_monitor_node = legged_control.passive_monitor_node:main',
+        ],
     },
 )
