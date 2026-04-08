@@ -3,11 +3,14 @@ robot.launch.py — unified launch for all robot operating modes.
 
 Launch args:
   mode          [passive]           passive | stand | policy
+  legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
   serial_port   [from robot.yaml]   Override serial port for all motors
 
 Usage:
   ros2 launch legged_control robot.launch.py
   ros2 launch legged_control robot.launch.py mode:=stand
+  ros2 launch legged_control robot.launch.py legs:=FR
+  ros2 launch legged_control robot.launch.py legs:=FR,RL mode:=stand
   ros2 launch legged_control robot.launch.py mode:=passive serial_port:=/dev/ttyUSB1
 """
 
@@ -61,8 +64,25 @@ def _motor_nodes(joints: list, serial_port: str, motor_hz: float,
     ]
 
 
+_VALID_LEGS = {'FR', 'FL', 'RR', 'RL'}
+
+
+def _parse_legs(legs_arg: str) -> set:
+    if legs_arg.upper() == 'ALL':
+        return _VALID_LEGS
+    selected = {l.strip().upper() for l in legs_arg.split(',')}
+    invalid = selected - _VALID_LEGS
+    if invalid:
+        raise RuntimeError(
+            f"Unknown leg(s): {', '.join(sorted(invalid))}. "
+            f"Valid values: FR, FL, RR, RL, all"
+        )
+    return selected
+
+
 def _launch_setup(context, *args, **kwargs):
     mode        = LaunchConfiguration('mode').perform(context).lower()
+    legs_arg    = LaunchConfiguration('legs').perform(context)
     serial_port = LaunchConfiguration('serial_port').perform(context)
 
     cfg     = _load_config()
@@ -70,7 +90,10 @@ def _launch_setup(context, *args, **kwargs):
     if serial_port == _YAML_SENTINEL:
         serial_port = control['serial_port']
     motor_hz = float(control['motor_hz'])
-    joints   = cfg['joints']
+
+    active_legs = _parse_legs(legs_arg)
+    joints = [j for j in cfg['joints']
+              if j['name'].split('_')[0] in active_legs]
 
     if mode == 'passive':
         motors = _motor_nodes(joints, serial_port, motor_hz, kp=0.0, kd=0.0)
@@ -110,6 +133,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'mode', default_value='passive',
             description='Operating mode: passive | stand | policy',
+        ),
+        DeclareLaunchArgument(
+            'legs', default_value='all',
+            description='Legs to activate: all | FR | FL | RR | RL | comma-separated e.g. FR,FL',
         ),
         DeclareLaunchArgument(
             'serial_port', default_value=_YAML_SENTINEL,
