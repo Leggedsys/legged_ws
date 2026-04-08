@@ -17,6 +17,7 @@ setup(
     entry_points={
         'console_scripts': [
             'passive_monitor_node = legged_control.passive_monitor_node:main',
+            'stand_node           = legged_control.stand_node:main',
         ],
     },
 )
