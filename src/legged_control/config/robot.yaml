@@ -12,20 +12,20 @@ joints:
   - name: FR_hip
     motor_id: 0
     default_q:  0.0
-    q_min: -1.047   # -60 deg
-    q_max:  1.047   #  60 deg
+    q_min: 0
+    q_max:  6
 
   - name: FR_thigh
     motor_id: 1
     default_q:  0.8
-    q_min: -1.571   # -90 deg
-    q_max:  3.927   # 225 deg
+    q_min: -3
+    q_max:  20
 
   - name: FR_calf
     motor_id: 2
     default_q: -1.5
-    q_min: -2.723   # -156 deg
-    q_max: -0.837   #  -48 deg
+    q_min: 2
+    q_max: 70
 
   - name: FL_hip
     motor_id: 3

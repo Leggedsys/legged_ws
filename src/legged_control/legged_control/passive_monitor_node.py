@@ -57,7 +57,14 @@ class PassiveMonitorNode(Node):
                 self._make_cb(j['name']), 10,
             )
 
-        self._first = True
+        # Write directly to /dev/tty to bypass ros2 launch stdout capture
+        # (launch pipes stdout and prepends [node-N] to every line,
+        #  which breaks ANSI cursor control and multi-line overwrite)
+        try:
+            self._tty = open('/dev/tty', 'w')
+        except OSError:
+            self._tty = None
+
         self.create_timer(0.5, self._display)
         self.get_logger().info('Passive monitor ready — move joints by hand')
 
@@ -74,12 +81,11 @@ class PassiveMonitorNode(Node):
 
     def _display(self) -> None:
         text = _format_display(self._positions)
-        if self._first:
-            print(text, flush=True)
-            self._first = False
+        if self._tty:
+            self._tty.write(f'\033[2J\033[H{text}\n')
+            self._tty.flush()
         else:
-            # Move cursor up 4 lines and overwrite
-            print(f'\033[4A\033[J{text}', flush=True)
+            print(text, flush=True)
 
 
 def main() -> None:

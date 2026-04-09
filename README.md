@@ -1,4 +1,4 @@
-# Legged Robot — 从接线到站立
+# Legged Robot
 
 ## 前置
 
@@ -34,6 +34,7 @@ ros2 launch legged_control robot.launch.py legs:=FR
 ```
 
 对每个关节：
+
 1. 把关节拨到**机械限位**，记录角度 → 填入 `q_min` / `q_max`
 2. 把关节摆到**期望站姿位置**，记录角度 → 填入 `default_q`
 
