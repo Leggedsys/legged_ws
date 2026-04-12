@@ -41,8 +41,8 @@ ros2 launch legged_control robot.launch.py
 # Mode 2 — stand: hold default_q with PD gains (PID tuning)
 ros2 launch legged_control robot.launch.py mode:=stand
 
-# Override serial port (default comes from config/robot.yaml)
-ros2 launch legged_control robot.launch.py serial_port:=/dev/ttyUSB1
+# Override serial ports (default comes from config/robot.yaml)
+ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1
 ```
 
 ### Launch parameters
@@ -50,7 +50,8 @@ ros2 launch legged_control robot.launch.py serial_port:=/dev/ttyUSB1
 | Parameter | Default | Options |
 |-----------|---------|---------|
 | `mode` | `passive` | `passive`, `stand`, `policy` (not yet implemented) |
-| `serial_port` | from `robot.yaml` | any `/dev/ttyUSB*` path |
+| `serial_port_front` | from `robot.yaml` | serial port for FR/FL motors |
+| `serial_port_rear`  | from `robot.yaml` | serial port for RR/RL motors |
 
 ### Mode descriptions
 
@@ -128,7 +129,8 @@ joints:
   # ... 11 more joints
 
 control:
-  serial_port: /dev/ttyUSB0
+  serial_port_front: /dev/ttyUSB0   # FR, FL legs
+  serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
   kp: 20.0            # position gain
   kd: 0.5             # velocity damping gain
