@@ -12,6 +12,7 @@ Gain tuning at runtime without restart:
   ros2 param set /motor_bus_front kd 0.3
 """
 import os
+import time
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -93,6 +94,8 @@ class MotorBusNode(Node):
             for name in self._names
         ]
 
+        self._offsets = self._calibrate_offsets()
+
         self.create_subscription(
             JointState, '/joint_commands', self._on_joint_cmd, 10)
         self.add_on_set_parameters_callback(self._on_gains_changed)
@@ -105,6 +108,37 @@ class MotorBusNode(Node):
         self.get_logger().info(
             f'Motor bus ready — {len(joints)} joints on {serial_port}  '
             f'kp={kp}  kd={kd}')
+
+    def _calibrate_offsets(self, n_samples: int = 20) -> dict:
+        """Sample current positions at power-on and use them as zero reference.
+
+        Sends passive commands (kp=kd=0) and averages n_samples readings per
+        joint. All subsequent position readings and commands are relative to
+        this offset.
+        """
+        sdk = self._sdk
+        sums = {name: 0.0 for name in self._names}
+
+        self.get_logger().info('Calibrating zero offsets — keep robot still...')
+        for _ in range(n_samples):
+            for cmd, data, name in zip(self._cmds, self._datas, self._names):
+                data.motorType = sdk.MotorType.GO_M8010_6
+                cmd.motorType  = sdk.MotorType.GO_M8010_6
+                cmd.mode = sdk.queryMotorMode(
+                    sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+                cmd.kp = 0.0
+                cmd.kd = 0.0
+                cmd.q  = 0.0
+                cmd.dq = 0.0
+                cmd.tau = 0.0
+                self._serial.sendRecv(cmd, data)
+                sums[name] += float(data.q) / self._gear_ratios[name]
+            time.sleep(0.01)
+
+        offsets = {name: sums[name] / n_samples for name in self._names}
+        for name, off in offsets.items():
+            self.get_logger().info(f'  {name}: offset={off:.4f} rad')
+        return offsets
 
     def _load_config(self) -> dict:
         share = get_package_share_directory('legged_control')
@@ -135,9 +169,10 @@ class MotorBusNode(Node):
             cmd.motorType  = sdk.MotorType.GO_M8010_6
             cmd.mode = sdk.queryMotorMode(
                 sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+            offset = self._offsets[name]
             cmd.kp  = kp
             cmd.kd  = kd
-            cmd.q   = self._targets[name] * gr
+            cmd.q   = (self._targets[name] + offset) * gr
             cmd.dq  = 0.0
             cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
@@ -145,7 +180,7 @@ class MotorBusNode(Node):
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name     = [name]
-            msg.position = [float(data.q)  / gr]
+            msg.position = [float(data.q) / gr - offset]
             msg.velocity = [float(data.dq) / gr]
             msg.effort   = [float(data.tau)]
             pub.publish(msg)
