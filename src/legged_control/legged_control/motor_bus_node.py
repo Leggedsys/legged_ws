@@ -130,14 +130,13 @@ class MotorBusNode(Node):
             cmd.dq = 0.0
             self._serial.sendRecv(cmd, data)
 
-            if data.correct and data.motor_id == cmd.id:
-                msg = JointState()
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.name     = [name]
-                msg.position = [float(data.q)]
-                msg.velocity = [float(data.dq)]
-                msg.effort   = [float(data.tau)]
-                pub.publish(msg)
+            msg = JointState()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.name     = [name]
+            msg.position = [float(data.q)]
+            msg.velocity = [float(data.dq)]
+            msg.effort   = [float(data.tau)]
+            pub.publish(msg)
 
 
 def main() -> None:
