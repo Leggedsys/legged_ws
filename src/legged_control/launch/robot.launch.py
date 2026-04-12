@@ -24,13 +24,6 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-_NS_MAP = {
-    'FR_hip':   'fr/hip',   'FR_thigh': 'fr/thigh', 'FR_calf': 'fr/calf',
-    'FL_hip':   'fl/hip',   'FL_thigh': 'fl/thigh', 'FL_calf': 'fl/calf',
-    'RR_hip':   'rr/hip',   'RR_thigh': 'rr/thigh', 'RR_calf': 'rr/calf',
-    'RL_hip':   'rl/hip',   'RL_thigh': 'rl/thigh', 'RL_calf': 'rl/calf',
-}
-
 _YAML_SENTINEL = '__from_yaml__'
 
 

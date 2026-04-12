@@ -72,16 +72,16 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 
 ### `legged_control`
 - Build type: `ament_python`
-- Config: `config/robot.yaml` — joint limits, default angles, PD gains, serial port
+- Config: `config/robot.yaml` — joint limits, default angles, PD gains, serial ports
+- `motor_bus_node.py` — owns one serial port exclusively; cycles all assigned joints sequentially at 1000 Hz via `sendRecv`; validates `data.correct` and `data.motor_id`; publishes `/<ns>/joint_states` per joint. Two instances: `/motor_bus_front` (FR/FL, `serial_port_front`) and `/motor_bus_rear` (RR/RL, `serial_port_rear`). Runtime-tunable `kp`/`kd` parameters.
 - `passive_monitor_node.py` — subscribes to all 12 `/<ns>/joint_states`, prints positions at 2 Hz
-- `stand_node.py` — publishes `default_q` for all 12 joints at 50 Hz on `/joint_commands`
-- `launch/robot.launch.py` — single entry point, starts 12 motor nodes + mode-specific node
+- `stand_node.py` — publishes `default_q` for all 12 joints at 50 Hz on `/joint_commands`; broadcasts kp/kd updates to both bus nodes via `AsyncParametersClient`
+- `launch/robot.launch.py` — single entry point, starts 2 `motor_bus_node` instances (one per serial port) + mode-specific node
 
 ### `unitree_actuator_sdk`
 - Build type: `ament_python` with a C++ extension compiled via `setup.py`
 - At runtime, `sdk_loader.py` uses `ctypes` with `RTLD_GLOBAL` to load the platform-specific prebuilt SDK (`libUnitreeMotorSDK_Linux64.so` or `libUnitreeMotorSDK_Arm64.so`), then loads the compiled Python extension `_unitree_actuator_sdk`
-- `go_m8010_6_node.py` runs a 1000 Hz control loop; publishes `sensor_msgs/JointState` on `joint_states`, subscribes to `/joint_commands` and matches by `joint_name` parameter
-- Each node instance controls one motor
+- `go_m8010_6_node.py` — legacy single-motor node (1000 Hz loop, one motor per instance); kept in package but no longer used in `robot.launch.py` (replaced by `motor_bus_node`)
 
 ### `odin_ros_driver`
 - Build type: `ament_cmake`, C++17, links against prebuilt `liblydHostApi_amd.a` / `liblydHostApi_arm.a`
@@ -99,8 +99,8 @@ ros2 launch odin_ros_driver odin1_ros2.launch.py
 
 | Topic | Type | Source |
 |-------|------|--------|
-| `/<ns>/joint_states` | `sensor_msgs/JointState` | Motor driver (e.g. `/fr/hip/joint_states`) |
-| `/joint_commands` | `sensor_msgs/JointState` | `stand_node` → motor drivers |
+| `/<ns>/joint_states` | `sensor_msgs/JointState` | `motor_bus_node` (e.g. `/fr/hip/joint_states`) |
+| `/joint_commands` | `sensor_msgs/JointState` | `stand_node` → `motor_bus_node` instances |
 | `odin1/cloud_raw` | `sensor_msgs/PointCloud2` | LiDAR (raw, with reflectivity/confidence fields) |
 | `odin1/cloud_slam` | `sensor_msgs/PointCloud2` | LiDAR (SLAM cloud, RGB-colored) |
 | `odin1/imu` | `sensor_msgs/Imu` | LiDAR |
