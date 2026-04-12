@@ -10,7 +10,7 @@ Gain tuning — change kp/kd at runtime without restarting:
   ros2 param set /stand_node kp 5.0
   ros2 param set /stand_node kd 0.3
 
-The new values are immediately broadcast to all motor nodes via the
+The new values are immediately broadcast to both motor bus nodes via the
 ROS2 parameter service. No rebuild or relaunch required.
 
 No joystick input, no feedback subscription.
@@ -33,11 +33,6 @@ def _load_joint_defaults(joints_cfg: list) -> tuple:
     return names, defaults
 
 
-def _motor_node_name(joint_name: str) -> str:
-    """'FR_hip' → '/fr/hip/motor'"""
-    leg, joint = joint_name.split('_', 1)
-    return f'/{leg.lower()}/{joint.lower()}/motor'
-
 
 class StandNode(Node):
     def __init__(self) -> None:
@@ -55,11 +50,11 @@ class StandNode(Node):
         self.declare_parameter('kp', kp_init)
         self.declare_parameter('kd', kd_init)
 
-        # One async parameter client per motor node.
+        # One async parameter client per bus node.
         # set_parameters calls are fire-and-forget; absent nodes fail silently.
         self._gain_clients = [
-            AsyncParametersClient(self, _motor_node_name(j['name']))
-            for j in cfg['joints']
+            AsyncParametersClient(self, '/motor_bus_front'),
+            AsyncParametersClient(self, '/motor_bus_rear'),
         ]
 
         self._pub = self.create_publisher(JointState, '/joint_commands', 10)

@@ -1,4 +1,4 @@
-from legged_control.stand_node import _load_joint_defaults, _motor_node_name
+from legged_control.stand_node import _load_joint_defaults
 
 
 def test_load_joint_defaults_names():
@@ -36,13 +36,3 @@ def test_load_joint_defaults_12_joints():
     assert len(defaults) == 12
 
 
-def test_motor_node_name_hip():
-    assert _motor_node_name('FR_hip') == '/fr/hip/motor'
-
-
-def test_motor_node_name_calf():
-    assert _motor_node_name('RL_calf') == '/rl/calf/motor'
-
-
-def test_motor_node_name_thigh():
-    assert _motor_node_name('RR_thigh') == '/rr/thigh/motor'
