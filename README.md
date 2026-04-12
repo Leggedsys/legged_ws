@@ -78,8 +78,8 @@ ros2 param set /stand_node kd 0.3
 # 指定多条腿（逗号分隔）
 ros2 launch legged_control robot.launch.py legs:=FR,FL
 
-# 覆盖串口
-ros2 launch legged_control robot.launch.py serial_port:=/dev/ttyUSB1
+# 覆盖串口（前腿 FR/FL 用 serial_port_front，后腿 RR/RL 用 serial_port_rear）
+ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1
 
 # 查看所有 launch 参数
 ros2 launch legged_control robot.launch.py --show-args
