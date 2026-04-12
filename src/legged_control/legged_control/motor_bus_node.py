@@ -57,12 +57,15 @@ class MotorBusNode(Node):
 
         sdk = load_sdk()
         self._sdk = sdk
-        self._gear_ratio = sdk.queryGearRatio(sdk.MotorType.GO_M8010_6)
+        _sdk_ratio = sdk.queryGearRatio(sdk.MotorType.GO_M8010_6)
         serial_port = self.get_parameter('serial_port').value
         self._serial = sdk.SerialPort(serial_port)
 
         self._names = [j['name'] for j in joints]
         self._targets = {j['name']: float(j['default_q']) for j in joints}
+        self._gear_ratios = {
+            j['name']: float(j.get('gear_ratio', _sdk_ratio)) for j in joints
+        }
 
         self._cmds = []
         self._datas = []
@@ -126,6 +129,7 @@ class MotorBusNode(Node):
 
         for cmd, data, pub, name in zip(
                 self._cmds, self._datas, self._pubs, self._names):
+            gr = self._gear_ratios[name]
             # Re-set motorType/mode every tick — sendRecv may overwrite them
             data.motorType = sdk.MotorType.GO_M8010_6
             cmd.motorType  = sdk.MotorType.GO_M8010_6
@@ -133,7 +137,7 @@ class MotorBusNode(Node):
                 sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
             cmd.kp  = kp
             cmd.kd  = kd
-            cmd.q   = self._targets[name] * self._gear_ratio
+            cmd.q   = self._targets[name] * gr
             cmd.dq  = 0.0
             cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
@@ -141,8 +145,8 @@ class MotorBusNode(Node):
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name     = [name]
-            msg.position = [float(data.q)  / self._gear_ratio]
-            msg.velocity = [float(data.dq) / self._gear_ratio]
+            msg.position = [float(data.q)  / gr]
+            msg.velocity = [float(data.dq) / gr]
             msg.effort   = [float(data.tau)]
             pub.publish(msg)
 

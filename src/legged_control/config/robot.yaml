@@ -3,6 +3,9 @@
 # default_q: standing pose joint angles in radians.
 # Tune these values to match the actual robot's neutral standing posture.
 # q_min/q_max: joint limits (rad). Motors will be clamped to these before sending.
+# gear_ratio: total reduction ratio from joint to motor shaft (motor_gearbox × mechanical).
+#   motor_bus_node divides readings by gear_ratio and multiplies commands by gear_ratio.
+#   If omitted, falls back to sdk.queryGearRatio() (motor internal ratio only).
 #
 # PD gains are applied by the motor driver (not the policy):
 #   tau = kp * (target_q - q_actual) + kd * (0 - dq_actual)
