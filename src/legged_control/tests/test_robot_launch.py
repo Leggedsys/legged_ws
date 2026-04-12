@@ -4,7 +4,7 @@ import importlib.util, os
 _LAUNCH = os.path.join(os.path.dirname(__file__), '..', 'launch', 'robot.launch.py')
 _spec   = importlib.util.spec_from_file_location('robot_launch', os.path.abspath(_LAUNCH))
 _mod    = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)   # will fail — _leg_group doesn't exist yet
+_spec.loader.exec_module(_mod)
 _leg_group = _mod._leg_group
 
 
