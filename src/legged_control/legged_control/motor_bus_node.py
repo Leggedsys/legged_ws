@@ -46,7 +46,7 @@ class MotorBusNode(Node):
 
         # Deferred import: load_sdk requires the compiled SDK shared library
         # and is not needed for unit-testing pure helper functions.
-        from .sdk_loader import load_sdk  # noqa: PLC0415
+        from unitree_motor_ros2.sdk_loader import load_sdk  # noqa: PLC0415
 
         joint_names = self.get_parameter('joint_names').value
         cfg = self._load_config()
