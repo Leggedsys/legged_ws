@@ -4,14 +4,15 @@ robot.launch.py — unified launch for all robot operating modes.
 Launch args:
   mode          [passive]           passive | stand | policy
   legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
-  serial_port   [from robot.yaml]   Override serial port for all motors
+  serial_port_front   [from robot.yaml]   Override serial port for FR/FL motors
+  serial_port_rear    [from robot.yaml]   Override serial port for RR/RL motors
 
 Usage:
   ros2 launch legged_control robot.launch.py
   ros2 launch legged_control robot.launch.py mode:=stand
   ros2 launch legged_control robot.launch.py legs:=FR
   ros2 launch legged_control robot.launch.py legs:=FR,RL mode:=stand
-  ros2 launch legged_control robot.launch.py mode:=passive serial_port:=/dev/ttyUSB1
+  ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1
 """
 
 import os
@@ -39,8 +40,14 @@ def _load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def _motor_nodes(joints: list, serial_port: str, motor_hz: float,
+def _leg_group(joint_name: str) -> str:
+    """'FR_hip' → 'front',  'RR_hip' → 'rear'"""
+    return 'front' if joint_name.split('_')[0] in ('FR', 'FL') else 'rear'
+
+
+def _motor_nodes(joints: list, port_map: dict, motor_hz: float,
                  kp: float, kd: float) -> list:
+    """port_map = {'front': '/dev/ttyUSB0', 'rear': '/dev/ttyUSB1'}"""
     return [
         Node(
             package='unitree_actuator_sdk',
@@ -48,7 +55,7 @@ def _motor_nodes(joints: list, serial_port: str, motor_hz: float,
             namespace=_NS_MAP[j['name']],
             name='motor',
             parameters=[{
-                'serial_port': serial_port,
+                'serial_port': port_map[_leg_group(j['name'])],
                 'motor_id':    j['motor_id'],
                 'loop_hz':     motor_hz,
                 'joint_name':  j['name'],
@@ -81,14 +88,18 @@ def _parse_legs(legs_arg: str) -> set:
 
 
 def _launch_setup(context, *args, **kwargs):
-    mode        = LaunchConfiguration('mode').perform(context).lower()
-    legs_arg    = LaunchConfiguration('legs').perform(context)
-    serial_port = LaunchConfiguration('serial_port').perform(context)
+    mode     = LaunchConfiguration('mode').perform(context).lower()
+    legs_arg = LaunchConfiguration('legs').perform(context)
+    sp_front = LaunchConfiguration('serial_port_front').perform(context)
+    sp_rear  = LaunchConfiguration('serial_port_rear').perform(context)
 
     cfg     = _load_config()
     control = cfg['control']
-    if serial_port == _YAML_SENTINEL:
-        serial_port = control['serial_port']
+    if sp_front == _YAML_SENTINEL:
+        sp_front = control['serial_port_front']
+    if sp_rear == _YAML_SENTINEL:
+        sp_rear = control['serial_port_rear']
+    port_map = {'front': sp_front, 'rear': sp_rear}
     motor_hz = float(control['motor_hz'])
 
     active_legs = _parse_legs(legs_arg)
@@ -96,7 +107,7 @@ def _launch_setup(context, *args, **kwargs):
               if j['name'].split('_')[0] in active_legs]
 
     if mode == 'passive':
-        motors = _motor_nodes(joints, serial_port, motor_hz, kp=0.0, kd=0.0)
+        motors = _motor_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
         companion = Node(
             package='legged_control',
             executable='passive_monitor_node',
@@ -108,7 +119,7 @@ def _launch_setup(context, *args, **kwargs):
     if mode == 'stand':
         kp     = float(control['kp'])
         kd     = float(control['kd'])
-        motors = _motor_nodes(joints, serial_port, motor_hz, kp=kp, kd=kd)
+        motors = _motor_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
         companion = Node(
             package='legged_control',
             executable='stand_node',
@@ -139,8 +150,12 @@ def generate_launch_description():
             description='Legs to activate: all | FR | FL | RR | RL | comma-separated e.g. FR,FL',
         ),
         DeclareLaunchArgument(
-            'serial_port', default_value=_YAML_SENTINEL,
-            description='Serial port override (default: value from robot.yaml)',
+            'serial_port_front', default_value=_YAML_SENTINEL,
+            description='Serial port for front legs FR/FL (default: from robot.yaml)',
+        ),
+        DeclareLaunchArgument(
+            'serial_port_rear', default_value=_YAML_SENTINEL,
+            description='Serial port for rear legs RR/RL (default: from robot.yaml)',
         ),
         OpaqueFunction(function=_launch_setup),
     ])

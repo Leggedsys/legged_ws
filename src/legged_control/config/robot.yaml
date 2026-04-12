@@ -82,7 +82,8 @@ joints:
     q_max: -0.837
 
 control:
-  serial_port: /dev/ttyUSB0
+  serial_port_front: /dev/ttyUSB0   # FR, FL legs
+  serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
   policy_hz: 50.0
   kp: 20.0
