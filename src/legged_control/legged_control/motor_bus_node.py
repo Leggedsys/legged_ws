@@ -57,6 +57,7 @@ class MotorBusNode(Node):
 
         sdk = load_sdk()
         self._sdk = sdk
+        self._gear_ratio = sdk.queryGearRatio(sdk.MotorType.GO_M8010_6)
         serial_port = self.get_parameter('serial_port').value
         self._serial = sdk.SerialPort(serial_port)
 
@@ -132,7 +133,7 @@ class MotorBusNode(Node):
                 sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
             cmd.kp  = kp
             cmd.kd  = kd
-            cmd.q   = self._targets[name]
+            cmd.q   = self._targets[name] * self._gear_ratio
             cmd.dq  = 0.0
             cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
@@ -140,8 +141,8 @@ class MotorBusNode(Node):
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name     = [name]
-            msg.position = [float(data.q)]
-            msg.velocity = [float(data.dq)]
+            msg.position = [float(data.q)  / self._gear_ratio]
+            msg.velocity = [float(data.dq) / self._gear_ratio]
             msg.effort   = [float(data.tau)]
             pub.publish(msg)
 
