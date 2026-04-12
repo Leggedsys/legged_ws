@@ -121,13 +121,20 @@ class MotorBusNode(Node):
     def _tick(self) -> None:
         kp = self.get_parameter('kp').value
         kd = self.get_parameter('kd').value
+        sdk = self._sdk
 
         for cmd, data, pub, name in zip(
                 self._cmds, self._datas, self._pubs, self._names):
-            cmd.kp = kp
-            cmd.kd = kd
-            cmd.q  = self._targets[name]
-            cmd.dq = 0.0
+            # Re-set motorType/mode every tick — sendRecv may overwrite them
+            data.motorType = sdk.MotorType.GO_M8010_6
+            cmd.motorType  = sdk.MotorType.GO_M8010_6
+            cmd.mode = sdk.queryMotorMode(
+                sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+            cmd.kp  = kp
+            cmd.kd  = kd
+            cmd.q   = self._targets[name]
+            cmd.dq  = 0.0
+            cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
 
             msg = JointState()
