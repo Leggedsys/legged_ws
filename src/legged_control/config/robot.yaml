@@ -14,72 +14,84 @@ joints:
   # Canonical order for observation/action vectors (index 0-11)
   - name: FR_hip
     motor_id: 0
+    gear_ratio: 6.33
     default_q:  0.0
     q_min: 0
     q_max:  6
 
   - name: FR_thigh
     motor_id: 1
+    gear_ratio: 6.33
     default_q:  0.8
     q_min: -3
     q_max:  20
 
   - name: FR_calf
     motor_id: 2
+    gear_ratio: 6.33
     default_q: -1.5
     q_min: 2
     q_max: 70
 
   - name: FL_hip
     motor_id: 3
+    gear_ratio: 6.33
     default_q:  0.0
     q_min: -1.047
     q_max:  1.047
 
   - name: FL_thigh
     motor_id: 4
+    gear_ratio: 6.33
     default_q:  0.8
     q_min: -1.571
     q_max:  3.927
 
   - name: FL_calf
     motor_id: 5
+    gear_ratio: 6.33
     default_q: -1.5
     q_min: -2.723
     q_max: -0.837
 
   - name: RR_hip
     motor_id: 6
+    gear_ratio: 6.33
     default_q:  0.0
     q_min: -1.047
     q_max:  1.047
 
   - name: RR_thigh
     motor_id: 7
+    gear_ratio: 6.33
     default_q:  0.8
     q_min: -1.571
     q_max:  3.927
 
   - name: RR_calf
     motor_id: 8
+    gear_ratio: 6.33
     default_q: -1.5
     q_min: -2.723
     q_max: -0.837
 
   - name: RL_hip
     motor_id: 9
+    gear_ratio: 6.33
     default_q:  0.0
     q_min: -1.047
     q_max:  1.047
 
   - name: RL_thigh
     motor_id: 10
+    gear_ratio: 6.33
     default_q:  0.8
     q_min: -1.571
     q_max:  3.927
 
   - name: RL_calf
     motor_id: 11
+    gear_ratio: 6.33
     default_q: -1.5
     q_min: -2.723
     q_max: -0.837
