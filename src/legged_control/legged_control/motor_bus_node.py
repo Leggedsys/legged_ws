@@ -12,6 +12,7 @@ Gain tuning at runtime without restart:
   ros2 param set /motor_bus_front kd 0.3
 """
 import os
+import statistics
 import time
 
 import yaml
@@ -95,6 +96,8 @@ class MotorBusNode(Node):
         ]
 
         self._offsets = self._calibrate_offsets()
+        # Last known-good position per joint; initialised to zero (power-on pose)
+        self._last_pos = {name: 0.0 for name in self._names}
 
         self.create_subscription(
             JointState, '/joint_commands', self._on_joint_cmd, 10)
@@ -109,15 +112,15 @@ class MotorBusNode(Node):
             f'Motor bus ready — {len(joints)} joints on {serial_port}  '
             f'kp={kp}  kd={kd}')
 
-    def _calibrate_offsets(self, n_samples: int = 20) -> dict:
+    def _calibrate_offsets(self, n_samples: int = 50) -> dict:
         """Sample current positions at power-on and use them as zero reference.
 
-        Sends passive commands (kp=kd=0) and averages n_samples readings per
-        joint. All subsequent position readings and commands are relative to
-        this offset.
+        Sends passive commands (kp=kd=0) and collects n_samples readings per
+        joint. Uses the median to reject occasional garbage frames. All
+        subsequent position readings and commands are relative to this offset.
         """
         sdk = self._sdk
-        sums = {name: 0.0 for name in self._names}
+        samples: dict = {name: [] for name in self._names}
 
         self.get_logger().info('Calibrating zero offsets — keep robot still...')
         for _ in range(n_samples):
@@ -132,10 +135,10 @@ class MotorBusNode(Node):
                 cmd.dq = 0.0
                 cmd.tau = 0.0
                 self._serial.sendRecv(cmd, data)
-                sums[name] += float(data.q) / self._gear_ratios[name]
+                samples[name].append(float(data.q) / self._gear_ratios[name])
             time.sleep(0.01)
 
-        offsets = {name: sums[name] / n_samples for name in self._names}
+        offsets = {name: statistics.median(samples[name]) for name in self._names}
         for name, off in offsets.items():
             self.get_logger().info(f'  {name}: offset={off:.4f} rad')
         return offsets
@@ -177,10 +180,17 @@ class MotorBusNode(Node):
             cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
 
+            pos = float(data.q) / gr - offset
+            # Reject single-frame spikes: clamp to ±1.0 rad change per tick
+            if abs(pos - self._last_pos[name]) < 1.0:
+                self._last_pos[name] = pos
+            else:
+                pos = self._last_pos[name]
+
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.name     = [name]
-            msg.position = [float(data.q) / gr - offset]
+            msg.position = [pos]
             msg.velocity = [float(data.dq) / gr]
             msg.effort   = [float(data.tau)]
             pub.publish(msg)
