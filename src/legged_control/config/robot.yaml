@@ -1,0 +1,135 @@
+# Robot configuration for quadruped with 12 Unitree GO-M8010-6 motors.
+#
+# default_q: standing pose joint angles in radians.
+# Tune these values to match the actual robot's neutral standing posture.
+# q_min/q_max: joint limits (rad). Motors will be clamped to these before sending.
+# gear_ratio: total reduction ratio from joint to motor shaft (motor_gearbox × mechanical).
+#   motor_bus_node divides readings by gear_ratio and multiplies commands by gear_ratio.
+#   If omitted, falls back to sdk.queryGearRatio() (motor internal ratio only).
+#
+# PD gains are applied by the motor driver (not the policy):
+#   tau = kp * (target_q - q_actual) + kd * (0 - dq_actual)
+
+joints:
+  # Canonical order for observation/action vectors (index 0-11)
+  - name: FR_hip
+    motor_id: 0
+    gear_ratio: 6.33
+    default_q:  0.0
+    q_min: 0
+    q_max:  6
+
+  - name: FR_thigh
+    motor_id: 1
+    gear_ratio: 6.33
+    default_q:  0.8
+    q_min: -3
+    q_max:  20
+
+  - name: FR_calf
+    motor_id: 2
+    gear_ratio: 12.66
+    default_q: -1.5
+    q_min: 2
+    q_max: 70
+
+  - name: FL_hip
+    motor_id: 3
+    gear_ratio: 6.33
+    default_q:  0.0
+    q_min: -1.047
+    q_max:  1.047
+
+  - name: FL_thigh
+    motor_id: 4
+    gear_ratio: 6.33
+    default_q:  0.8
+    q_min: -1.571
+    q_max:  3.927
+
+  - name: FL_calf
+    motor_id: 5
+    gear_ratio: 12.66
+    default_q: -1.5
+    q_min: -2.723
+    q_max: -0.837
+
+  - name: RR_hip
+    motor_id: 6
+    gear_ratio: 6.33
+    default_q:  0.0
+    q_min: -1.047
+    q_max:  1.047
+
+  - name: RR_thigh
+    motor_id: 7
+    gear_ratio: 6.33
+    default_q:  0.8
+    q_min: -1.571
+    q_max:  3.927
+
+  - name: RR_calf
+    motor_id: 8
+    gear_ratio: 12.66
+    default_q: -1.5
+    q_min: -2.723
+    q_max: -0.837
+
+  - name: RL_hip
+    motor_id: 9
+    gear_ratio: 6.33
+    default_q:  0.0
+    q_min: -1.047
+    q_max:  1.047
+
+  - name: RL_thigh
+    motor_id: 10
+    gear_ratio: 6.33
+    default_q:  0.8
+    q_min: -1.571
+    q_max:  3.927
+
+  - name: RL_calf
+    motor_id: 11
+    gear_ratio: 12.66
+    default_q: -1.5
+    q_min: -2.723
+    q_max: -0.837
+
+control:
+  serial_port_front: /dev/ttyUSB0   # FR, FL legs
+  serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
+  motor_hz: 1000.0
+  policy_hz: 50.0
+  kp: 20.0
+  kd: 0.5
+  # Policy action is interpreted as delta from default_q, then scaled.
+  # target_q = default_q + action_scale * action
+  action_scale: 0.25
+
+teleop:
+  max_vx:  1.0   # m/s  forward/backward
+  max_vy:  0.5   # m/s  lateral
+  max_yaw: 1.0   # rad/s yaw rate
+  deadzone: 0.05  # joystick axis deadzone (fraction of full range)
+  # Axis mapping (standard gamepad layout):
+  #   axis_vx:  left stick vertical   (typically axis 1, inverted)
+  #   axis_vy:  left stick horizontal (typically axis 0, inverted)
+  #   axis_yaw: right stick horizontal (typically axis 3, inverted)
+  axis_vx:  1
+  axis_vy:  0
+  axis_yaw: 3
+  invert_vx:  true
+  invert_vy:  false
+  invert_yaw: true
+  # Emergency stop button index on gamepad.
+  # -1 = not configured; set automatically by calibrate.py during Phase 0.
+  btn_emergency_stop: -1
+
+policy:
+  # Path to TorchScript model file (.pt). Leave empty to use stand-still placeholder.
+  model_path: ''
+  # Observation normalization (mean and std for each of the 45 dims).
+  # Leave empty to use no normalization (raw values passed to model).
+  obs_mean: []
+  obs_std:  []

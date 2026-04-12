@@ -1,0 +1,206 @@
+"""
+motor_bus_node
+
+Manages all motors on a single RS485 serial bus. Cycles through every
+assigned joint sequentially in each tick — only one process ever holds
+the serial port, eliminating bus collisions.
+
+Two instances are started: motor_bus_front (FR/FL) and motor_bus_rear (RR/RL).
+
+Gain tuning at runtime without restart:
+  ros2 param set /motor_bus_front kp 5.0
+  ros2 param set /motor_bus_front kd 0.3
+"""
+import os
+import statistics
+import time
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+import rclpy
+from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
+from sensor_msgs.msg import JointState
+
+
+def _ns_from_joint_name(name: str) -> str:
+    """'FR_hip' -> 'fr/hip'"""
+    leg, joint = name.split('_', 1)
+    return f'{leg.lower()}/{joint.lower()}'
+
+
+def _filter_joints(all_joints: list, joint_names: list) -> list:
+    """Return joint dicts from all_joints whose 'name' is in joint_names,
+    preserving the order they appear in all_joints."""
+    name_set = set(joint_names)
+    return [j for j in all_joints if j['name'] in name_set]
+
+
+class MotorBusNode(Node):
+    def __init__(self) -> None:
+        super().__init__('motor_bus_node')
+
+        self.declare_parameter('serial_port', '/dev/ttyUSB0')
+        self.declare_parameter('joint_names', [''])
+        self.declare_parameter('kp', 20.0)
+        self.declare_parameter('kd', 0.5)
+        self.declare_parameter('loop_hz', 1000.0)
+
+        # Deferred import: load_sdk requires the compiled SDK shared library
+        # and is not needed for unit-testing pure helper functions.
+        from unitree_motor_ros2.sdk_loader import load_sdk  # noqa: PLC0415
+
+        joint_names = self.get_parameter('joint_names').value
+        cfg = self._load_config()
+        joints = _filter_joints(cfg['joints'], joint_names)
+        if not joints:
+            raise RuntimeError(
+                f'motor_bus_node: no joints found for names {joint_names}')
+
+        sdk = load_sdk()
+        self._sdk = sdk
+        _sdk_ratio = sdk.queryGearRatio(sdk.MotorType.GO_M8010_6)
+        serial_port = self.get_parameter('serial_port').value
+        self._serial = sdk.SerialPort(serial_port)
+
+        self._names = [j['name'] for j in joints]
+        self._targets = {j['name']: float(j['default_q']) for j in joints}
+        self._gear_ratios = {
+            j['name']: float(j.get('gear_ratio', _sdk_ratio)) for j in joints
+        }
+
+        self._cmds = []
+        self._datas = []
+        for j in joints:
+            cmd = sdk.MotorCmd()
+            cmd.motorType = sdk.MotorType.GO_M8010_6
+            cmd.mode = sdk.queryMotorMode(
+                sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+            cmd.id  = j['motor_id']
+            cmd.q   = float(j['default_q'])
+            cmd.dq  = 0.0
+            cmd.tau = 0.0
+            self._cmds.append(cmd)
+
+            data = sdk.MotorData()
+            data.motorType = sdk.MotorType.GO_M8010_6
+            self._datas.append(data)
+
+        self._pubs = [
+            self.create_publisher(
+                JointState,
+                f'/{_ns_from_joint_name(name)}/joint_states',
+                10,
+            )
+            for name in self._names
+        ]
+
+        self._offsets = self._calibrate_offsets()
+        # Last known-good position per joint; initialised to zero (power-on pose)
+        self._last_pos = {name: 0.0 for name in self._names}
+
+        self.create_subscription(
+            JointState, '/joint_commands', self._on_joint_cmd, 10)
+        self.add_on_set_parameters_callback(self._on_gains_changed)
+
+        loop_hz = self.get_parameter('loop_hz').value
+        self.create_timer(1.0 / loop_hz, self._tick)
+
+        kp = self.get_parameter('kp').value
+        kd = self.get_parameter('kd').value
+        self.get_logger().info(
+            f'Motor bus ready — {len(joints)} joints on {serial_port}  '
+            f'kp={kp}  kd={kd}')
+
+    def _calibrate_offsets(self, n_samples: int = 50) -> dict:
+        """Sample current positions at power-on and use them as zero reference.
+
+        Sends passive commands (kp=kd=0) and collects n_samples readings per
+        joint. Uses the median to reject occasional garbage frames. All
+        subsequent position readings and commands are relative to this offset.
+        """
+        sdk = self._sdk
+        samples: dict = {name: [] for name in self._names}
+
+        self.get_logger().info('Calibrating zero offsets — keep robot still...')
+        for _ in range(n_samples):
+            for cmd, data, name in zip(self._cmds, self._datas, self._names):
+                data.motorType = sdk.MotorType.GO_M8010_6
+                cmd.motorType  = sdk.MotorType.GO_M8010_6
+                cmd.mode = sdk.queryMotorMode(
+                    sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+                cmd.kp = 0.0
+                cmd.kd = 0.0
+                cmd.q  = 0.0
+                cmd.dq = 0.0
+                cmd.tau = 0.0
+                self._serial.sendRecv(cmd, data)
+                samples[name].append(float(data.q) / self._gear_ratios[name])
+            time.sleep(0.01)
+
+        offsets = {name: statistics.median(samples[name]) for name in self._names}
+        for name, off in offsets.items():
+            self.get_logger().info(f'  {name}: offset={off:.4f} rad')
+        return offsets
+
+    def _load_config(self) -> dict:
+        share = get_package_share_directory('legged_control')
+        with open(os.path.join(share, 'config', 'robot.yaml')) as f:
+            return yaml.safe_load(f)
+
+    def _on_joint_cmd(self, msg: JointState) -> None:
+        for name, pos in zip(msg.name, msg.position):
+            if name in self._targets:
+                self._targets[name] = float(pos)
+
+    def _on_gains_changed(self, params: list) -> SetParametersResult:
+        for p in params:
+            if p.name in ('kp', 'kd'):
+                self.get_logger().info(f'Gain updated: {p.name}={p.value}')
+        return SetParametersResult(successful=True)
+
+    def _tick(self) -> None:
+        kp = self.get_parameter('kp').value
+        kd = self.get_parameter('kd').value
+        sdk = self._sdk
+
+        for cmd, data, pub, name in zip(
+                self._cmds, self._datas, self._pubs, self._names):
+            gr = self._gear_ratios[name]
+            # Re-set motorType/mode every tick — sendRecv may overwrite them
+            data.motorType = sdk.MotorType.GO_M8010_6
+            cmd.motorType  = sdk.MotorType.GO_M8010_6
+            cmd.mode = sdk.queryMotorMode(
+                sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+            offset = self._offsets[name]
+            cmd.kp  = kp
+            cmd.kd  = kd
+            cmd.q   = (self._targets[name] + offset) * gr
+            cmd.dq  = 0.0
+            cmd.tau = 0.0
+            self._serial.sendRecv(cmd, data)
+
+            pos = float(data.q) / gr - offset
+            # Reject single-frame spikes: clamp to ±1.0 rad change per tick
+            if abs(pos - self._last_pos[name]) < 1.0:
+                self._last_pos[name] = pos
+            else:
+                pos = self._last_pos[name]
+
+            msg = JointState()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.name     = [name]
+            msg.position = [pos]
+            msg.velocity = [float(data.dq) / gr]
+            msg.effort   = [float(data.tau)]
+            pub.publish(msg)
+
+
+def main() -> None:
+    rclpy.init()
+    node = MotorBusNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
