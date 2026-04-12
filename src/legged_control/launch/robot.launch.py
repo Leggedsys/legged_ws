@@ -45,30 +45,32 @@ def _leg_group(joint_name: str) -> str:
     return 'front' if joint_name.split('_')[0] in ('FR', 'FL') else 'rear'
 
 
-def _motor_nodes(joints: list, port_map: dict, motor_hz: float,
-                 kp: float, kd: float) -> list:
-    """port_map = {'front': '/dev/ttyUSB0', 'rear': '/dev/ttyUSB1'}"""
-    return [
-        Node(
-            package='unitree_actuator_sdk',
-            executable='go_m8010_6_node',
-            namespace=_NS_MAP[j['name']],
-            name='motor',
+def _bus_nodes(joints: list, port_map: dict, motor_hz: float,
+               kp: float, kd: float) -> list:
+    """Start one motor_bus_node per non-empty leg group."""
+    groups = {
+        'front': ('motor_bus_front', port_map['front']),
+        'rear':  ('motor_bus_rear',  port_map['rear']),
+    }
+    nodes = []
+    for group, (node_name, port) in groups.items():
+        group_joints = [j for j in joints if _leg_group(j['name']) == group]
+        if not group_joints:
+            continue
+        nodes.append(Node(
+            package='legged_control',
+            executable='motor_bus_node',
+            name=node_name,
             parameters=[{
-                'serial_port': port_map[_leg_group(j['name'])],
-                'motor_id':    j['motor_id'],
-                'loop_hz':     motor_hz,
-                'joint_name':  j['name'],
-                'target_q':    float(j['default_q']),
-                'target_dq':   0.0,
-                'kp':          kp,
-                'kd':          kd,
-                'tau':         0.0,
+                'serial_port':  port,
+                'joint_names':  [j['name'] for j in group_joints],
+                'kp':           kp,
+                'kd':           kd,
+                'loop_hz':      motor_hz,
             }],
             output='log',
-        )
-        for j in joints
-    ]
+        ))
+    return nodes
 
 
 _VALID_LEGS = {'FR', 'FL', 'RR', 'RL'}
@@ -107,7 +109,7 @@ def _launch_setup(context, *args, **kwargs):
               if j['name'].split('_')[0] in active_legs]
 
     if mode == 'passive':
-        motors = _motor_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
         companion = Node(
             package='legged_control',
             executable='passive_monitor_node',
@@ -119,7 +121,7 @@ def _launch_setup(context, *args, **kwargs):
     if mode == 'stand':
         kp     = float(control['kp'])
         kd     = float(control['kd'])
-        motors = _motor_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
         companion = Node(
             package='legged_control',
             executable='stand_node',
