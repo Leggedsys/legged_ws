@@ -184,6 +184,7 @@ class PolicyNode(Node):
         self._dq_motor   = np.zeros(12, dtype=np.float32)
         self._last_imu_t  = None
         self._last_odom_t = None
+        self._last_joint_t = None
 
         self._joint_idx = {name: i for i, name in enumerate(JOINT_ORDER)}
 
@@ -224,11 +225,19 @@ class PolicyNode(Node):
             [msg.linear.x, msg.linear.y, msg.angular.z], dtype=np.float32)
 
     def _on_joint_states(self, msg: JointState) -> None:
+        if len(msg.velocity) != len(msg.name):
+            self.get_logger().warn(
+                f'policy_node: /joint_states_aggregated has {len(msg.name)} names '
+                f'but {len(msg.velocity)} velocity values — skipping velocity update',
+                throttle_duration_sec=5.0,
+            )
+            return
         for name, pos, vel in zip(msg.name, msg.position, msg.velocity):
             idx = self._joint_idx.get(name)
             if idx is not None:
                 self._q_motor[idx]  = float(pos)
                 self._dq_motor[idx] = float(vel)
+        self._last_joint_t = time.monotonic()
 
     # ── tick ─────────────────────────────────────────────────────────────────
 
@@ -239,9 +248,11 @@ class PolicyNode(Node):
         if (self._last_imu_t  is None or
                 now - self._last_imu_t  > self._SENSOR_TIMEOUT or
                 self._last_odom_t is None or
-                now - self._last_odom_t > self._SENSOR_TIMEOUT):
+                now - self._last_odom_t > self._SENSOR_TIMEOUT or
+                self._last_joint_t is None or
+                now - self._last_joint_t > self._SENSOR_TIMEOUT):
             self.get_logger().error(
-                'policy_node: LiDAR sensor timeout — /joint_commands suspended',
+                'policy_node: sensor timeout (IMU/odom/joints) — /joint_commands suspended',
                 throttle_duration_sec=2.0,
             )
             return

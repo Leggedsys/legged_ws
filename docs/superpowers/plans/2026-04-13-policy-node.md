@@ -500,8 +500,8 @@ def _build_joint_params(cfg: dict) -> tuple:
         directions    — +1 or -1 per joint
         zero_offsets  — static URDF frame offset (rad)
         default_q_urdf — standing pose in URDF frame (direction×default_q_motor + zero_offset)
-        q_mins        — joint lower limit (URDF frame, rad)
-        q_maxs        — joint upper limit (URDF frame, rad)
+        q_mins        — joint lower limit (motor frame, rad)
+        q_maxs        — joint upper limit (motor frame, rad)
         scales        — action scale (rad/unit) per joint
     """
     joint_map        = {j['name']: j for j in cfg['joints']}
