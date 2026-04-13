@@ -131,10 +131,23 @@ def _launch_setup(context, *args, **kwargs):
         ]
 
     if mode == 'policy':
-        raise RuntimeError(
-            "mode:=policy is not yet implemented. "
-            "Available modes: passive, stand"
-        )
+        kp     = float(control['kp'])
+        kd     = float(control['kd'])
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
+        return motors + [
+            Node(
+                package='legged_control',
+                executable='joint_aggregator',
+                name='joint_aggregator',
+                output='screen',
+            ),
+            Node(
+                package='legged_control',
+                executable='policy_node',
+                name='policy_node',
+                output='screen',
+            ),
+        ]
 
     raise RuntimeError(
         f"Unknown mode '{mode}'. Valid modes: passive, stand, policy"
