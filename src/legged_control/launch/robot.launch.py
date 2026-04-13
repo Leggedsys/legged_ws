@@ -115,13 +115,20 @@ def _launch_setup(context, *args, **kwargs):
         kp     = float(control['kp'])
         kd     = float(control['kd'])
         motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
-        companion = Node(
-            package='legged_control',
-            executable='stand_node',
-            name='stand_node',
-            output='screen',
-        )
-        return motors + [companion]
+        return motors + [
+            Node(
+                package='legged_control',
+                executable='stand_node',
+                name='stand_node',
+                output='screen',
+            ),
+            Node(
+                package='legged_control',
+                executable='passive_monitor_node',
+                name='passive_monitor_node',
+                output='screen',
+            ),
+        ]
 
     if mode == 'policy':
         raise RuntimeError(
