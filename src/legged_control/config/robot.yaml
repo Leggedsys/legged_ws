@@ -134,8 +134,9 @@ control:
   policy_hz: 50.0
   kp: 0.0
   kd: 0.2
-  # Policy action is interpreted as delta from default_q, then scaled.
-  # target_q = default_q + action_scale * action
+  # Policy action is interpreted as delta from default_q, then scaled per joint.
+  # target_q[i] = default_q[i] + action_scale[leg_group][joint_type] * action[i]
+  # leg_group: 'front' (FR/FL) or 'rear' (RR/RL); joint_type: 'hip', 'thigh', 'calf'
   action_scale:
     front:
       hip:   0.04
