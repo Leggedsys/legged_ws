@@ -136,7 +136,15 @@ control:
   kd: 0.2
   # Policy action is interpreted as delta from default_q, then scaled.
   # target_q = default_q + action_scale * action
-  action_scale: 0.25
+  action_scale:
+    front:
+      hip:   0.04
+      thigh: 0.05
+      calf:  0.03
+    rear:
+      hip:   0.05
+      thigh: 0.07
+      calf:  0.04
 
 teleop:
   max_vx:  1.0   # m/s  forward/backward
