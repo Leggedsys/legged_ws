@@ -21,8 +21,8 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
-from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue, SetParametersResult
+from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import JointState
 
 
@@ -38,10 +38,6 @@ class StandNode(Node):
     def __init__(self) -> None:
         super().__init__('stand_node')
 
-        # Deferred import: rclpy.parameter_client requires a full ROS2
-        # environment and is not needed for unit-testing pure helpers.
-        from rclpy.parameter_client import AsyncParametersClient
-
         cfg = self._load_config()
         self._names, self._default_q = _load_joint_defaults(cfg['joints'])
 
@@ -50,11 +46,10 @@ class StandNode(Node):
         self.declare_parameter('kp', kp_init)
         self.declare_parameter('kd', kd_init)
 
-        # One async parameter client per bus node.
-        # set_parameters calls are fire-and-forget; absent nodes fail silently.
+        # Service clients for pushing kp/kd to bus nodes (fire-and-forget).
         self._gain_clients = [
-            AsyncParametersClient(self, '/motor_bus_front'),
-            AsyncParametersClient(self, '/motor_bus_rear'),
+            self.create_client(SetParameters, '/motor_bus_front/set_parameters'),
+            self.create_client(SetParameters, '/motor_bus_rear/set_parameters'),
         ]
 
         self._pub = self.create_publisher(JointState, '/joint_commands', 10)
@@ -78,12 +73,16 @@ class StandNode(Node):
         if new_kp is not None or new_kd is not None:
             kp = new_kp if new_kp is not None else self.get_parameter('kp').value
             kd = new_kd if new_kd is not None else self.get_parameter('kd').value
-            gain_params = [
-                Parameter('kp', Parameter.Type.DOUBLE, kp),
-                Parameter('kd', Parameter.Type.DOUBLE, kd),
+            req = SetParameters.Request()
+            req.parameters = [
+                Parameter(name='kp', value=ParameterValue(
+                    type=ParameterType.PARAMETER_DOUBLE, double_value=float(kp))),
+                Parameter(name='kd', value=ParameterValue(
+                    type=ParameterType.PARAMETER_DOUBLE, double_value=float(kd))),
             ]
             for client in self._gain_clients:
-                client.set_parameters(gain_params)
+                if client.service_is_ready():
+                    client.call_async(req)
             self.get_logger().info(f'Gains updated → kp={kp}  kd={kd}')
 
         return SetParametersResult(successful=True)
