@@ -9,6 +9,13 @@
 #
 # PD gains are applied by the motor driver (not the policy):
 #   tau = kp * (target_q - q_actual) + kd * (0 - dq_actual)
+#
+# direction / zero_offset: URDF alignment (used by policy_node, NOT by motor_bus_node).
+#   q_urdf = direction * q_motor + zero_offset
+#   direction:   +1 if motor positive direction == URDF positive direction, -1 if reversed.
+#   zero_offset: static offset in URDF frame (rad); determined by hand measurement or URDF inspection.
+#   q_motor is the value published on /<ns>/joint_states (gear-ratio-corrected,
+#   power-on offset already subtracted by _calibrate_offsets).
 
 joints:
   # Canonical order for observation/action vectors (index 0-11)
@@ -16,93 +23,117 @@ joints:
     motor_id: 0
     gear_ratio: 6.33
     default_q:  0.0
-    q_min: 0
-    q_max:  6
+    q_min: -0.484
+    q_max:  0.521
+    direction:    1
+    zero_offset:  0.0
 
   - name: FR_thigh
     motor_id: 1
     gear_ratio: 6.33
-    default_q:  0.8
-    q_min: -3
-    q_max:  20
+    default_q:  0.0
+    q_min: -0.650
+    q_max:  3.156
+    direction:    1
+    zero_offset:  1.254
 
   - name: FR_calf
     motor_id: 2
     gear_ratio: 12.66
-    default_q: -1.5
-    q_min: 2
-    q_max: 70
+    default_q: 0.0
+    q_min: 0.000
+    q_max: 5.554
+    direction:    -1
+    zero_offset:  -1.221
 
   - name: FL_hip
     motor_id: 3
     gear_ratio: 6.33
     default_q:  0.0
-    q_min: -1.047
-    q_max:  1.047
+    q_min: -0.533
+    q_max:  0.467
+    direction:    1
+    zero_offset:  0.0
 
   - name: FL_thigh
     motor_id: 4
     gear_ratio: 6.33
-    default_q:  0.8
-    q_min: -1.571
-    q_max:  3.927
+    default_q:  0.0
+    q_min: -3.133
+    q_max: 0.663
+    direction:    1
+    zero_offset:  -1.254
 
   - name: FL_calf
     motor_id: 5
     gear_ratio: 12.66
-    default_q: -1.5
-    q_min: -2.723
-    q_max: -0.837
+    default_q: -0.0
+    q_min: -5.554
+    q_max: 0.000
+    direction:    -1
+    zero_offset:  1.221
 
   - name: RR_hip
     motor_id: 6
     gear_ratio: 6.33
     default_q:  0.0
-    q_min: -1.047
-    q_max:  1.047
+    q_min: -0.523
+    q_max:  0.489
+    direction:    1
+    zero_offset:  0.0
 
   - name: RR_thigh
     motor_id: 7
     gear_ratio: 6.33
-    default_q:  0.8
-    q_min: -1.571
-    q_max:  3.927
+    default_q:  0.0
+    q_min: -3.140
+    q_max:  0.656
+    direction:    1
+    zero_offset:  -1.254
 
   - name: RR_calf
     motor_id: 8
     gear_ratio: 12.66
-    default_q: -1.5
-    q_min: -2.723
-    q_max: -0.837
+    default_q: -0.0
+    q_min: -5.548
+    q_max: 0.000
+    direction:    -1
+    zero_offset:  1.221
 
   - name: RL_hip
     motor_id: 9
     gear_ratio: 6.33
     default_q:  0.0
-    q_min: -1.047
-    q_max:  1.047
+    q_min: -0.479
+    q_max:  0.524
+    direction:    1
+    zero_offset:  0.0
 
   - name: RL_thigh
     motor_id: 10
     gear_ratio: 6.33
-    default_q:  0.8
-    q_min: -1.571
-    q_max:  3.927
+    default_q:  0.0
+    q_min: -0.645
+    q_max:  3.151
+    direction:    1
+    zero_offset:  1.254
 
   - name: RL_calf
     motor_id: 11
     gear_ratio: 12.66
-    default_q: -1.5
-    q_min: -2.723
-    q_max: -0.837
+    default_q: 0.0
+    q_min: 0.000
+    q_max: 5.568
+    direction:    -1
+    zero_offset:  -1.221
 
 control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
   policy_hz: 50.0
-  kp: 20.0
-  kd: 0.5
+  kp: 0.0
+  kd: 0.2
   # Policy action is interpreted as delta from default_q, then scaled.
   # target_q = default_q + action_scale * action
   action_scale: 0.25

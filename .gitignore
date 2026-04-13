@@ -2,6 +2,9 @@ build/
 install/
 log/
 .cache/
+__pycache__/
+*.pyc
+*.pyo
 
 src/odin1_firmware_update_pack_0.10.0_20260209/
 
