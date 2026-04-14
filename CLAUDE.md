@@ -104,6 +104,9 @@ ros2 launch odin_ros_driver odin1_ros2.launch.py
 |-------|------|--------|
 | `/<ns>/joint_states` | `sensor_msgs/JointState` | `motor_bus_node` (e.g. `/fr/hip/joint_states`) |
 | `/joint_commands` | `sensor_msgs/JointState` | `stand_node` → `motor_bus_node` instances |
+| `/joint_states_aggregated` | `sensor_msgs/JointState` | `joint_aggregator` → `policy_node` |
+| `/joy` | `sensor_msgs/Joy` | `joy_node` (gamepad driver) |
+| `/cmd_vel` | `geometry_msgs/Twist` | `teleop_node` → `policy_node` |
 | `odin1/cloud_raw` | `sensor_msgs/PointCloud2` | LiDAR (raw, with reflectivity/confidence fields) |
 | `odin1/cloud_slam` | `sensor_msgs/PointCloud2` | LiDAR (SLAM cloud, RGB-colored) |
 | `odin1/imu` | `sensor_msgs/Imu` | LiDAR |
