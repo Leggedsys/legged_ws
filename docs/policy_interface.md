@@ -86,32 +86,30 @@ g_body = a - b + c
 
 ### 关节角偏差（obs[9:21]）
 
-`q_i - default_q_i`，其中 `default_q` 为校准后写入 `robot.yaml` 的站立姿态角。
+`q_i - default_q_i`，其中 `default_q` 为训练资产默认关节角（`DOG_URDF_CFG.init_state.joint_pos`），部署时应换算并写入 `robot.yaml`。
 
-关节顺序（固定，索引 0–11）：
+观测顺序（固定，索引 0–11）：
 
-| 索引 | 关节     | default_q (rad) | q_min   | q_max   |
-| ---- | -------- | --------------- | ------- | ------- |
-| 0    | FR_hip   | 0.0             | −1.047 | +1.047  |
-| 1    | FR_thigh | 0.8             | −1.571 | +3.927  |
-| 2    | FR_calf  | −1.5           | −2.723 | −0.837 |
-| 3    | FL_hip   | 0.0             | −1.047 | +1.047  |
-| 4    | FL_thigh | 0.8             | −1.571 | +3.927  |
-| 5    | FL_calf  | −1.5           | −2.723 | −0.837 |
-| 6    | RR_hip   | 0.0             | −1.047 | +1.047  |
-| 7    | RR_thigh | 0.8             | −1.571 | +3.927  |
-| 8    | RR_calf  | −1.5           | −2.723 | −0.837 |
-| 9    | RL_hip   | 0.0             | −1.047 | +1.047  |
-| 10   | RL_thigh | 0.8             | −1.571 | +3.927  |
-| 11   | RL_calf  | −1.5           | −2.723 | −0.837 |
+| 索引 | 关节     | default_q_urdf (rad) |
+| ---- | -------- | -------------------- |
+| 0    | FL_hip   | 0.14                 |
+| 1    | FR_hip   | -0.14                |
+| 2    | RL_hip   | 0.10                 |
+| 3    | RR_hip   | -0.10                |
+| 4    | FL_thigh | 0.34                 |
+| 5    | FR_thigh | 0.34                 |
+| 6    | RL_thigh | 0.46                 |
+| 7    | RR_thigh | 0.46                 |
+| 8    | FL_calf  | -0.72                |
+| 9    | FR_calf  | -0.72                |
+| 10   | RL_calf  | -0.82                |
+| 11   | RR_calf  | -0.82                |
 
-> `default_q` 的值会随真机校准结果微调。训练时可使用上表中的初始值；若真机校准后偏差超过 0.1 rad，建议以实测值重新训练或 fine-tune。
-
-**训练时**：仿真关节角减去相同 default_q 即可。关节顺序必须与上表一致。
+**训练时**：仿真关节角减去相同 default_q。`joint_pos` 和 `joint_vel` 都按上表顺序拼接。
 
 ### 关节角速度（obs[21:33]）
 
-来源：各电机节点发布的 `/*/joint_states`，经 `joint_aggregator` 聚合为 `/joint_states_aggregated`，顺序与上表相同，单位 rad/s。
+来源：各电机节点发布的 `/*/joint_states`，经 `joint_aggregator` 聚合为 `/joint_states_aggregated`，再在 `policy_node` 中转换到 URDF 坐标系。顺序与上表相同，单位 rad/s。
 
 **训练时**：直接读取仿真关节速度。注意仿真器可能存在速度噪声，与真机电机编码器噪声特性不同；训练时可适当添加白噪声（±0.01 rad/s 量级）提升鲁棒性。
 
@@ -119,28 +117,43 @@ g_body = a - b + c
 
 存储 `policy_node` 上一次的输出（训练空间的原始值，未经 action_scale 缩放）。首帧为全零。
 
+注意：`last_action` 在观测中的顺序与 `joint_pos/joint_vel` 相同：
+
+```text
+FL_hip, FR_hip, RL_hip, RR_hip,
+FL_thigh, FR_thigh, RL_thigh, RR_thigh,
+FL_calf, FR_calf, RL_calf, RR_calf
+```
+
 **训练时**：须在仿真环境中同样维护 `last_action` 状态，首帧置零。
 
 ---
 
 ## 动作向量（12 维）
 
-策略输出的 12 个值是各关节相对于 default_q 的**无量纲偏差**，部署时按如下方式转换为目标角：
+策略输出的 12 个值是各关节相对于 default_q 的**无量纲偏差**，`use_default_offset=True`。部署时按如下方式转换为目标角：
 
 ```
 target_q_i = clip(default_q_i + scale_i × a_i,  q_min_i,  q_max_i)
+```
+
+动作顺序（固定，索引 0–11）：
+
+```text
+FL_hip, FR_hip, FL_thigh, FR_thigh, FL_calf, FR_calf,
+RL_hip, RR_hip, RL_thigh, RR_thigh, RL_calf, RR_calf
 ```
 
 每个关节有独立的 scale（与训练侧 `JointPositionActionCfg.scale` 一致）：
 
 | 关节类型 | 腿组 | scale (rad/unit) |
 | -------- | ---- | ---------------- |
-| hip      | FR/FL（前腿） | 0.04 |
-| thigh    | FR/FL（前腿） | 0.05 |
-| calf     | FR/FL（前腿） | 0.03 |
-| hip      | RR/RL（后腿） | 0.05 |
-| thigh    | RR/RL（后腿） | 0.07 |
-| calf     | RR/RL（后腿） | 0.04 |
+| hip      | FR/FL（前腿） | 0.025 |
+| thigh    | FR/FL（前腿） | 0.035 |
+| calf     | FR/FL（前腿） | 0.020 |
+| hip      | RR/RL（后腿） | 0.030 |
+| thigh    | RR/RL（后腿） | 0.045 |
+| calf     | RR/RL（后腿） | 0.025 |
 
 其余参数（来自 `robot.yaml`）：
 
@@ -158,7 +171,7 @@ control:
 
 **训练时关键约束：**
 
-- 各关节 scale 须与上表完全一致（`use_default_offset=True`，基准为 `default_q`）
+- 各关节 scale 须与上表完全一致（`use_default_offset=True`，基准为训练资产默认关节角）
 - 仿真中须使用完全相同的 `kp`、`kd`、`q_min/q_max`
 - 若仿真器不支持电机级 PD，需在仿真侧以相同参数手动实现
 
@@ -244,11 +257,12 @@ std  = env_alg.obs_normalizer.running_var.sqrt().cpu().tolist()
 
 训练完成、导出模型前，确认以下参数与 `robot.yaml` **完全一致**：
 
-- [ ] 各关节 scale（hip前0.04/后0.05，thigh前0.05/后0.07，calf前0.03/后0.04）
-- [ ] `kp = 20.0`，`kd = 0.5`
+- [ ] 各关节 scale（hip前0.025/后0.03，thigh前0.035/后0.045，calf前0.02/后0.025）
+- [ ] `kp` / `kd` 与部署配置一致
 - [ ] 12 个关节的 `default_q`（核对校准后的实测值）
 - [ ] 12 个关节的 `q_min` / `q_max`
-- [ ] 关节顺序：FR_hip … RL_calf（索引 0–11）
+- [ ] 观测关节顺序：FL_hip, FR_hip, RL_hip, RR_hip, FL_thigh, FR_thigh, RL_thigh, RR_thigh, FL_calf, FR_calf, RL_calf, RR_calf
+- [ ] 动作关节顺序：FL_hip, FR_hip, FL_thigh, FR_thigh, FL_calf, FR_calf, RL_hip, RR_hip, RL_thigh, RR_thigh, RL_calf, RR_calf
 - [ ] 速度指令范围 vx ≤ 1.0，vy ≤ 0.5，yaw ≤ 1.0
 - [ ] 观测量顺序和维数恰好为 45
 - [ ] 动作维数恰好为 12

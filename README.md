@@ -110,7 +110,15 @@ source install/setup.bash
 ros2 launch legged_control robot.launch.py mode:=policy
 ```
 
-启动后自动运行：`motor_bus_node`（×2）、`joint_aggregator`、`joy_node`、`teleop_node`、`policy_node`。
+启动后自动运行：`motor_bus_node`（×2）、`joint_aggregator`、`joy_node`、`teleop_node`、`policy_node`、`policy_monitor_node`。
+
+终端会持续刷新一个 policy 状态面板，显示：
+
+- IMU / odom / joints / cmd 是否新鲜
+- 当前 `cmd_vel`
+- 当前角速度和 projected gravity
+- 每条腿相对 `default_q` 的平均偏差
+- 目标关节是否触发限位裁剪
 
 ### 手柄操作
 
@@ -135,7 +143,7 @@ ros2 launch legged_control robot.launch.py mode:=policy
 ## 常用选项
 
 ```bash
-# 指定多条腿（逗号分隔）
+# 指定多条腿（逗号分隔，仅 passive / stand 模式）
 ros2 launch legged_control robot.launch.py legs:=FR,FL
 
 # 覆盖串口（前腿 FR/FL 用 serial_port_front，后腿 RR/RL 用 serial_port_rear）
@@ -144,3 +152,5 @@ ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 seria
 # 查看所有 launch 参数
 ros2 launch legged_control robot.launch.py --show-args
 ```
+
+注意：`mode:=policy` 固定使用 12 关节输入输出契约，因此只能配合 `legs:=all` 启动。
