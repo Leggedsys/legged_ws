@@ -142,12 +142,6 @@ def _launch_setup(context, *args, **kwargs):
                 output='screen',
             ),
             Node(
-                package='legged_control',
-                executable='policy_node',
-                name='policy_node',
-                output='screen',
-            ),
-            Node(
                 package='joy',
                 executable='joy_node',
                 name='joy_node',
@@ -157,6 +151,12 @@ def _launch_setup(context, *args, **kwargs):
                 package='legged_control',
                 executable='teleop_node',
                 name='teleop_node',
+                output='screen',
+            ),
+            Node(
+                package='legged_control',
+                executable='policy_node',
+                name='policy_node',
                 output='screen',
             ),
         ]
