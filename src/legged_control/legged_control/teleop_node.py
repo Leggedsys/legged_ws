@@ -94,7 +94,7 @@ try:
                 dz   = self._deadzone
 
                 def _safe(idx: int, max_v: float, invert: bool) -> float:
-                    if idx >= len(axes):
+                    if idx < 0 or idx >= len(axes):
                         self.get_logger().warn(
                             f'Axis index {idx} out of range (axes has {len(axes)} elements)',
                             throttle_duration_sec=5.0,
@@ -108,13 +108,17 @@ try:
 
             self._pub.publish(twist)
 
-    def main(args=None):
-        rclpy.init(args=args)
-        node = TeleopNode()
-        rclpy.spin(node)
-        node.destroy_node()
-        rclpy.shutdown()
-
 except ImportError:
     # ROS2 not available; pure functions still work for testing
     pass
+
+
+def main(args=None):
+    import rclpy
+    rclpy.init(args=args)
+    node = TeleopNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
