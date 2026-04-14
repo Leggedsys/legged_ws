@@ -2,7 +2,7 @@
 robot.launch.py — unified launch for all robot operating modes.
 
 Launch args:
-  mode          [passive]           passive | stand | policy
+  mode          [position]          passive | stand | position | policy
   legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
   serial_port_front   [from robot.yaml]   Override serial port for FR/FL motors
   serial_port_rear    [from robot.yaml]   Override serial port for RR/RL motors
@@ -10,6 +10,7 @@ Launch args:
 Usage:
   ros2 launch legged_control robot.launch.py
   ros2 launch legged_control robot.launch.py mode:=stand
+  ros2 launch legged_control robot.launch.py mode:=position
   ros2 launch legged_control robot.launch.py legs:=FR
   ros2 launch legged_control robot.launch.py legs:=FR,RL mode:=stand
   ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1
@@ -134,6 +135,37 @@ def _launch_setup(context, *args, **kwargs):
             ),
         ]
 
+    if mode == "position":
+        kp = float(control["kp"])
+        kd = float(control["kd"])
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
+        return motors + [
+            Node(
+                package="joy",
+                executable="joy_node",
+                name="joy_node",
+                output="screen",
+            ),
+            Node(
+                package="legged_control",
+                executable="teleop_node",
+                name="teleop_node",
+                output="screen",
+            ),
+            Node(
+                package="legged_control",
+                executable="position_gait_node",
+                name="position_gait_node",
+                output="screen",
+            ),
+            Node(
+                package="legged_control",
+                executable="passive_monitor_node",
+                name="passive_monitor_node",
+                output="screen",
+            ),
+        ]
+
     if mode == "policy":
         if active_legs != _VALID_LEGS:
             raise RuntimeError(
@@ -175,7 +207,9 @@ def _launch_setup(context, *args, **kwargs):
             ),
         ]
 
-    raise RuntimeError(f"Unknown mode '{mode}'. Valid modes: passive, stand, policy")
+    raise RuntimeError(
+        f"Unknown mode '{mode}'. Valid modes: passive, stand, position, policy"
+    )
 
 
 def generate_launch_description():
@@ -183,8 +217,8 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "mode",
-                default_value="passive",
-                description="Operating mode: passive | stand | policy",
+                default_value="position",
+                description="Operating mode: passive | stand | position | policy",
             ),
             DeclareLaunchArgument(
                 "legs",

@@ -20,6 +20,7 @@ setup(
             "stand_node           = legged_control.stand_node:main",
             "motor_bus_node       = legged_control.motor_bus_node:main",
             "joint_aggregator     = legged_control.joint_aggregator:main",
+            "position_gait_node   = legged_control.position_gait_node:main",
             "policy_node          = legged_control.policy_node:main",
             "policy_monitor_node  = legged_control.policy_monitor_node:main",
             "teleop_node          = legged_control.teleop_node:main",

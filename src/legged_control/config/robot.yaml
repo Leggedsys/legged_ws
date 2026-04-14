@@ -147,6 +147,24 @@ control:
       thigh: 0.045
       calf:  0.025
 
+position_demo:
+  # Open-loop gait demo around the power-on zero pose.
+  # Use this mode only when the robot is powered on in the desired neutral pose.
+  loop_hz: 50.0
+  min_command: 0.05
+  base_frequency_hz: 0.8
+  frequency_scale_hz: 1.2
+  hip_amplitude: 0.10
+  thigh_amplitude: 0.16
+  calf_amplitude: 0.22
+  # Conservative joint-space safety limits around the power-on zero pose.
+  hip_min: -0.20
+  hip_max: 0.20
+  thigh_min: -0.52
+  thigh_max: 0.52
+  calf_min: -0.52
+  calf_max: 0.52
+
 teleop:
   max_vx:  1.0   # m/s  forward/backward
   max_vy:  0.5   # m/s  lateral

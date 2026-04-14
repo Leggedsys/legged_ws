@@ -1,8 +1,13 @@
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from legged_control.teleop_node import _apply_deadzone, _scale_axis
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from legged_control.teleop_node import (
+    _apply_deadzone,
+    _scale_axis,
+    _toggle_latched_estop,
+)
 
 
 class TestApplyDeadzone:
@@ -56,3 +61,25 @@ class TestScaleAxis:
 
     def test_negative_input_with_invert(self):
         assert abs(_scale_axis(-1.0, 0.05, 1.0, True) - 1.0) < 1e-9
+
+
+class TestToggleLatchedEstop:
+    def test_no_button_config_keeps_unlatched(self):
+        pressed, latched = _toggle_latched_estop(False, False, [1, 0], -1)
+        assert pressed is False
+        assert latched is False
+
+    def test_rising_edge_latches_estop(self):
+        pressed, latched = _toggle_latched_estop(False, False, [1, 0], 0)
+        assert pressed is True
+        assert latched is True
+
+    def test_holding_button_does_not_toggle_twice(self):
+        pressed, latched = _toggle_latched_estop(True, True, [1, 0], 0)
+        assert pressed is True
+        assert latched is True
+
+    def test_second_press_releases_latch(self):
+        pressed, latched = _toggle_latched_estop(False, True, [1, 0], 0)
+        assert pressed is True
+        assert latched is False
