@@ -66,7 +66,7 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 
 **`stand`** — Motors hold all joints at their `default_q` using PD gains from `robot.yaml`. Use this to tune `kp`/`kd`: edit `robot.yaml` and restart the launch.
 
-**`policy`** — Loads TorchScript model from `policy.model_path` (set in `robot.yaml`) and runs the locomotion policy at 50 Hz. Starts `joint_aggregator` (aggregates all 12 `/<ns>/joint_states` into `/joint_states_aggregated`) and `policy_node` (builds 45-dim observation → inference → publishes `/joint_commands`). Requires Odin1 LiDAR online (`/odin1/imu` and `/odin1/odometry`). Velocity commands come from `/cmd_vel` (zero if no publisher). Set `policy.model_path` in `robot.yaml` before launching.
+**`policy`** — Loads TorchScript model from `policy.model_path` (set in `robot.yaml`) and runs the locomotion policy at 50 Hz. Starts `joint_aggregator` (aggregates all 12 `/<ns>/joint_states` into `/joint_states_aggregated`) and `policy_node` (builds 45-dim observation → inference → publishes `/joint_commands`). Requires Odin1 LiDAR online (`/odin1/imu` and `/odin1/odometry`) and joint states live (`/joint_states_aggregated`); publishing stops if any of the three is silent >0.5 s. Velocity commands come from `/cmd_vel` (zero if no publisher). Set `policy.model_path` in `robot.yaml` before launching.
 
 ## Architecture
 
@@ -77,7 +77,7 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 - `passive_monitor_node.py` — subscribes to all 12 `/<ns>/joint_states`, prints positions at 2 Hz
 - `stand_node.py` — publishes `default_q` for all 12 joints at 50 Hz on `/joint_commands`; broadcasts kp/kd updates to both bus nodes via `AsyncParametersClient`
 - `joint_aggregator.py` — subscribes to all 12 `/<ns>/joint_states`, publishes `/joint_states_aggregated` in canonical joint order (motor frame, no coordinate conversion); triggers on every incoming message
-- `policy_node.py` — 50 Hz inference loop; converts motor→URDF frame, builds 45-dim obs, runs TorchScript model, decodes 12-dim action to motor-frame `/joint_commands`; stops if LiDAR silent >0.5 s
+- `policy_node.py` — 50 Hz inference loop; converts motor→URDF frame, builds 45-dim obs, runs TorchScript model, decodes 12-dim action to motor-frame `/joint_commands`; stops if IMU, odometry, or joint states silent >0.5 s
 - `launch/robot.launch.py` — single entry point, starts 2 `motor_bus_node` instances (one per serial port) + mode-specific node
 
 ### `unitree_actuator_sdk`
