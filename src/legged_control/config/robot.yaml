@@ -167,7 +167,7 @@ teleop:
   btn_emergency_stop: -1
 
 policy:
-  # Path to TorchScript model file (.pt). Leave empty to use stand-still placeholder.
+  # Path to TorchScript model file (.pt). Node will not start if empty — set before launching.
   model_path: ''
   # Observation normalization (mean and std for each of the 45 dims).
   # Leave empty to use no normalization (raw values passed to model).

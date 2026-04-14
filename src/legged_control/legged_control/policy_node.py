@@ -155,6 +155,10 @@ class PolicyNode(Node):
         obs_mean = policy_cfg.get('obs_mean', [])
         obs_std  = policy_cfg.get('obs_std',  [])
         if obs_mean and obs_std:
+            if len(obs_mean) != 45 or len(obs_std) != 45:
+                raise RuntimeError(
+                    f'policy_node: obs_mean and obs_std must each have 45 elements, '
+                    f'got obs_mean={len(obs_mean)} obs_std={len(obs_std)}')
             self._obs_mean = np.array(obs_mean, dtype=np.float32)
             self._obs_std  = np.array(obs_std,  dtype=np.float32)
         else:
@@ -169,8 +173,12 @@ class PolicyNode(Node):
                 'Set it to the path of your exported .pt file.')
         self._model = torch.jit.load(model_path, map_location='cpu')
         self._model.eval()
-        with torch.no_grad():                        # warm-up
-            self._model(torch.zeros(1, 45))
+        with torch.no_grad():                        # warm-up + shape check
+            _warmup_out = self._model(torch.zeros(1, 45))
+        if tuple(_warmup_out.shape) != (1, 12):
+            raise RuntimeError(
+                f'policy_node: model must output shape (1, 12), '
+                f'got {tuple(_warmup_out.shape)}')
 
         self._torch = torch   # keep reference for _tick
 
