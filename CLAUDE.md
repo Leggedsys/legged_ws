@@ -49,7 +49,7 @@ ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 seria
 
 | Parameter | Default | Options |
 |-----------|---------|---------|
-| `mode` | `passive` | `passive`, `stand`, `policy` (not yet implemented) |
+| `mode` | `passive` | `passive`, `stand`, `policy` |
 | `serial_port_front` | from `robot.yaml` | serial port for FR/FL motors |
 | `serial_port_rear`  | from `robot.yaml` | serial port for RR/RL motors |
 
@@ -66,7 +66,7 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 
 **`stand`** — Motors hold all joints at their `default_q` using PD gains from `robot.yaml`. Use this to tune `kp`/`kd`: edit `robot.yaml` and restart the launch.
 
-**`policy`** — Not yet implemented. Will run the learned locomotion policy.
+**`policy`** — Loads TorchScript model from `policy.model_path` (set in `robot.yaml`) and runs the locomotion policy at 50 Hz. Starts `joint_aggregator` (aggregates all 12 `/<ns>/joint_states` into `/joint_states_aggregated`) and `policy_node` (builds 45-dim observation → inference → publishes `/joint_commands`). Requires Odin1 LiDAR online (`/odin1/imu` and `/odin1/odometry`) and joint states live (`/joint_states_aggregated`); publishing stops if any of the three is silent >0.5 s. Velocity commands come from `/cmd_vel`, published by `teleop_node` (gamepad via `joy_node`); falls back to zero velocity if no gamepad is connected. Set `policy.model_path` in `robot.yaml` before launching.
 
 ## Architecture
 
@@ -76,6 +76,9 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 - `motor_bus_node.py` — owns one serial port exclusively; cycles all assigned joints sequentially at 1000 Hz via `sendRecv`; validates `data.correct` and `data.motor_id`; publishes `/<ns>/joint_states` per joint. Two instances: `/motor_bus_front` (FR/FL, `serial_port_front`) and `/motor_bus_rear` (RR/RL, `serial_port_rear`). Runtime-tunable `kp`/`kd` parameters.
 - `passive_monitor_node.py` — subscribes to all 12 `/<ns>/joint_states`, prints positions at 2 Hz
 - `stand_node.py` — publishes `default_q` for all 12 joints at 50 Hz on `/joint_commands`; broadcasts kp/kd updates to both bus nodes via `AsyncParametersClient`
+- `joint_aggregator.py` — subscribes to all 12 `/<ns>/joint_states`, publishes `/joint_states_aggregated` in canonical joint order (motor frame, no coordinate conversion); triggers on every incoming message
+- `policy_node.py` — 50 Hz inference loop; converts motor→URDF frame, builds 45-dim obs, runs TorchScript model, decodes 12-dim action to motor-frame `/joint_commands`; stops if IMU, odometry, or joint states silent >0.5 s
+- `teleop_node.py` — subscribes `/joy` (gamepad via `joy_node`); applies deadzone + scaling from `robot.yaml teleop` section; publishes `geometry_msgs/Twist` to `/cmd_vel` for `policy_node`. Auto-started in `policy` mode alongside `joy_node`. Run standalone: `ros2 run legged_control teleop_node`.
 - `launch/robot.launch.py` — single entry point, starts 2 `motor_bus_node` instances (one per serial port) + mode-specific node
 
 ### `unitree_actuator_sdk`
@@ -101,6 +104,9 @@ ros2 launch odin_ros_driver odin1_ros2.launch.py
 |-------|------|--------|
 | `/<ns>/joint_states` | `sensor_msgs/JointState` | `motor_bus_node` (e.g. `/fr/hip/joint_states`) |
 | `/joint_commands` | `sensor_msgs/JointState` | `stand_node` → `motor_bus_node` instances |
+| `/joint_states_aggregated` | `sensor_msgs/JointState` | `joint_aggregator` → `policy_node` |
+| `/joy` | `sensor_msgs/Joy` | `joy_node` (gamepad driver) |
+| `/cmd_vel` | `geometry_msgs/Twist` | `teleop_node` → `policy_node` |
 | `odin1/cloud_raw` | `sensor_msgs/PointCloud2` | LiDAR (raw, with reflectivity/confidence fields) |
 | `odin1/cloud_slam` | `sensor_msgs/PointCloud2` | LiDAR (SLAM cloud, RGB-colored) |
 | `odin1/imu` | `sensor_msgs/Imu` | LiDAR |
