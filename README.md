@@ -14,6 +14,18 @@
 
 ## 1. 快速使用
 
+### 1.0 远端拿到代码后先执行
+
+远端验证人员在第一次运行前，先执行下面三条：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select legged_control
+source install/setup.bash
+```
+
+如果代码或 `robot.yaml` 有更新，也先重新执行这三条再启动。
+
 ### 1.1 安装与编译
 
 首次使用前：
