@@ -32,6 +32,10 @@ class TestApplyDeadzone:
         # Exactly at boundary: (0.05-0.05)/(1-0.05) = 0.0, not a jump
         assert abs(_apply_deadzone(0.05, 0.05) - 0.0) < 1e-9
 
+    def test_deadzone_at_one_returns_zero(self):
+        # deadzone=1.0 means nothing can move; guard prevents division by zero
+        assert _apply_deadzone(1.0, 1.0) == 0.0
+
 
 class TestScaleAxis:
     def test_inside_deadzone_returns_zero(self):

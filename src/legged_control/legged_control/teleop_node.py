@@ -16,6 +16,8 @@ def _apply_deadzone(value: float, deadzone: float) -> float:
     Outside, linearly remaps so that the deadzone edge maps to 0
     and ±1 maps to ±1 (no discontinuity at the boundary).
     """
+    if deadzone >= 1.0:
+        return 0.0
     if abs(value) < deadzone:
         return 0.0
     sign = 1.0 if value > 0.0 else -1.0
