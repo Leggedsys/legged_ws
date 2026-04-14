@@ -147,6 +147,18 @@ def _launch_setup(context, *args, **kwargs):
                 name='policy_node',
                 output='screen',
             ),
+            Node(
+                package='joy',
+                executable='joy_node',
+                name='joy_node',
+                output='screen',
+            ),
+            Node(
+                package='legged_control',
+                executable='teleop_node',
+                name='teleop_node',
+                output='screen',
+            ),
         ]
 
     raise RuntimeError(
