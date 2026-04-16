@@ -1,4 +1,4 @@
-from legged_control.stand_node import _load_joint_defaults
+from legged_control.standup_node import _load_joint_defaults
 
 
 def test_load_joint_defaults_names():

@@ -10,6 +10,12 @@ Two instances are started: motor_bus_front (FR/FL) and motor_bus_rear (RR/RL).
 Gain tuning at runtime without restart:
   ros2 param set /motor_bus_front kp 5.0
   ros2 param set /motor_bus_front kd 0.3
+
+Graceful stop (Ctrl+C / any node shutdown):
+  When /joint_commands stops arriving, the bus holds the last target for
+  _ESTOP_HOLD seconds, then linearly fades kp to 0 over _ESTOP_FADE seconds.
+  kd is kept throughout so the descent is damped, not a free-fall.
+  The robot settles gently rather than collapsing instantly.
 """
 import os
 import statistics
@@ -21,6 +27,10 @@ import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import JointState
+
+
+_ESTOP_HOLD = 0.5   # seconds to hold last target after commands stop
+_ESTOP_FADE = 2.0   # seconds to fade kp from full to 0 after hold period
 
 
 def _ns_from_joint_name(name: str) -> str:
@@ -64,7 +74,15 @@ class MotorBusNode(Node):
         self._serial = sdk.SerialPort(serial_port)
 
         self._names = [j['name'] for j in joints]
-        self._targets = {j['name']: float(j['default_q']) for j in joints}
+        # _targets: latest position command received from /joint_commands (motor frame)
+        # _prev_targets: interpolation start point, snapshotted when each command arrives
+        # Both initialised to 0 (= power-on position after calibration).
+        self._targets      = {name: 0.0 for name in [j['name'] for j in joints]}
+        self._prev_targets = {name: 0.0 for name in [j['name'] for j in joints]}
+        self._cmd_time: float | None = None   # monotonic time of last /joint_commands
+        self._policy_dt: float = 0.02         # estimated command period (s), updated live
+        self._estop_logged: bool = False
+        self._estop_done_logged: bool = False
         self._gear_ratios = {
             j['name']: float(j.get('gear_ratio', _sdk_ratio)) for j in joints
         }
@@ -149,9 +167,33 @@ class MotorBusNode(Node):
             return yaml.safe_load(f)
 
     def _on_joint_cmd(self, msg: JointState) -> None:
+        now = time.monotonic()
+
+        if self._cmd_time is not None:
+            # Snapshot the current interpolated position as the new ramp start,
+            # so mid-ramp command updates don't cause discontinuities.
+            elapsed = now - self._cmd_time
+            alpha = min(elapsed / self._policy_dt, 1.0)
+            for name in self._names:
+                self._prev_targets[name] = (
+                    (1.0 - alpha) * self._prev_targets[name]
+                    + alpha * self._targets[name]
+                )
+            # Update period estimate from actual inter-command timing.
+            dt = now - self._cmd_time
+            if 0.005 < dt < 0.20:   # sanity-clamp: 5 Hz – 200 Hz
+                self._policy_dt = dt
+        else:
+            # First command ever: start ramp from wherever _targets currently is (= 0).
+            for name in self._names:
+                self._prev_targets[name] = self._targets[name]
+
         for name, pos in zip(msg.name, msg.position):
             if name in self._targets:
                 self._targets[name] = float(pos)
+        self._cmd_time = now
+        self._estop_logged = False
+        self._estop_done_logged = False
 
     def _on_gains_changed(self, params: list) -> SetParametersResult:
         for p in params:
@@ -160,9 +202,40 @@ class MotorBusNode(Node):
         return SetParametersResult(successful=True)
 
     def _tick(self) -> None:
-        kp = self.get_parameter('kp').value
-        kd = self.get_parameter('kd').value
+        now = time.monotonic()
+        kp  = self.get_parameter('kp').value
+        kd  = self.get_parameter('kd').value
         sdk = self._sdk
+
+        # Interpolation alpha: 0 at moment of last command, 1 one period later.
+        if self._cmd_time is None:
+            alpha = 1.0
+        else:
+            alpha = min((now - self._cmd_time) / self._policy_dt, 1.0)
+
+        # Graceful stop: fade kp to 0 when commands have been absent too long.
+        # kd is preserved so the descent is damped, not a free-fall.
+        if self._cmd_time is None:
+            effective_kp = kp
+            effective_kd = kd
+        else:
+            cmd_age = now - self._cmd_time
+            if cmd_age <= _ESTOP_HOLD:
+                effective_kp = kp
+                effective_kd = kd
+            else:
+                fade = min((cmd_age - _ESTOP_HOLD) / _ESTOP_FADE, 1.0)
+                effective_kp = kp * (1.0 - fade)
+                effective_kd = kd
+                if not self._estop_logged:
+                    self.get_logger().warn(
+                        f'[estop] /joint_commands lost — fading kp to 0 over '
+                        f'{_ESTOP_FADE:.1f}s'
+                    )
+                    self._estop_logged = True
+                if fade >= 1.0 and not self._estop_done_logged:
+                    self.get_logger().warn('[estop] kp=0 — motors passive')
+                    self._estop_done_logged = True
 
         for cmd, data, pub, name in zip(
                 self._cmds, self._datas, self._pubs, self._names):
@@ -173,10 +246,24 @@ class MotorBusNode(Node):
             cmd.mode = sdk.queryMotorMode(
                 sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
             offset = self._offsets[name]
-            cmd.kp  = kp
-            cmd.kd  = kd
-            cmd.q   = (self._targets[name] + offset) * gr
-            cmd.dq  = 0.0
+            cmd.kp  = effective_kp
+            cmd.kd  = effective_kd
+            q_interp = (
+                (1.0 - alpha) * self._prev_targets[name]
+                + alpha * self._targets[name]
+            )
+            # Velocity feedforward: derivative of the linear interpolation.
+            # Tells the motor the joint is expected to be moving, which helps
+            # overcome linkage static friction without relying on position error alone.
+            # Zero once the ramp is complete (alpha >= 1) to avoid drift.
+            if alpha < 1.0:
+                dq_interp = (
+                    (self._targets[name] - self._prev_targets[name]) / self._policy_dt
+                )
+            else:
+                dq_interp = 0.0
+            cmd.q   = (q_interp + offset) * gr
+            cmd.dq  = dq_interp * gr
             cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
 

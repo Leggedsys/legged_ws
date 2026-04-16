@@ -85,20 +85,20 @@ joints:
   - name: RR_thigh
     motor_id: 7
     gear_ratio: 6.33
-    default_q: -0.794
-    q_min: -3.140
-    q_max:  0.656
+    default_q:  1.714
+    q_min: -0.644
+    q_max:  3.155
     direction:    1
-    zero_offset:  1.254
+    zero_offset:  -1.254
 
   - name: RR_calf
     motor_id: 8
     gear_ratio: 12.66
-    default_q: -1.971
-    q_min: -5.548
-    q_max: 0.000
+    default_q: 3.611
+    q_min: 0.000
+    q_max: 5.538
     direction:    -1
-    zero_offset:  -2.791
+    zero_offset:  2.791
 
   - name: RL_hip
     motor_id: 9
@@ -112,20 +112,20 @@ joints:
   - name: RL_thigh
     motor_id: 10
     gear_ratio: 6.33
-    default_q:  1.714
-    q_min: -0.645
-    q_max:  3.151
+    default_q: -0.794
+    q_min: -3.143
+    q_max:  0.651
     direction:    1
-    zero_offset:  -1.254
+    zero_offset:  1.254
 
   - name: RL_calf
     motor_id: 11
     gear_ratio: 12.66
-    default_q: 3.611
-    q_min: 0.000
-    q_max: 5.568
+    default_q: -1.971
+    q_min: -5.544
+    q_max: 0.000
     direction:    -1
-    zero_offset:  2.791
+    zero_offset:  -2.791
 
 control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
@@ -166,9 +166,13 @@ teleop:
   # -1 = not configured; set automatically by calibrate.py during Phase 0.
   btn_emergency_stop: -1
 
+standup:
+  hold_duration: 2.0   # seconds to hold at 0 before ramping (let motors settle)
+  ramp_duration: 8.0   # seconds for 0 → default_q smooth-step ramp
+
 policy:
   # Path to TorchScript model file (.pt). Node will not start if empty — set before launching.
-  model_path: ''
+  model_path: '/home/grayerd/Desktop/Projects/rc/legged_ws/models/policy.pt'
   # Observation normalization (mean and std for each of the 45 dims).
   # Leave empty to use no normalization (raw values passed to model).
   obs_mean: []

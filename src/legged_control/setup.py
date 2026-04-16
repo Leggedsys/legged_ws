@@ -18,6 +18,7 @@ setup(
         "console_scripts": [
             "passive_monitor_node = legged_control.passive_monitor_node:main",
             "stand_node           = legged_control.stand_node:main",
+            "standup_node         = legged_control.standup_node:main",
             "motor_bus_node       = legged_control.motor_bus_node:main",
             "joint_aggregator     = legged_control.joint_aggregator:main",
             "policy_node          = legged_control.policy_node:main",

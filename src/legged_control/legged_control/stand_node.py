@@ -1,9 +1,9 @@
 """
 stand_node
 
-Publishes default_q for all 12 joints at 50 Hz on /joint_commands.
-Motors run with PD gains from robot.yaml, holding the robot in its
-default standing pose.
+Holds all 12 joints at 0 (power-on position) at 50 Hz on /joint_commands.
+Place the robot in the desired pose, power on, then launch stand mode —
+it will hold that pose. Use this to tune kp/kd.
 
 Gain tuning — change kp/kd at runtime without restarting:
 
@@ -26,12 +26,8 @@ from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import JointState
 
 
-def _load_joint_defaults(joints_cfg: list) -> tuple:
-    """Return (names, default_q_values) from joints config list."""
-    names    = [j['name'] for j in joints_cfg]
-    defaults = [float(j['default_q']) for j in joints_cfg]
-    return names, defaults
-
+def _load_joint_names(joints_cfg: list) -> list:
+    return [j['name'] for j in joints_cfg]
 
 
 class StandNode(Node):
@@ -39,7 +35,7 @@ class StandNode(Node):
         super().__init__('stand_node')
 
         cfg = self._load_config()
-        self._names, self._default_q = _load_joint_defaults(cfg['joints'])
+        self._names = _load_joint_names(cfg['joints'])
 
         kp_init = float(cfg['control']['kp'])
         kd_init = float(cfg['control']['kd'])
@@ -57,7 +53,7 @@ class StandNode(Node):
         self.add_on_set_parameters_callback(self._on_gains_changed)
 
         self.get_logger().info(
-            f'Stand node ready — {len(self._names)} joints at default_q  '
+            f'Stand node ready — holding {len(self._names)} joints at 0 (power-on position)  '
             f'kp={kp_init}  kd={kd_init}'
         )
 
@@ -91,7 +87,7 @@ class StandNode(Node):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name     = list(self._names)
-        msg.position = list(self._default_q)
+        msg.position = [0.0] * len(self._names)
         self._pub.publish(msg)
 
 

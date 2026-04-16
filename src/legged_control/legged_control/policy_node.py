@@ -2,7 +2,13 @@
 """
 policy_node
 
-Runs the learned locomotion policy at 50 Hz.
+Startup sequence then locomotion policy at 50 Hz.
+
+Phase 1  STANDUP — ramp all joints from 0 (power-on position) to default_q
+                   using a smooth-step curve.  No sensor requirement.
+Phase 2  WAIT    — hold at default_q until IMU, odometry, and joint states
+                   are all fresh (< 0.5 s old).
+Phase 3  RUN     — 50 Hz inference loop.
 
 Observation vector (45 dims, fixed order):
   obs[0:3]   base angular velocity (rad/s)       from /odin1/imu
@@ -17,8 +23,7 @@ Action vector (12 dims):
   Decoded to motor-frame target_q and published on /joint_commands.
   Clipping is applied in motor frame (q_min/q_max in robot.yaml are motor-frame values).
 
-Sensors: LiDAR (/odin1/imu, /odin1/odometry) must be live; if either is silent
-for >0.5 s the tick loop stops publishing and logs an error.
+Standup timing is configured under the `standup` key in robot.yaml.
 """
 
 import os
@@ -65,6 +70,17 @@ ACTION_JOINT_ORDER = [
     "RL_calf",
     "RR_calf",
 ]
+
+_PHASE_STANDUP = 'STANDUP'
+_PHASE_WAIT    = 'WAIT'
+_PHASE_RUN     = 'RUN'
+
+
+def _smoothstep(t: float) -> float:
+    """S-curve: maps t∈[0,1] → [0,1] with zero velocity at both endpoints."""
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
 
 _LEG_GROUP = {
     "FR": "front",
@@ -236,6 +252,21 @@ class PolicyNode(Node):
             self._action_scales,
         ) = _build_joint_params(cfg, ACTION_JOINT_ORDER)
 
+        # Standup phase config
+        standup_cfg = cfg.get('standup', {})
+        self._standup_hold = float(standup_cfg.get('hold_duration', 2.0))
+        self._standup_ramp = float(standup_cfg.get('ramp_duration', 8.0))
+
+        # Motor-frame default_q in ACTION order (used during standup output)
+        _joint_map = {j['name']: j for j in cfg['joints']}
+        self._action_default_q_motor = np.array(
+            [float(_joint_map[name]['default_q']) for name in ACTION_JOINT_ORDER],
+            dtype=np.float32,
+        )
+
+        self._phase: str = _PHASE_STANDUP
+        self._phase_start: float | None = None
+
         # Observation normalisation (optional)
         obs_mean = policy_cfg.get("obs_mean", [])
         obs_std = policy_cfg.get("obs_std", [])
@@ -299,8 +330,9 @@ class PolicyNode(Node):
         self.create_timer(1.0 / policy_hz, self._tick)
 
         self.get_logger().info(
-            f"Policy node ready — {policy_hz} Hz  "
-            f"model={model_path}  "
+            f"Policy node ready — standup hold={self._standup_hold:.1f}s "
+            f"ramp={self._standup_ramp:.1f}s → wait for sensors → "
+            f"{policy_hz} Hz inference  model={model_path}  "
             f"normalise={self._obs_mean is not None}"
         )
 
@@ -342,9 +374,62 @@ class PolicyNode(Node):
 
     # ── tick ─────────────────────────────────────────────────────────────────
 
+    def _publish_motor_targets(self, targets: np.ndarray) -> None:
+        out = JointState()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.name = list(ACTION_JOINT_ORDER)
+        out.position = targets.tolist()
+        self._pub.publish(out)
+
     def _tick(self) -> None:
         now = time.monotonic()
 
+        # ── Phase 1: STANDUP ──────────────────────────────────────────────────
+        if self._phase == _PHASE_STANDUP:
+            if self._phase_start is None:
+                self._phase_start = now
+            elapsed = now - self._phase_start
+
+            if elapsed < self._standup_hold:
+                targets = np.zeros(12, dtype=np.float32)
+            elif elapsed < self._standup_hold + self._standup_ramp:
+                t = (elapsed - self._standup_hold) / self._standup_ramp
+                targets = _smoothstep(t) * self._action_default_q_motor
+            else:
+                self._phase = _PHASE_WAIT
+                self._phase_start = now
+                self.get_logger().info(
+                    'policy_node: standup complete — holding default_q, waiting for sensors'
+                )
+                targets = self._action_default_q_motor.copy()
+
+            self._publish_motor_targets(targets)
+            return
+
+        # ── Phase 2: WAIT ─────────────────────────────────────────────────────
+        if self._phase == _PHASE_WAIT:
+            sensors_ready = (
+                self._last_imu_t is not None
+                and now - self._last_imu_t <= self._SENSOR_TIMEOUT
+                and self._last_odom_t is not None
+                and now - self._last_odom_t <= self._SENSOR_TIMEOUT
+                and self._last_joint_t is not None
+                and now - self._last_joint_t <= self._SENSOR_TIMEOUT
+            )
+            if sensors_ready:
+                self._phase = _PHASE_RUN
+                self._phase_start = now
+                self._last_action_action_order = np.zeros(12, dtype=np.float32)
+                self.get_logger().info('policy_node: sensors ready — starting inference')
+            else:
+                self.get_logger().info(
+                    'policy_node: waiting for sensors (IMU / odom / joints)…',
+                    throttle_duration_sec=2.0,
+                )
+            self._publish_motor_targets(self._action_default_q_motor)
+            return
+
+        # ── Phase 3: RUN ──────────────────────────────────────────────────────
         # LiDAR timeout guard
         if (
             self._last_imu_t is None
