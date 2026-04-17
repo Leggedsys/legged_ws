@@ -225,8 +225,11 @@ class GaitNode(Node):
         self.declare_parameter(
             "ramp_duration", float(standup_cfg.get("ramp_duration", 8.0))
         )
+        fk_stance_height = -sum(
+            self._nominal_feet[leg][2] for leg in _LEG_ORDER
+        ) / len(_LEG_ORDER)
         self.declare_parameter(
-            "stance_height", float(gait_cfg.get("stance_height", 0.28))
+            "stance_height", fk_stance_height
         )
         self.declare_parameter("step_height", float(gait_cfg.get("step_height", 0.06)))
         self.declare_parameter("gait_freq", float(gait_cfg.get("gait_freq", 2.0)))
@@ -290,8 +293,15 @@ class GaitNode(Node):
         self.add_on_set_parameters_callback(self._on_gains_changed)
         self.create_timer(self._dt, self._tick)
 
+        yaml_stance = float(gait_cfg.get("stance_height", 0.28))
+        if abs(fk_stance_height - yaml_stance) > 0.005:
+            self.get_logger().warn(
+                f"[gait] stance_height in yaml ({yaml_stance:.4f} m) differs from "
+                f"default_q FK ({fk_stance_height:.4f} m); using FK value"
+            )
         self.get_logger().info(
-            f"gait_node ready — position_control at {self._loop_hz:.1f} Hz  kp={kp_init}  kd={kd_init}"
+            f"gait_node ready — position_control at {self._loop_hz:.1f} Hz  "
+            f"kp={kp_init}  kd={kd_init}  stance_height={fk_stance_height:.4f} m"
         )
         self.get_logger().info(
             "[gait] waiting for fresh /cmd_vel before enabling torque and starting standup"
