@@ -140,7 +140,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "spawn_roll",
-                default_value="3.14159",
+                default_value="0.0",
                 description="Initial robot roll in radians",
             ),
             DeclareLaunchArgument(
