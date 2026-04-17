@@ -7,7 +7,7 @@
 #   motor_bus_node divides readings by gear_ratio and multiplies commands by gear_ratio.
 #   If omitted, falls back to sdk.queryGearRatio() (motor internal ratio only).
 #
-# PD gains are applied by the motor driver (not the policy):
+# PD gains are applied by the motor driver:
 #   tau = kp * (target_q - q_actual) + kd * (0 - dq_actual)
 #
 # direction / zero_offset: URDF alignment (used by kinematics/gait_node and simulation bridges, NOT by motor_bus_node).

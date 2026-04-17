@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ROS2 workspace for controlling a legged robot. Current packages:
 - `odin_ros_driver` — C++ driver for Odin1 LiDAR (supports both ROS1/ROS2)
 - `unitree_actuator_sdk` — Python ROS2 driver for Unitree GO-M8010-6 brushless motors (12 motors)
-- `legged_control` — Robot control stack: initialization, standing pose, and policy execution
+- `legged_control` — Robot control stack: initialization, standing pose, and position-control gait
 
 ## Build Commands
 

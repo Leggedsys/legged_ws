@@ -39,7 +39,7 @@ def _launch_setup(context, *args, **kwargs):
     rear_joints = [
         joint["name"] for joint in joints if joint["name"].split("_")[0] in ("RR", "RL")
     ]
-    loop_hz = float(cfg["control"].get("policy_hz", 50.0))
+    loop_hz = float(cfg["control"].get("gait_hz", 50.0))
     robot_description = _robot_description_from_urdf(
         LaunchConfiguration("urdf_path").perform(context)
     )

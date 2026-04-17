@@ -9,7 +9,7 @@ Published immediately whenever any joint receives a new message.
 Joint order matches robot.yaml joints list (FR_hip ... RL_calf, index 0-11).
 All values are in motor frame (no direction/zero_offset conversion).
 
-Effort field is intentionally not forwarded — downstream consumers (policy_node)
+Effort field is intentionally not forwarded — downstream consumers (gait_node)
 use only position and velocity.
 """
 
@@ -106,7 +106,7 @@ class JointAggregatorNode(Node):
         out.name = list(self._names)
         out.position = []
         out.velocity = []
-        # effort not forwarded — policy_node uses only position and velocity
+        # effort not forwarded — gait_node uses only position and velocity
 
         for name in self._names:
             entry = self._latest[name]

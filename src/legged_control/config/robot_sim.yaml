@@ -115,18 +115,9 @@ control:
   serial_port_front: /dev/ttyUSB0
   serial_port_rear: /dev/ttyUSB1
   motor_hz: 1000.0
-  policy_hz: 50.0
+  gait_hz: 50.0
   kp: 1.5
   kd: 0.2
-  action_scale:
-    front:
-      hip: 0.025
-      thigh: 0.035
-      calf: 0.02
-    rear:
-      hip: 0.03
-      thigh: 0.045
-      calf: 0.025
 
 standup:
   hold_duration: 2.0

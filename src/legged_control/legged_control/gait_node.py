@@ -258,7 +258,7 @@ class GaitNode(Node):
         )
         self.declare_parameter("skip_standup", False)
 
-        self._loop_hz = float(control_cfg.get("policy_hz", 50.0))
+        self._loop_hz = float(control_cfg.get("gait_hz", 50.0))
         self._dt = 1.0 / self._loop_hz
         self._phase = _PHASE_PASSIVE
         self._phase_start: float | None = None
