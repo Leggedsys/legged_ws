@@ -2,7 +2,7 @@
 robot.launch.py — unified launch for all robot operating modes.
 
 Launch args:
-  mode          [passive]           passive | stand | standup | policy
+  mode          [passive]           passive | stand | standup | policy | position_control
   legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
   serial_port_front   [from robot.yaml]   Override serial port for FR/FL motors
   serial_port_rear    [from robot.yaml]   Override serial port for RR/RL motors
@@ -142,14 +142,14 @@ def _launch_setup(context, *args, **kwargs):
         return motors + [
             Node(
                 package="legged_control",
-                executable="standup_node",
-                name="standup_node",
+                executable="joint_aggregator",
+                name="joint_aggregator",
                 output="screen",
             ),
             Node(
                 package="legged_control",
-                executable="passive_monitor_node",
-                name="passive_monitor_node",
+                executable="standup_node",
+                name="standup_node",
                 output="screen",
             ),
         ]
@@ -195,7 +195,44 @@ def _launch_setup(context, *args, **kwargs):
             ),
         ]
 
-    raise RuntimeError(f"Unknown mode '{mode}'. Valid modes: passive, stand, standup, policy")
+    if mode == "position_control":
+        if active_legs != _VALID_LEGS:
+            raise RuntimeError(
+                "mode:=position_control requires legs:=all because the gait controller uses a fixed 12-joint contract"
+            )
+        kp = float(control["kp"])
+        kd = float(control["kd"])
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
+        return motors + [
+            Node(
+                package="legged_control",
+                executable="joint_aggregator",
+                name="joint_aggregator",
+                output="screen",
+            ),
+            Node(
+                package="joy",
+                executable="joy_node",
+                name="joy_node",
+                output="screen",
+            ),
+            Node(
+                package="legged_control",
+                executable="teleop_node",
+                name="teleop_node",
+                output="screen",
+            ),
+            Node(
+                package="legged_control",
+                executable="gait_node",
+                name="gait_node",
+                output="screen",
+            ),
+        ]
+
+    raise RuntimeError(
+        f"Unknown mode '{mode}'. Valid modes: passive, stand, standup, policy, position_control"
+    )
 
 
 def generate_launch_description():
@@ -204,7 +241,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "mode",
                 default_value="passive",
-                description="Operating mode: passive | stand | policy",
+                description="Operating mode: passive | stand | standup | policy | position_control",
             ),
             DeclareLaunchArgument(
                 "legs",

@@ -2,6 +2,8 @@
 
 ## 前置
 
+更多位控说明见：`docs/position_control_usage.md`
+
 ```bash
 # 串口权限（只需一次，之后重新登录生效）
 sudo usermod -a -G dialout $USER

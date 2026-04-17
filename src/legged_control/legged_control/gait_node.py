@@ -1,0 +1,577 @@
+"""Position-control gait node using analytical IK."""
+
+from __future__ import annotations
+
+import math
+import os
+import time
+from collections import deque
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Twist
+import rclpy
+from rcl_interfaces.msg import (
+    Parameter,
+    ParameterType,
+    ParameterValue,
+    SetParametersResult,
+)
+from rcl_interfaces.srv import SetParameters
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
+
+from legged_control.kinematics import forward_kinematics, inverse_kinematics
+from legged_control.standup_node import _smoothstep
+
+
+_PHASE_STANDUP = "STANDUP"
+_PHASE_WAIT = "WAIT"
+_PHASE_TROT = "TROT"
+_PHASE_FAULT = "FAULT"
+_PHASE_PASSIVE = "PASSIVE"
+
+_HIP_POSITIONS = {
+    "FL": (0.1426, 0.04654, 0.0),
+    "FR": (0.1426, -0.04654, 0.0),
+    "RL": (-0.1426, 0.04654, 0.0),
+    "RR": (-0.1426, -0.04654, 0.0),
+}
+
+_PHASE_OFFSETS = {"FL": 0.0, "RR": 0.0, "FR": math.pi, "RL": math.pi}
+_LEG_ORDER = ("FL", "FR", "RL", "RR")
+
+
+def _command_with_timeout(
+    cmd_vel: tuple[float, float, float],
+    last_cmd_t: float | None,
+    now: float,
+    timeout: float,
+) -> tuple[float, float, float]:
+    if last_cmd_t is None or now - last_cmd_t > timeout:
+        return 0.0, 0.0, 0.0
+    return cmd_vel
+
+
+def _command_is_fresh(last_cmd_t: float | None, now: float, timeout: float) -> bool:
+    return last_cmd_t is not None and now - last_cmd_t <= timeout
+
+
+def _phase_is_stance(phase: float) -> bool:
+    return phase < math.pi
+
+
+def _is_effectively_zero_cmd(
+    cmd_vel: tuple[float, float, float], eps: float = 1e-6
+) -> bool:
+    return all(abs(value) <= eps for value in cmd_vel)
+
+
+def _body_to_hip(
+    leg: str, foot_body: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    hip_x, hip_y, hip_z = _HIP_POSITIONS[leg]
+    x, y, z = foot_body
+    return x - hip_x, y - hip_y, z - hip_z
+
+
+def _leg_stride(
+    nominal_foot: tuple[float, float],
+    leg: str,
+    cmd_vx: float,
+    cmd_vy: float,
+    cmd_yaw: float,
+    gait_freq: float,
+    max_stride_x: float,
+    max_stride_y: float,
+) -> tuple[float, float]:
+    x_nom, y_nom = nominal_foot
+    stride_x = cmd_vx / (2.0 * gait_freq)
+    stride_y = cmd_vy / (2.0 * gait_freq)
+
+    # Yaw command maps to tangential foot motion about the body center.
+    stride_x += (-cmd_yaw * y_nom) / (2.0 * gait_freq)
+    stride_y += (cmd_yaw * x_nom) / (2.0 * gait_freq)
+
+    stride_x = max(-max_stride_x, min(max_stride_x, stride_x))
+    stride_y = max(-max_stride_y, min(max_stride_y, stride_y))
+    return stride_x, stride_y
+
+
+def _foot_target(
+    nominal_foot: tuple[float, float, float],
+    leg: str,
+    phase: float,
+    stance_height: float,
+    step_height: float,
+    stride_x: float,
+    stride_y: float,
+) -> tuple[float, float, float]:
+    x_nom, y_nom, z_nom = nominal_foot
+    if _phase_is_stance(phase):
+        s = phase / math.pi
+        x = x_nom + (0.5 - s) * stride_x
+        y = y_nom + (0.5 - s) * stride_y
+        z = z_nom
+    else:
+        t = (phase - math.pi) / math.pi
+        x = x_nom + (t - 0.5) * stride_x
+        y = y_nom + (t - 0.5) * stride_y
+        z = z_nom + step_height * math.sin(math.pi * t)
+    return x, y, z
+
+
+def _motor_targets_from_urdf(
+    leg_joints: list[dict], q_urdf: tuple[float, float, float]
+) -> tuple[list[float], bool]:
+    targets = []
+    clipped = False
+    for joint_cfg, q_joint_urdf in zip(leg_joints, q_urdf):
+        q_motor = float(joint_cfg["direction"]) * (
+            float(q_joint_urdf) - float(joint_cfg["zero_offset"])
+        )
+        q_clipped = min(
+            max(q_motor, float(joint_cfg["q_min"])), float(joint_cfg["q_max"])
+        )
+        clipped = clipped or not math.isclose(q_motor, q_clipped, abs_tol=1e-9)
+        targets.append(q_clipped)
+    return targets, clipped
+
+
+def _clamp_cmd_vel(
+    cmd_vel: tuple[float, float, float],
+    max_vx: float,
+    max_vy: float,
+    max_yaw: float,
+) -> tuple[float, float, float]:
+    vx, vy, yaw = cmd_vel
+    return (
+        max(-max_vx, min(max_vx, vx)),
+        max(-max_vy, min(max_vy, vy)),
+        max(-max_yaw, min(max_yaw, yaw)),
+    )
+
+
+def _rate_limit_targets(
+    previous: list[float] | None, targets: list[float], max_delta: float
+) -> list[float]:
+    if previous is None:
+        return list(targets)
+    out = []
+    for prev, target in zip(previous, targets):
+        delta = target - prev
+        delta = max(-max_delta, min(max_delta, delta))
+        out.append(prev + delta)
+    return out
+
+
+def _blend_targets(a: list[float], b: list[float], alpha: float) -> list[float]:
+    alpha = max(0.0, min(1.0, alpha))
+    return [(1.0 - alpha) * x + alpha * y for x, y in zip(a, b)]
+
+
+class GaitNode(Node):
+    def __init__(self) -> None:
+        super().__init__("gait_node")
+
+        self.declare_parameter("config_path", "")
+        cfg = self._load_config()
+        self._joint_cfg = cfg["joints"]
+        self._joint_names = [joint["name"] for joint in self._joint_cfg]
+        self._joint_map = {joint["name"]: joint for joint in self._joint_cfg}
+        self._leg_joints = {
+            leg: [
+                self._joint_map[f"{leg}_hip"],
+                self._joint_map[f"{leg}_thigh"],
+                self._joint_map[f"{leg}_calf"],
+            ]
+            for leg in _LEG_ORDER
+        }
+        self._leg_default_q_urdf = {
+            leg: tuple(
+                float(joint["direction"]) * float(joint["default_q"])
+                + float(joint["zero_offset"])
+                for joint in self._leg_joints[leg]
+            )
+            for leg in _LEG_ORDER
+        }
+        self._nominal_feet = {
+            leg: (
+                _HIP_POSITIONS[leg][0] + foot_hip[0],
+                _HIP_POSITIONS[leg][1] + foot_hip[1],
+                foot_hip[2],
+            )
+            for leg, foot_hip in (
+                (leg, forward_kinematics(leg, self._leg_default_q_urdf[leg]))
+                for leg in _LEG_ORDER
+            )
+        }
+        self._default_targets = [float(joint["default_q"]) for joint in self._joint_cfg]
+
+        control_cfg = cfg["control"]
+        standup_cfg = cfg.get("standup", {})
+        gait_cfg = cfg.get("gait", {})
+
+        kp_init = float(control_cfg["kp"])
+        kd_init = float(control_cfg["kd"])
+        self.declare_parameter("kp", kp_init)
+        self.declare_parameter("kd", kd_init)
+        self.declare_parameter(
+            "hold_duration", float(standup_cfg.get("hold_duration", 2.0))
+        )
+        self.declare_parameter(
+            "ramp_duration", float(standup_cfg.get("ramp_duration", 8.0))
+        )
+        self.declare_parameter(
+            "stance_height", float(gait_cfg.get("stance_height", 0.28))
+        )
+        self.declare_parameter("step_height", float(gait_cfg.get("step_height", 0.06)))
+        self.declare_parameter("gait_freq", float(gait_cfg.get("gait_freq", 2.0)))
+        self.declare_parameter(
+            "max_stride_x", float(gait_cfg.get("max_stride_x", 0.08))
+        )
+        self.declare_parameter(
+            "max_stride_y", float(gait_cfg.get("max_stride_y", 0.04))
+        )
+        self.declare_parameter("idle_timeout", float(gait_cfg.get("idle_timeout", 1.0)))
+        self.declare_parameter(
+            "safety_limit_window", float(gait_cfg.get("safety_limit_window", 0.5))
+        )
+        self.declare_parameter(
+            "safety_limit_ratio", float(gait_cfg.get("safety_limit_ratio", 0.8))
+        )
+        self.declare_parameter("max_cmd_vx", float(gait_cfg.get("max_cmd_vx", 0.15)))
+        self.declare_parameter("max_cmd_vy", float(gait_cfg.get("max_cmd_vy", 0.08)))
+        self.declare_parameter("max_cmd_yaw", float(gait_cfg.get("max_cmd_yaw", 0.4)))
+        self.declare_parameter(
+            "max_joint_speed", float(gait_cfg.get("max_joint_speed", 2.0))
+        )
+        self.declare_parameter(
+            "fault_hold_kp", float(gait_cfg.get("fault_hold_kp", 0.8))
+        )
+        self.declare_parameter(
+            "fault_hold_kd", float(gait_cfg.get("fault_hold_kd", 0.2))
+        )
+        self.declare_parameter(
+            "motion_blend_duration", float(gait_cfg.get("motion_blend_duration", 0.6))
+        )
+        self.declare_parameter("skip_standup", False)
+
+        self._loop_hz = float(control_cfg.get("policy_hz", 50.0))
+        self._dt = 1.0 / self._loop_hz
+        self._phase = _PHASE_PASSIVE
+        self._phase_start: float | None = None
+        self._oscillator = 0.0
+        self._last_cmd_t: float | None = None
+        self._cmd_vel = (0.0, 0.0, 0.0)
+        self._joint_state_seen = False
+        self._fault_broadcast = False
+        self._passive_broadcast = False
+        self._estop_active = False
+        self._last_published_targets: list[float] | None = None
+        self._motion_started_at: float | None = None
+
+        self._gain_clients = [
+            self.create_client(SetParameters, "/motor_bus_front/set_parameters"),
+            self.create_client(SetParameters, "/motor_bus_rear/set_parameters"),
+        ]
+
+        self._limit_hits = deque()
+
+        self._pub = self.create_publisher(JointState, "/joint_commands", 10)
+        self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        self.create_subscription(Bool, "/emergency_stop", self._on_emergency_stop, 10)
+        self.create_subscription(
+            JointState, "/joint_states_aggregated", self._on_joint_state, 10
+        )
+        self.add_on_set_parameters_callback(self._on_gains_changed)
+        self.create_timer(self._dt, self._tick)
+
+        self.get_logger().info(
+            f"gait_node ready — position_control at {self._loop_hz:.1f} Hz  kp={kp_init}  kd={kd_init}"
+        )
+        self.get_logger().info(
+            "[gait] waiting for fresh /cmd_vel before enabling torque and starting standup"
+        )
+
+    def _load_config(self) -> dict:
+        share = get_package_share_directory("legged_control")
+        config_path = str(self.get_parameter("config_path").value or "").strip()
+        if not config_path:
+            config_path = os.path.join(share, "config", "robot.yaml")
+        with open(config_path) as f:
+            return yaml.safe_load(f)
+
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        self._cmd_vel = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
+        self._last_cmd_t = time.monotonic()
+
+    def _on_emergency_stop(self, msg: Bool) -> None:
+        was_active = self._estop_active
+        self._estop_active = bool(msg.data)
+        if self._estop_active and not was_active:
+            self._phase = _PHASE_FAULT
+            self._fault_broadcast = False
+            self.get_logger().error("[gait] emergency stop requested")
+        elif was_active and not self._estop_active:
+            self.get_logger().warn(
+                "[gait] emergency stop cleared, but node remains in FAULT until relaunch"
+            )
+
+    def _on_joint_state(self, _msg: JointState) -> None:
+        self._joint_state_seen = True
+
+    def _on_gains_changed(self, params: list) -> SetParametersResult:
+        new_kp = next((p.value for p in params if p.name == "kp"), None)
+        new_kd = next((p.value for p in params if p.name == "kd"), None)
+        if new_kp is not None or new_kd is not None:
+            kp = new_kp if new_kp is not None else self.get_parameter("kp").value
+            kd = new_kd if new_kd is not None else self.get_parameter("kd").value
+            self._broadcast_gains(float(kp), float(kd))
+            self.get_logger().info(f"[gait] gains updated → kp={kp}  kd={kd}")
+        return SetParametersResult(successful=True)
+
+    def _broadcast_gains(self, kp: float, kd: float) -> None:
+        req = SetParameters.Request()
+        req.parameters = [
+            Parameter(
+                name="kp",
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_DOUBLE, double_value=float(kp)
+                ),
+            ),
+            Parameter(
+                name="kd",
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_DOUBLE, double_value=float(kd)
+                ),
+            ),
+        ]
+        for client in self._gain_clients:
+            if client.service_is_ready():
+                client.call_async(req)
+
+    def _publish_positions(self, positions: list[float]) -> None:
+        max_joint_speed = float(self.get_parameter("max_joint_speed").value)
+        max_delta = max_joint_speed * self._dt
+        positions = _rate_limit_targets(
+            self._last_published_targets, positions, max_delta
+        )
+        self._last_published_targets = list(positions)
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = list(self._joint_names)
+        msg.position = positions
+        self._pub.publish(msg)
+
+    def _fault_targets(self) -> list[float]:
+        return list(self._default_targets)
+
+    def _enter_active_mode(self, now: float) -> None:
+        self._broadcast_gains(
+            float(self.get_parameter("kp").value), float(self.get_parameter("kd").value)
+        )
+        self._phase = (
+            _PHASE_WAIT
+            if bool(self.get_parameter("skip_standup").value)
+            else _PHASE_STANDUP
+        )
+        self._phase_start = now
+        self._fault_broadcast = False
+        self._passive_broadcast = False
+        self._last_published_targets = None
+        if self._phase == _PHASE_WAIT:
+            self.get_logger().info(
+                "[gait] remote command received — skipping standup and holding default pose"
+            )
+        else:
+            self.get_logger().info("[gait] remote command received — starting standup")
+
+    def _enter_passive_mode(self) -> None:
+        self._phase = _PHASE_PASSIVE
+        self._phase_start = None
+        self._oscillator = 0.0
+        self._joint_state_seen = False
+        self._limit_hits.clear()
+        self._last_published_targets = None
+        self._fault_broadcast = False
+        if not self._passive_broadcast:
+            self._broadcast_gains(0.0, 0.0)
+            self._passive_broadcast = True
+            self.get_logger().warn(
+                "[gait] no fresh /cmd_vel — torque disabled until remote command resumes"
+            )
+
+    def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
+        hold_duration = float(self.get_parameter("hold_duration").value)
+        ramp_duration = float(self.get_parameter("ramp_duration").value)
+        if elapsed < hold_duration:
+            return [0.0] * len(self._joint_names), False
+        if elapsed < hold_duration + ramp_duration:
+            alpha = _smoothstep((elapsed - hold_duration) / ramp_duration)
+            return [alpha * q for q in self._default_targets], False
+        return list(self._default_targets), True
+
+    def _trot_targets(self) -> tuple[list[float], bool]:
+        now = time.monotonic()
+        step_height = float(self.get_parameter("step_height").value)
+        gait_freq = float(self.get_parameter("gait_freq").value)
+        max_stride_x = float(self.get_parameter("max_stride_x").value)
+        max_stride_y = float(self.get_parameter("max_stride_y").value)
+        idle_timeout = float(self.get_parameter("idle_timeout").value)
+
+        cmd_vx, cmd_vy, cmd_yaw = _command_with_timeout(
+            self._cmd_vel, self._last_cmd_t, now, idle_timeout
+        )
+        cmd_vx, cmd_vy, cmd_yaw = _clamp_cmd_vel(
+            (cmd_vx, cmd_vy, cmd_yaw),
+            float(self.get_parameter("max_cmd_vx").value),
+            float(self.get_parameter("max_cmd_vy").value),
+            float(self.get_parameter("max_cmd_yaw").value),
+        )
+        if _is_effectively_zero_cmd((cmd_vx, cmd_vy, cmd_yaw)):
+            self._motion_started_at = None
+            return list(self._default_targets), False
+
+        if self._motion_started_at is None:
+            self._motion_started_at = now
+
+        self._oscillator = (self._oscillator + 2.0 * math.pi * gait_freq * self._dt) % (
+            2.0 * math.pi
+        )
+
+        targets_by_name = {}
+        clipped_any = False
+        for leg in _LEG_ORDER:
+            leg_phase = (self._oscillator + _PHASE_OFFSETS[leg]) % (2.0 * math.pi)
+            stride_x, stride_y = _leg_stride(
+                self._nominal_feet[leg][:2],
+                leg,
+                cmd_vx,
+                cmd_vy,
+                cmd_yaw,
+                gait_freq,
+                max_stride_x,
+                max_stride_y,
+            )
+            foot_body = _foot_target(
+                self._nominal_feet[leg],
+                leg,
+                leg_phase,
+                0.0,
+                step_height,
+                stride_x,
+                stride_y,
+            )
+            foot_hip = _body_to_hip(leg, foot_body)
+            q_urdf = inverse_kinematics(leg, foot_hip, self._leg_default_q_urdf[leg])
+            if q_urdf is None:
+                for joint in self._leg_joints[leg]:
+                    targets_by_name[joint["name"]] = float(joint["default_q"])
+                clipped_any = True
+                self.get_logger().warn(
+                    f"[gait] IK failed for {leg}; holding default_q for that leg",
+                    throttle_duration_sec=1.0,
+                )
+                continue
+            leg_targets, leg_clipped = _motor_targets_from_urdf(
+                self._leg_joints[leg], q_urdf
+            )
+            clipped_any = clipped_any or leg_clipped
+            for joint, target in zip(self._leg_joints[leg], leg_targets):
+                targets_by_name[joint["name"]] = target
+
+        gait_targets = [targets_by_name[name] for name in self._joint_names]
+        blend_duration = float(self.get_parameter("motion_blend_duration").value)
+        if blend_duration > 0.0 and self._motion_started_at is not None:
+            alpha = (now - self._motion_started_at) / blend_duration
+            gait_targets = _blend_targets(self._default_targets, gait_targets, alpha)
+
+        return gait_targets, clipped_any
+
+    def _update_limit_safety(self, hit_limit: bool) -> None:
+        window_seconds = float(self.get_parameter("safety_limit_window").value)
+        limit_ratio = float(self.get_parameter("safety_limit_ratio").value)
+        window_len = max(1, int(round(window_seconds * self._loop_hz)))
+        self._limit_hits.append(hit_limit)
+        while len(self._limit_hits) > window_len:
+            self._limit_hits.popleft()
+        if len(self._limit_hits) < window_len:
+            return
+        ratio = sum(self._limit_hits) / float(window_len)
+        if ratio >= limit_ratio:
+            self._phase = _PHASE_FAULT
+            self._fault_broadcast = False
+            self.get_logger().error(
+                f"[gait] sustained joint limit / IK failure ratio {ratio:.2f} >= {limit_ratio:.2f}; entering FAULT"
+            )
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        idle_timeout = float(self.get_parameter("idle_timeout").value)
+
+        if self._estop_active:
+            self._phase = _PHASE_FAULT
+
+        if self._phase != _PHASE_FAULT:
+            fresh_command = _command_is_fresh(self._last_cmd_t, now, idle_timeout)
+            if self._phase == _PHASE_PASSIVE:
+                if fresh_command:
+                    self._enter_active_mode(now)
+                else:
+                    self._enter_passive_mode()
+                    return
+            elif not fresh_command:
+                self._enter_passive_mode()
+                return
+
+        if self._phase_start is None:
+            self._phase_start = now
+
+        if self._phase == _PHASE_FAULT:
+            if not self._fault_broadcast:
+                self._broadcast_gains(
+                    float(self.get_parameter("fault_hold_kp").value),
+                    float(self.get_parameter("fault_hold_kd").value),
+                )
+                self._fault_broadcast = True
+                self.get_logger().warn(
+                    "[gait] FAULT active — commanding safe default pose with reduced gains"
+                )
+            self._publish_positions(self._fault_targets())
+            return
+
+        if self._phase == _PHASE_STANDUP:
+            targets, done = self._standup_targets(now - self._phase_start)
+            self._publish_positions(targets)
+            if done:
+                self._phase = _PHASE_WAIT
+                self._phase_start = now
+                self.get_logger().info(
+                    "[gait] standup complete — waiting for /joint_states_aggregated"
+                )
+            return
+
+        if self._phase == _PHASE_WAIT:
+            self._publish_positions(list(self._default_targets))
+            if self._joint_state_seen:
+                self._phase = _PHASE_TROT
+                self._phase_start = now
+                self._oscillator = 0.0
+                self.get_logger().info("[gait] motors online — entering TROT")
+            return
+
+        targets, clipped_any = self._trot_targets()
+        self._publish_positions(targets)
+        self._update_limit_safety(clipped_any)
+
+
+def main() -> None:
+    rclpy.init()
+    node = GaitNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

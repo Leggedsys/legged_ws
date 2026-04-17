@@ -22,7 +22,7 @@ joints:
   - name: FR_hip
     motor_id: 0
     gear_ratio: 6.33
-    default_q: -0.14
+    default_q: 0.0
     q_min: -0.484
     q_max:  0.521
     direction:    1
@@ -31,7 +31,7 @@ joints:
   - name: FR_thigh
     motor_id: 1
     gear_ratio: 6.33
-    default_q:  1.594
+    default_q:  0.37373
     q_min: -0.650
     q_max:  3.156
     direction:    1
@@ -40,7 +40,7 @@ joints:
   - name: FR_calf
     motor_id: 2
     gear_ratio: 12.66
-    default_q: 3.511
+    default_q: 1.488672
     q_min: 0.000
     q_max: 5.554
     direction:    -1
@@ -49,7 +49,7 @@ joints:
   - name: FL_hip
     motor_id: 3
     gear_ratio: 6.33
-    default_q:  0.14
+    default_q:  0.0
     q_min: -0.533
     q_max:  0.467
     direction:    1
@@ -58,7 +58,7 @@ joints:
   - name: FL_thigh
     motor_id: 4
     gear_ratio: 6.33
-    default_q: -0.914
+    default_q: -0.37373
     q_min: -3.133
     q_max: 0.663
     direction:    1
@@ -67,7 +67,7 @@ joints:
   - name: FL_calf
     motor_id: 5
     gear_ratio: 12.66
-    default_q: -2.071
+    default_q: -1.488672
     q_min: -5.554
     q_max: 0.000
     direction:    -1
@@ -76,7 +76,7 @@ joints:
   - name: RR_hip
     motor_id: 6
     gear_ratio: 6.33
-    default_q: -0.10
+    default_q: 0.0
     q_min: -0.523
     q_max:  0.489
     direction:    1
@@ -85,7 +85,7 @@ joints:
   - name: RR_thigh
     motor_id: 7
     gear_ratio: 6.33
-    default_q:  1.714
+    default_q:  0.37373
     q_min: -0.644
     q_max:  3.155
     direction:    1
@@ -94,7 +94,7 @@ joints:
   - name: RR_calf
     motor_id: 8
     gear_ratio: 12.66
-    default_q: 3.611
+    default_q: 1.488672
     q_min: 0.000
     q_max: 5.538
     direction:    -1
@@ -103,7 +103,7 @@ joints:
   - name: RL_hip
     motor_id: 9
     gear_ratio: 6.33
-    default_q:  0.10
+    default_q:  0.0
     q_min: -0.479
     q_max:  0.524
     direction:    1
@@ -112,7 +112,7 @@ joints:
   - name: RL_thigh
     motor_id: 10
     gear_ratio: 6.33
-    default_q: -0.794
+    default_q: -0.37373
     q_min: -3.143
     q_max:  0.651
     direction:    1
@@ -121,7 +121,7 @@ joints:
   - name: RL_calf
     motor_id: 11
     gear_ratio: 12.66
-    default_q: -1.971
+    default_q: -1.488672
     q_min: -5.544
     q_max: 0.000
     direction:    -1
@@ -132,8 +132,8 @@ control:
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
   policy_hz: 50.0
-  kp: 1.5
-  kd: 0.2
+  kp: 1.3
+  kd: 0.02
   # Policy action is interpreted as delta from default_q, then scaled per joint.
   # target_q[i] = default_q[i] + action_scale[leg_group][joint_type] * action[i]
   # leg_group: 'front' (FR/FL) or 'rear' (RR/RL); joint_type: 'hip', 'thigh', 'calf'
@@ -148,9 +148,9 @@ control:
       calf:  0.025
 
 teleop:
-  max_vx:  1.0   # m/s  forward/backward
-  max_vy:  0.5   # m/s  lateral
-  max_yaw: 1.0   # rad/s yaw rate
+  max_vx:  0.05  # m/s  forward/backward
+  max_vy:  0.02  # m/s  lateral
+  max_yaw: 0.1   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
   # Axis mapping (standard gamepad layout):
   #   axis_vx:  left stick vertical   (typically axis 1, inverted)
@@ -167,8 +167,25 @@ teleop:
   btn_emergency_stop: -1
 
 standup:
-  hold_duration: 2.0   # seconds to hold at 0 before ramping (let motors settle)
+  hold_duration: 5.0   # seconds to hold at 0 before ramping (let motors settle)
   ramp_duration: 8.0   # seconds for 0 → default_q smooth-step ramp
+
+gait:
+  stance_height:  0.28
+  step_height:    0.06
+  gait_freq:      2.0
+  max_stride_x:   0.08
+  max_stride_y:   0.04
+  idle_timeout:   1.0
+  safety_limit_window: 0.5
+  safety_limit_ratio:  0.8
+  max_cmd_vx:     0.03
+  max_cmd_vy:     0.00
+  max_cmd_yaw:    0.08
+  max_joint_speed: 0.5
+  motion_blend_duration: 0.6
+  fault_hold_kp:  0.8
+  fault_hold_kd:  0.2
 
 policy:
   # Path to TorchScript model file (.pt). Node will not start if empty — set before launching.
