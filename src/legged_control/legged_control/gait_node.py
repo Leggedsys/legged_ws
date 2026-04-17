@@ -108,17 +108,19 @@ def _foot_target(
     stride_x: float,
     stride_y: float,
 ) -> tuple[float, float, float]:
-    x_nom, y_nom, z_nom = nominal_foot
+    x_nom, y_nom, _ = nominal_foot
+    # Hip frame: z negative = below hip. stance_height is a positive distance.
+    z_stance = -stance_height
     if _phase_is_stance(phase):
         s = phase / math.pi
         x = x_nom + (0.5 - s) * stride_x
         y = y_nom + (0.5 - s) * stride_y
-        z = z_nom
+        z = z_stance
     else:
         t = (phase - math.pi) / math.pi
         x = x_nom + (t - 0.5) * stride_x
         y = y_nom + (t - 0.5) * stride_y
-        z = z_nom + step_height * math.sin(math.pi * t)
+        z = z_stance + step_height * math.sin(math.pi * t)
     return x, y, z
 
 
@@ -459,7 +461,7 @@ class GaitNode(Node):
                 self._nominal_feet[leg],
                 leg,
                 leg_phase,
-                0.0,
+                float(self.get_parameter("stance_height").value),
                 step_height,
                 stride_x,
                 stride_y,

@@ -60,7 +60,7 @@ def test_leg_stride_yaw_creates_opposite_lateral_motion_front_legs():
 
 
 def test_foot_target_uses_stride_y_in_stance():
-    x, y, z = _foot_target((0.1426, 0.1592, -0.28), "FL", 0.0, 0.0, 0.06, 0.04, 0.02)
+    x, y, z = _foot_target((0.1426, 0.1592, -0.28), "FL", 0.0, 0.28, 0.06, 0.04, 0.02)
     assert x == pytest.approx(0.1426 + 0.02, abs=1e-4)
     assert y == pytest.approx(0.1592 + 0.01, abs=1e-4)
     assert z == pytest.approx(-0.28)
