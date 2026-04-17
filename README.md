@@ -74,74 +74,6 @@ ros2 param set /stand_node kd 0.3
 
 ---
 
-## 第三步：策略行走（policy 模式）
-
-policy 模式加载 TorchScript RL 模型，以 50 Hz 运行推理，通过手柄控制机器人行走。
-
-### 前提
-
-- Odin1 LiDAR 已上线（提供 IMU 和里程计）
-- 已导出 TorchScript 模型（`.pt` 文件）
-- USB 手柄已连接
-
-### 安装 joy 驱动（只需一次）
-
-```bash
-sudo apt install ros-humble-joy
-```
-
-### 配置模型路径
-
-编辑 `src/legged_control/config/robot.yaml`，填入模型路径：
-
-```yaml
-policy:
-  model_path: '/path/to/policy.pt'
-```
-
-重新编译使配置生效：
-
-```bash
-colcon build --packages-select legged_control
-source install/setup.bash
-```
-
-### 启动
-
-```bash
-ros2 launch legged_control robot.launch.py mode:=policy
-```
-
-启动后自动运行：`motor_bus_node`（×2）、`joint_aggregator`、`joy_node`、`teleop_node`、`policy_node`、`policy_monitor_node`。
-
-终端会持续刷新一个 policy 状态面板，显示：
-
-- IMU / odom / joints / cmd 是否新鲜
-- 当前 `cmd_vel`
-- 当前角速度和 projected gravity
-- 每条腿相对 `default_q` 的平均偏差
-- 目标关节是否触发限位裁剪
-
-### 手柄操作
-
-默认轴映射（标准手柄布局）：
-
-| 动作 | 摇杆 |
-|------|------|
-| 前进 / 后退 | 左摇杆 ↑↓ |
-| 左移 / 右移 | 左摇杆 ←→ |
-| 左转 / 右转 | 右摇杆 ←→ |
-
-轴映射、死区、最大速度均可在 `robot.yaml` 的 `teleop` 段调整。
-
-紧急停止按钮通过 `teleop.btn_emergency_stop` 配置（默认 `-1` = 未启用）。
-
-### LiDAR 超时保护
-
-若 `/odin1/imu`、`/odin1/odometry` 或关节状态任意一路超过 0.5 s 无数据，`policy_node` 停止发布 `/joint_commands`，电机保持上一帧位置。
-
----
-
 ## 常用选项
 
 ```bash
@@ -154,5 +86,3 @@ ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 seria
 # 查看所有 launch 参数
 ros2 launch legged_control robot.launch.py --show-args
 ```
-
-注意：`mode:=policy` 固定使用 12 关节输入输出契约，因此只能配合 `legs:=all` 启动。

@@ -37,8 +37,6 @@ setup(
             "standup_node         = legged_control.standup_node:main",
             "motor_bus_node       = legged_control.motor_bus_node:main",
             "joint_aggregator     = legged_control.joint_aggregator:main",
-            "policy_node          = legged_control.policy_node:main",
-            "policy_monitor_node  = legged_control.policy_monitor_node:main",
             "teleop_node          = legged_control.teleop_node:main",
             "gait_node            = legged_control.gait_node:main",
             "fake_motor_bus_node  = legged_control.fake_motor_bus_node:main",

@@ -2,7 +2,7 @@
 robot.launch.py — unified launch for all robot operating modes.
 
 Launch args:
-  mode          [passive]           passive | stand | standup | policy | position_control
+  mode          [passive]           passive | stand | standup | position_control
   legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
   serial_port_front   [from robot.yaml]   Override serial port for FR/FL motors
   serial_port_rear    [from robot.yaml]   Override serial port for RR/RL motors
@@ -154,47 +154,6 @@ def _launch_setup(context, *args, **kwargs):
             ),
         ]
 
-    if mode == "policy":
-        if active_legs != _VALID_LEGS:
-            raise RuntimeError(
-                "mode:=policy requires legs:=all because the policy uses a fixed 12-joint contract"
-            )
-        kp = float(control["kp"])
-        kd = float(control["kd"])
-        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
-        return motors + [
-            Node(
-                package="legged_control",
-                executable="joint_aggregator",
-                name="joint_aggregator",
-                output="screen",
-            ),
-            Node(
-                package="joy",
-                executable="joy_node",
-                name="joy_node",
-                output="screen",
-            ),
-            Node(
-                package="legged_control",
-                executable="teleop_node",
-                name="teleop_node",
-                output="screen",
-            ),
-            Node(
-                package="legged_control",
-                executable="policy_node",
-                name="policy_node",
-                output="screen",
-            ),
-            Node(
-                package="legged_control",
-                executable="policy_monitor_node",
-                name="policy_monitor_node",
-                output="screen",
-            ),
-        ]
-
     if mode == "position_control":
         if active_legs != _VALID_LEGS:
             raise RuntimeError(
@@ -231,7 +190,7 @@ def _launch_setup(context, *args, **kwargs):
         ]
 
     raise RuntimeError(
-        f"Unknown mode '{mode}'. Valid modes: passive, stand, standup, policy, position_control"
+        f"Unknown mode '{mode}'. Valid modes: passive, stand, standup, position_control"
     )
 
 
@@ -241,7 +200,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "mode",
                 default_value="passive",
-                description="Operating mode: passive | stand | standup | policy | position_control",
+                description="Operating mode: passive | stand | standup | position_control",
             ),
             DeclareLaunchArgument(
                 "legs",

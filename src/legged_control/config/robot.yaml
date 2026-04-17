@@ -10,7 +10,7 @@
 # PD gains are applied by the motor driver (not the policy):
 #   tau = kp * (target_q - q_actual) + kd * (0 - dq_actual)
 #
-# direction / zero_offset: URDF alignment (used by policy_node, NOT by motor_bus_node).
+# direction / zero_offset: URDF alignment (used by kinematics/gait_node and simulation bridges, NOT by motor_bus_node).
 #   q_urdf = direction * q_motor + zero_offset
 #   direction:   +1 if motor positive direction == URDF positive direction, -1 if reversed.
 #   zero_offset: static offset in URDF frame (rad); determined by hand measurement or URDF inspection.
@@ -131,21 +131,8 @@ control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
-  policy_hz: 50.0
   kp: 1.3
   kd: 0.02
-  # Policy action is interpreted as delta from default_q, then scaled per joint.
-  # target_q[i] = default_q[i] + action_scale[leg_group][joint_type] * action[i]
-  # leg_group: 'front' (FR/FL) or 'rear' (RR/RL); joint_type: 'hip', 'thigh', 'calf'
-  action_scale:
-    front:
-      hip:   0.025
-      thigh: 0.035
-      calf:  0.02
-    rear:
-      hip:   0.03
-      thigh: 0.045
-      calf:  0.025
 
 teleop:
   max_vx:  0.05  # m/s  forward/backward
@@ -186,11 +173,3 @@ gait:
   motion_blend_duration: 0.6
   fault_hold_kp:  0.8
   fault_hold_kd:  0.2
-
-policy:
-  # Path to TorchScript model file (.pt). Node will not start if empty — set before launching.
-  model_path: '/home/grayerd/Desktop/Projects/rc/legged_ws/models/policy.pt'
-  # Observation normalization (mean and std for each of the 45 dims).
-  # Leave empty to use no normalization (raw values passed to model).
-  obs_mean: []
-  obs_std:  []
