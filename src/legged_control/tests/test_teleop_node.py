@@ -1,5 +1,7 @@
 import sys
 import os
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from legged_control.teleop_node import _apply_deadzone, _scale_axis
@@ -61,8 +63,6 @@ class TestScaleAxis:
 # ---------------------------------------------------------------------------
 # Trigger (LT/RT) height-rate tests
 # ---------------------------------------------------------------------------
-
-import pytest
 
 
 def _dz(lt: float, rt: float, deadzone: float = 0.05, max_dz: float = 0.03) -> float:

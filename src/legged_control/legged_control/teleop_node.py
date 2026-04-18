@@ -108,11 +108,10 @@ try:
                 twist.linear.x  = _safe(self._axis_vx,  self._max_vx,  self._invert_vx)
                 twist.linear.y  = _safe(self._axis_vy,  self._max_vy,  self._invert_vy)
                 twist.angular.z = _safe(self._axis_yaw, self._max_yaw, self._invert_yaw)
-                lt_raw = axes[self._axis_lt] if 0 <= self._axis_lt < len(axes) else 0.0
-                rt_raw = axes[self._axis_rt] if 0 <= self._axis_rt < len(axes) else 0.0
+                # Trigger convention: 0.0=released, 1.0=fully pressed (Betop Kunpeng 20 / Linux joy_node)
                 twist.linear.z = (
-                    _scale_axis(rt_raw, dz, self._max_dz, invert=False)
-                    - _scale_axis(lt_raw, dz, self._max_dz, invert=False)
+                    _safe(self._axis_rt, self._max_dz, False)
+                    - _safe(self._axis_lt, self._max_dz, False)
                 )
 
             self._pub.publish(twist)
