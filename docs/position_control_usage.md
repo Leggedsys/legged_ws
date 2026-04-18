@@ -9,7 +9,7 @@
 
 当前位控链路：
 
-- 输入：`/cmd_vel`
+- 输入：`/cmd_vel`（`linear.x/y`=平移速度，`angular.z`=偏航速率，`linear.z`=机身高度变化速率）
 - 控制：解析步态 + 解析 IK
 - 输出：`/joint_commands`
 
@@ -19,6 +19,7 @@
 - 不依赖里程计
 - 不依赖雷达
 - 支持前进、侧移、转弯的基础步态
+- **支持实时机身高度调节**：手柄 RT 升高，LT 降低，范围 0.20～0.35 m
 - 已带安全限幅、关节目标变化率限制、急停和 fault 安全回退
 
 这意味着即使你的 IMU 挂在雷达上，也可以先不接 IMU 做位控开发。
@@ -112,13 +113,37 @@ ros2 launch legged_control gazebo_position_control.launch.py
 
 `teleop_node` 会把 `/joy` 转成 `/cmd_vel`。
 
-默认映射：
+默认映射（北通鲲鹏 20）：
 
-- 左摇杆前后：`linear.x`
-- 左摇杆左右：`linear.y`
-- 右摇杆左右：`angular.z`
+| 控件 | 话题字段 | 说明 |
+|------|---------|------|
+| 左摇杆前后 | `linear.x` | 前进/后退，最大 0.05 m/s |
+| 左摇杆左右 | `linear.y` | 侧移，最大 0.02 m/s |
+| 右摇杆左右 | `angular.z` | 偏航，最大 0.1 rad/s |
+| RT（右扳机） | `linear.z` > 0 | 升高机身，最大 0.03 m/s |
+| LT（左扳机） | `linear.z` < 0 | 降低机身，最大 −0.03 m/s |
+
+机身高度变化只在 WAIT / TROT 阶段生效，起身（STANDUP）期间忽略。
 
 ### 6.2 手工发命令
+
+升高机身（持续发送约 3s 可从 0.28 升至 0.35）：
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0, z: 0.03}, angular: {z: 0.0}}" -r 10
+```
+
+降低机身：
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0, z: -0.03}, angular: {z: 0.0}}" -r 10
+```
+
+停止高度变化（发一次）：
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {z: 0.0}}" -1
+```
 
 小速前进：
 

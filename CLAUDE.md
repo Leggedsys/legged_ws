@@ -79,7 +79,7 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 - `stand_node.py` — publishes `default_q` for all 12 joints at 50 Hz on `/joint_commands`; broadcasts kp/kd updates to both bus nodes via `AsyncParametersClient`
 - `joint_aggregator.py` — subscribes to all 12 `/<ns>/joint_states`, publishes `/joint_states_aggregated` in canonical joint order (motor frame, no coordinate conversion); triggers on every incoming message
 - `standup_node.py` — three-phase stand-up: hold at 0 (`hold_duration` s) → smooth-step ramp to `default_q` (`ramp_duration` s) → hold; logs a progress bar during ramp; same runtime kp/kd broadcast as `stand_node`.
-- `teleop_node.py` — subscribes `/joy` (gamepad via `joy_node`); applies deadzone + scaling from `robot.yaml teleop` section; publishes `geometry_msgs/Twist` to `/cmd_vel` for `gait_node`. Auto-started in `position_control` mode alongside `joy_node`. Run standalone: `ros2 run legged_control teleop_node`.
+- `teleop_node.py` — subscribes `/joy` (gamepad via `joy_node`); maps left/right sticks to `linear.x/y` and `angular.z`; maps LT/RT triggers (axes 2/5 on Betop Kunpeng 20) to `linear.z` as stance-height rate (0.0=released, 1.0=fully pressed, max 0.03 m/s); publishes `geometry_msgs/Twist` to `/cmd_vel` for `gait_node`. Auto-started in `position_control` mode alongside `joy_node`. Run standalone: `ros2 run legged_control teleop_node`.
 - `launch/robot.launch.py` — single entry point, starts 2 `motor_bus_node` instances (one per serial port) + mode-specific nodes (`passive`, `stand`, `standup`, `position_control`)
 
 ### `unitree_actuator_sdk`
@@ -156,6 +156,15 @@ teleop:
   invert_vy:  false
   invert_yaw: true
   btn_emergency_stop: -1      # gamepad button index; -1 = not configured
+  axis_lt: 2                  # left trigger axis  (0.0=released, 1.0=fully pressed)
+  axis_rt: 5                  # right trigger axis
+  max_dz:  0.03               # m/s height rate limit (RT raises, LT lowers)
+
+gait:
+  stance_height: 0.28         # initial height (overridden by FK at runtime)
+  stance_height_min: 0.20     # m — minimum height (clamped by height integration)
+  stance_height_max: 0.35     # m — maximum height
+  # ... other gait params
 ```
 
 Edit this file to update joint limits, default angles, or PD gains. Restart the launch after any change.
