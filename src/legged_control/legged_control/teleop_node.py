@@ -65,6 +65,9 @@ try:
             self._invert_vy  = bool(cfg['invert_vy'])
             self._invert_yaw = bool(cfg['invert_yaw'])
             self._btn_estop  = int(cfg['btn_emergency_stop'])
+            self._axis_lt   = int(cfg.get('axis_lt',  2))
+            self._axis_rt   = int(cfg.get('axis_rt',  5))
+            self._max_dz    = float(cfg.get('max_dz', 0.03))
 
             self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
             self.create_subscription(Joy, '/joy', self._on_joy, 10)
@@ -105,6 +108,12 @@ try:
                 twist.linear.x  = _safe(self._axis_vx,  self._max_vx,  self._invert_vx)
                 twist.linear.y  = _safe(self._axis_vy,  self._max_vy,  self._invert_vy)
                 twist.angular.z = _safe(self._axis_yaw, self._max_yaw, self._invert_yaw)
+                lt_raw = axes[self._axis_lt] if 0 <= self._axis_lt < len(axes) else 0.0
+                rt_raw = axes[self._axis_rt] if 0 <= self._axis_rt < len(axes) else 0.0
+                twist.linear.z = (
+                    _scale_axis(rt_raw, dz, self._max_dz, invert=False)
+                    - _scale_axis(lt_raw, dz, self._max_dz, invert=False)
+                )
 
             self._pub.publish(twist)
 
