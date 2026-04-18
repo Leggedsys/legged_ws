@@ -157,7 +157,7 @@ def _ik_derived_targets(
     q_urdf = inverse_kinematics(leg, foot_hip, leg_default_q_urdf)
     if q_urdf is None:
         return None
-    targets, _ = _motor_targets_from_urdf(leg_joints, q_urdf)
+    targets, _ = _motor_targets_from_urdf(leg_joints, q_urdf)  # clipping flag unused here
     return targets
 
 

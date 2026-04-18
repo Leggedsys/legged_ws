@@ -129,6 +129,7 @@ def test_ik_derived_targets_lower_height_changes_calf():
     assert targets_nom   is not None
     assert targets_lower is not None
     assert not math.isclose(targets_nom[2], targets_lower[2], abs_tol=0.01)
+    assert not math.isclose(targets_nom[1], targets_lower[1], abs_tol=0.01)
 
 
 def test_ik_derived_targets_returns_none_when_unreachable():
