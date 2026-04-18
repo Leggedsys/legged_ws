@@ -11,6 +11,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
 import rclpy
+import rclpy.parameter
 from rcl_interfaces.msg import (
     Parameter,
     ParameterType,
@@ -258,6 +259,7 @@ class GaitNode(Node):
         self.declare_parameter(
             "stance_height", fk_stance_height
         )
+        self._rederive_defaults(fk_stance_height)
         self.declare_parameter("step_height", float(gait_cfg.get("step_height", 0.06)))
         self.declare_parameter("gait_freq", float(gait_cfg.get("gait_freq", 2.0)))
         self.declare_parameter(
@@ -341,6 +343,28 @@ class GaitNode(Node):
             config_path = os.path.join(share, "config", "robot.yaml")
         with open(config_path) as f:
             return yaml.safe_load(f)
+
+    def _rederive_defaults(self, h: float) -> None:
+        """Recompute _default_targets and _nominal_feet z for all legs at stance height h."""
+        for leg in _LEG_ORDER:
+            x_nom, y_nom, _ = self._nominal_feet[leg]
+            targets = _ik_derived_targets(
+                leg,
+                (x_nom, y_nom),
+                self._leg_joints[leg],
+                self._leg_default_q_urdf[leg],
+                h,
+            )
+            if targets is None:
+                self.get_logger().warn(
+                    f"[gait] IK failed for {leg} at stance_height={h:.4f} m; "
+                    "keeping previous _default_targets for that leg"
+                )
+                continue
+            for joint, target in zip(self._leg_joints[leg], targets):
+                idx = self._joint_names.index(joint["name"])
+                self._default_targets[idx] = target
+            self._nominal_feet[leg] = (x_nom, y_nom, -h)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         self._cmd_vel = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
