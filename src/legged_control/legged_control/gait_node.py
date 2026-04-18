@@ -238,6 +238,7 @@ class GaitNode(Node):
             )
         }
         self._default_targets = [float(joint["default_q"]) for joint in self._joint_cfg]
+        # Will be overwritten by IK-derived values below; kept as per-leg fallback on IK failure.
 
         control_cfg = cfg["control"]
         standup_cfg = cfg.get("standup", {})
