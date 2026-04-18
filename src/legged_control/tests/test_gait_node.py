@@ -6,9 +6,11 @@ from legged_control.gait_node import (
     _blend_targets,
     _body_to_hip,
     _clamp_cmd_vel,
+    _clamp_height,
     _command_is_fresh,
     _command_with_timeout,
     _foot_target,
+    _ik_derived_targets,
     _is_effectively_zero_cmd,
     _leg_stride,
     _motor_targets_from_urdf,
@@ -95,3 +97,57 @@ def test_motor_targets_from_urdf_applies_conversion_and_clipping():
     targets, clipped = _motor_targets_from_urdf(joints, (0.1, 1.5, 0.5))
     assert targets == pytest.approx([0.1, 0.2, 1.0])
     assert clipped is True
+
+
+# ── _ik_derived_targets ──────────────────────────────────────────────────────
+
+_FL_JOINTS = [
+    {"direction": 1, "zero_offset": 0.0,    "q_min": -0.533, "q_max":  0.467},
+    {"direction": 1, "zero_offset": 1.254,  "q_min": -3.133, "q_max":  0.663},
+    {"direction": -1, "zero_offset": -2.791, "q_min": -5.554, "q_max": 0.000},
+]
+# q_urdf = direction * default_q + zero_offset
+_FL_Q_URDF = (0.0, 1 * (-0.37373) + 1.254, -1 * (-1.488672) + (-2.791))
+# = (0.0, 0.88027, -1.302328)
+_FL_NOMINAL_XY = (0.1426, 0.1592)   # body-frame x,y from FK
+_FL_NOMINAL_H  = 0.280              # approximate FK stance height
+
+
+def test_ik_derived_targets_fl_roundtrip():
+    """IK at the nominal FK height should recover the original motor angles."""
+    targets = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, _FL_NOMINAL_H)
+    assert targets is not None
+    assert targets[0] == pytest.approx(0.0,        abs=1e-2)
+    assert targets[1] == pytest.approx(-0.37373,   abs=1e-2)
+    assert targets[2] == pytest.approx(-1.488672,  abs=1e-2)
+
+
+def test_ik_derived_targets_lower_height_changes_calf():
+    """Lowering stance height bends the knee; calf motor angle must change."""
+    targets_nom   = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.280)
+    targets_lower = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.220)
+    assert targets_nom   is not None
+    assert targets_lower is not None
+    assert not math.isclose(targets_nom[2], targets_lower[2], abs_tol=0.01)
+
+
+def test_ik_derived_targets_returns_none_when_unreachable():
+    """h=0.40 m exceeds leg reach -> IK returns None."""
+    targets = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.40)
+    assert targets is None
+
+
+# ── _clamp_height ────────────────────────────────────────────────────────────
+
+def test_clamp_height_no_clamp():
+    assert _clamp_height(0.28, 0.03, 0.02, 0.20, 0.35) == pytest.approx(0.2806)
+
+
+def test_clamp_height_clamps_max():
+    # 0.345 + 0.03 * 1.0 = 0.375 > h_max=0.35 → clamped to 0.35
+    assert _clamp_height(0.345, 0.03, 1.0, 0.20, 0.35) == pytest.approx(0.35)
+
+
+def test_clamp_height_clamps_min():
+    # 0.205 + (-0.03) * 1.0 = 0.175 < h_min=0.20 → clamped to 0.20
+    assert _clamp_height(0.205, -0.03, 1.0, 0.20, 0.35) == pytest.approx(0.20)

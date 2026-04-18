@@ -141,6 +141,33 @@ def _motor_targets_from_urdf(
     return targets, clipped
 
 
+def _ik_derived_targets(
+    leg: str,
+    nominal_xy: tuple[float, float],
+    leg_joints: list[dict],
+    leg_default_q_urdf: tuple[float, float, float],
+    h: float,
+) -> list[float] | None:
+    """Compute motor targets for one leg with foot placed at stance height h (m, positive down).
+
+    Returns None if IK fails (target is unreachable for this leg geometry).
+    """
+    x_nom, y_nom = nominal_xy
+    foot_hip = _body_to_hip(leg, (x_nom, y_nom, -h))
+    q_urdf = inverse_kinematics(leg, foot_hip, leg_default_q_urdf)
+    if q_urdf is None:
+        return None
+    targets, _ = _motor_targets_from_urdf(leg_joints, q_urdf)
+    return targets
+
+
+def _clamp_height(
+    current_h: float, dz_rate: float, dt: float, h_min: float, h_max: float
+) -> float:
+    """Integrate dz_rate over dt and clamp the result to [h_min, h_max]."""
+    return max(h_min, min(h_max, current_h + dz_rate * dt))
+
+
 def _clamp_cmd_vel(
     cmd_vel: tuple[float, float, float],
     max_vx: float,
