@@ -375,13 +375,18 @@ class GaitNode(Node):
             self._nominal_feet[leg] = (x_nom, y_nom, -h)
 
     def _integrate_height(self) -> None:
-        """Integrate _dz_rate into stance_height for WAIT/TROT phases."""
-        if self._dz_rate == 0.0:
+        """Integrate _dz_rate into stance_height for WAIT/TROT phases.
+
+        Only called from WAIT/TROT; caller is responsible for phase isolation.
+        """
+        if abs(self._dz_rate) < 1e-9:
             return
         current_h = float(self.get_parameter("stance_height").value)
         h_min = float(self.get_parameter("stance_height_min").value)
         h_max = float(self.get_parameter("stance_height_max").value)
         new_h = _clamp_height(current_h, self._dz_rate, self._dt, h_min, h_max)
+        # 0.01 mm threshold: prevents IK on floating-point-only ticks near the clamp boundary.
+        # (Spec suggested 0.5 mm, but that silently swallows moderate trigger inputs at 50 Hz.)
         if abs(new_h - current_h) > 1e-5:
             self.set_parameters([
                 rclpy.parameter.Parameter(
