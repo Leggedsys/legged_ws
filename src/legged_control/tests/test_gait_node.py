@@ -82,6 +82,23 @@ def test_foot_target_uses_stride_y_in_stance():
     assert z == pytest.approx(-0.28)
 
 
+def test_foot_target_swing_midpoint_returns_to_nominal_xy_and_peak_height():
+    x, y, z = _foot_target(
+        (0.1426, 0.1592, -0.28), "FL", 1.5 * math.pi, 0.28, 0.06, 0.04, 0.02
+    )
+    assert x == pytest.approx(0.1426, abs=1e-4)
+    assert y == pytest.approx(0.1592, abs=1e-4)
+    assert z == pytest.approx(-0.22, abs=1e-4)
+
+
+def test_foot_target_swing_endpoints_return_to_stance_height():
+    for phase in (math.pi, 2.0 * math.pi):
+        _, _, z = _foot_target(
+            (0.1426, 0.1592, -0.28), "FL", phase, 0.28, 0.06, 0.04, 0.02
+        )
+        assert z == pytest.approx(-0.28, abs=1e-4)
+
+
 def test_clamp_cmd_vel_limits_each_axis():
     result = _clamp_cmd_vel((0.4, -0.2, 1.0), 0.15, 0.08, 0.4)
     assert result == pytest.approx((0.15, -0.08, 0.4))

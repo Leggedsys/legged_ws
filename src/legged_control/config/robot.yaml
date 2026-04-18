@@ -131,11 +131,11 @@ control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
-  kp: 1.3
-  kd: 0.23
+  kp: 2.2
+  kd: 0.30
 
 teleop:
-  max_vx:  0.05  # m/s  forward/backward
+  max_vx:  0.30  # m/s  forward/backward
   max_vy:  0.02  # m/s  lateral
   max_yaw: 0.1   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
@@ -147,7 +147,7 @@ teleop:
   axis_vx:  1
   axis_vy:  0
   axis_yaw: 3
-  invert_vx:  true
+  invert_vx:  false
   invert_vy:  false
   invert_yaw: true
   # Emergency stop button index on gamepad.
@@ -164,22 +164,22 @@ standup:
 
 gait:
   stance_height:  0.28
-  step_height:    0.06
-  gait_freq:      1.5
-  max_stride_x:   0.08
+  step_height:    0.07
+  gait_freq:      1.0
+  max_stride_x:   0.15
   max_stride_y:   0.04
   yaw_stride_scale: 1.8
   idle_timeout:   1.0
-  safety_limit_window: 0.5
-  safety_limit_ratio:  0.8
+  safety_limit_window: 1.0
+  safety_limit_ratio:  0.95
   tracking_error_threshold: 0.45
-  tracking_error_window: 0.4
-  tracking_error_ratio: 0.9
+  tracking_error_window: 0.6
+  tracking_error_ratio: 0.95
   tracking_error_grace_period: 2.0
-  max_cmd_vx:     0.06
+  max_cmd_vx:     0.30
   max_cmd_vy:     0.00
   max_cmd_yaw:    0.08
-  max_joint_speed: 0.5
+  max_joint_speed: 1.1
   motion_blend_duration: 0.6
   stance_height_min: 0.20   # m
   stance_height_max: 0.35   # m

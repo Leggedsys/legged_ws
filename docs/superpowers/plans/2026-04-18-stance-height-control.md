@@ -173,11 +173,13 @@ def test_clamp_height_no_clamp():
 
 
 def test_clamp_height_clamps_max():
-    assert _clamp_height(0.345, 0.03, 0.02, 0.20, 0.35) == pytest.approx(0.35)
+    # 0.345 + 0.03 * 1.0 = 0.375 > h_max=0.35 → clamps to 0.35
+    assert _clamp_height(0.345, 0.03, 1.0, 0.20, 0.35) == pytest.approx(0.35)
 
 
 def test_clamp_height_clamps_min():
-    assert _clamp_height(0.205, -0.03, 0.02, 0.20, 0.35) == pytest.approx(0.20)
+    # 0.205 - 0.03 * 1.0 = 0.175 < h_min=0.20 → clamps to 0.20
+    assert _clamp_height(0.205, -0.03, 1.0, 0.20, 0.35) == pytest.approx(0.20)
 ```
 
 - [ ] **Step 2: Run tests to confirm they fail**

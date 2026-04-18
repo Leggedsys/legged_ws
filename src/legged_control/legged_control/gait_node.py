@@ -109,6 +109,16 @@ def _leg_stride(
     return stride_x, stride_y
 
 
+def _cubic_bezier(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+    u = 1.0 - t
+    return (
+        (u**3) * p0
+        + 3.0 * (u**2) * t * p1
+        + 3.0 * u * (t**2) * p2
+        + (t**3) * p3
+    )
+
+
 def _foot_target(
     nominal_foot: tuple[float, float, float],
     leg: str,
@@ -122,15 +132,20 @@ def _foot_target(
     # Hip frame: z negative = below hip. stance_height is a positive distance.
     z_stance = -stance_height
     if _phase_is_stance(phase):
-        s = phase / math.pi
+        s = _smoothstep(phase / math.pi)
         x = x_nom + (0.5 - s) * stride_x
         y = y_nom + (0.5 - s) * stride_y
         z = z_stance
     else:
         t = (phase - math.pi) / math.pi
-        x = x_nom + (t - 0.5) * stride_x
-        y = y_nom + (t - 0.5) * stride_y
-        z = z_stance + step_height * math.sin(math.pi * t)
+        x_start = x_nom - 0.5 * stride_x
+        x_end = x_nom + 0.5 * stride_x
+        y_start = y_nom - 0.5 * stride_y
+        y_end = y_nom + 0.5 * stride_y
+        z_ctrl = z_stance + (4.0 / 3.0) * step_height
+        x = _cubic_bezier(x_start, x_start, x_end, x_end, t)
+        y = _cubic_bezier(y_start, y_start, y_end, y_end, t)
+        z = _cubic_bezier(z_stance, z_ctrl, z_ctrl, z_stance, t)
     return x, y, z
 
 
@@ -548,7 +563,7 @@ class GaitNode(Node):
         self._pub.publish(msg)
 
     def _fault_targets(self) -> list[float]:
-        return list(self._default_targets)
+        return list(self._last_published_targets or self._default_targets)
 
     def _enter_active_mode(self, now: float) -> None:
         self._broadcast_gains(
@@ -563,7 +578,10 @@ class GaitNode(Node):
         self._phase_start = now
         self._fault_broadcast = False
         self._passive_broadcast = False
-        self._last_published_targets = None
+        actual = [self._latest_joint_pos[n] for n in self._joint_names]
+        self._last_published_targets = (
+            [float(v) for v in actual] if all(v is not None for v in actual) else None
+        )
         self._lie_down_start_targets = None
         if self._phase == _PHASE_WAIT:
             self.get_logger().info(
@@ -824,6 +842,9 @@ class GaitNode(Node):
                 self._phase = _PHASE_TROT
                 self._phase_start = now
                 self._oscillator = 0.0
+                actual = [self._latest_joint_pos[n] for n in self._joint_names]
+                if all(v is not None for v in actual):
+                    self._last_published_targets = [float(v) for v in actual]
                 self.get_logger().info("[gait] motion command received — entering TROT")
             return
 
@@ -841,8 +862,7 @@ class GaitNode(Node):
         targets, clipped_any = self._trot_targets()
         self._publish_positions(targets)
         self._update_limit_safety(clipped_any)
-        self._update_tracking_error_safety(targets)
-        self._update_tracking_error_safety(targets)
+        self._update_tracking_error_safety(self._last_published_targets or targets)
 
 
 def main() -> None:

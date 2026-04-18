@@ -137,6 +137,22 @@ class MotorBusNode(Node):
         samples: dict = {name: [] for name in self._names}
 
         self.get_logger().info("Calibrating zero offsets — keep robot still...")
+        # Warm up: send passive commands for 1 s so motor firmware fully initialises
+        # before we sample. Without this, early frames may return garbage positions.
+        for _ in range(100):
+            for cmd, data, name in zip(self._cmds, self._datas, self._names):
+                data.motorType = sdk.MotorType.GO_M8010_6
+                cmd.motorType = sdk.MotorType.GO_M8010_6
+                cmd.mode = sdk.queryMotorMode(
+                    sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC
+                )
+                cmd.kp = 0.0
+                cmd.kd = 0.0
+                cmd.q = 0.0
+                cmd.dq = 0.0
+                cmd.tau = 0.0
+                self._serial.sendRecv(cmd, data)
+            time.sleep(0.01)
         for _ in range(n_samples):
             for cmd, data, name in zip(self._cmds, self._datas, self._names):
                 data.motorType = sdk.MotorType.GO_M8010_6
