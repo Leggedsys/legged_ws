@@ -306,7 +306,7 @@ class GaitNode(Node):
         self._oscillator = 0.0
         self._last_cmd_t: float | None = None
         self._cmd_vel = (0.0, 0.0, 0.0)
-        self._dz_rate = 0.0
+        self._dz_rate = 0.0  # written by _on_cmd_vel, read by _tick; safe under SingleThreadedExecutor
         self._joint_state_seen = False
         self._fault_broadcast = False
         self._passive_broadcast = False
@@ -376,13 +376,13 @@ class GaitNode(Node):
 
     def _integrate_height(self) -> None:
         """Integrate _dz_rate into stance_height for WAIT/TROT phases."""
-        if abs(self._dz_rate) <= 0:
+        if self._dz_rate == 0.0:
             return
         current_h = float(self.get_parameter("stance_height").value)
         h_min = float(self.get_parameter("stance_height_min").value)
         h_max = float(self.get_parameter("stance_height_max").value)
         new_h = _clamp_height(current_h, self._dz_rate, self._dt, h_min, h_max)
-        if abs(new_h - current_h) > 0.0005:
+        if abs(new_h - current_h) > 1e-5:
             self.set_parameters([
                 rclpy.parameter.Parameter(
                     "stance_height",
