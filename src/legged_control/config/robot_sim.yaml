@@ -136,5 +136,23 @@ gait:
   max_cmd_vy: 0.08
   max_cmd_yaw: 0.4
   max_joint_speed: 2.0
+  stance_height_min: 0.20
+  stance_height_max: 0.35
   fault_hold_kp: 0.8
   fault_hold_kd: 0.2
+
+teleop:
+  max_vx:  0.05
+  max_vy:  0.02
+  max_yaw: 0.1
+  deadzone: 0.05
+  axis_vx:  1
+  axis_vy:  0
+  axis_yaw: 3
+  invert_vx:  true
+  invert_vy:  false
+  invert_yaw: true
+  btn_emergency_stop: -1
+  axis_lt: 2
+  axis_rt: 5
+  max_dz:  0.03

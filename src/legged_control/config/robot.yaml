@@ -152,6 +152,9 @@ teleop:
   # Emergency stop button index on gamepad.
   # -1 = not configured; set automatically by calibrate.py during Phase 0.
   btn_emergency_stop: -1
+  axis_lt: 2          # left trigger axis  (0.0=released, 1.0=fully pressed)
+  axis_rt: 5          # right trigger axis
+  max_dz:  0.03       # m/s height rate limit
 
 standup:
   hold_duration: 5.0   # seconds to hold at 0 before ramping (let motors settle)
@@ -171,5 +174,7 @@ gait:
   max_cmd_yaw:    0.08
   max_joint_speed: 0.5
   motion_blend_duration: 0.6
+  stance_height_min: 0.20   # m
+  stance_height_max: 0.35   # m
   fault_hold_kp:  0.8
   fault_hold_kd:  0.2
