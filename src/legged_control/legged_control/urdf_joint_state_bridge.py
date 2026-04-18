@@ -42,6 +42,7 @@ class URDFJointStateBridgeNode:  # pragma: no cover - exercised via ROS runtime
         class _Node(Node):
             def __init__(self) -> None:
                 super().__init__("urdf_joint_state_bridge")
+                self.declare_parameter("config_path", "")
                 self._joint_cfg = self._load_joint_cfg()
                 self._pub = self.create_publisher(JointState, "/joint_states", 10)
                 self.create_subscription(
@@ -53,7 +54,10 @@ class URDFJointStateBridgeNode:  # pragma: no cover - exercised via ROS runtime
 
             def _load_joint_cfg(self) -> dict[str, dict]:
                 share = get_package_share_directory("legged_control")
-                with open(os.path.join(share, "config", "robot.yaml")) as f:
+                config_path = str(self.get_parameter("config_path").value or "").strip()
+                if not config_path:
+                    config_path = os.path.join(share, "config", "robot.yaml")
+                with open(config_path) as f:
                     cfg = yaml.safe_load(f)
                 return {joint["name"]: joint for joint in cfg["joints"]}
 
@@ -78,8 +82,11 @@ class URDFJointStateBridgeNode:  # pragma: no cover - exercised via ROS runtime
         self._rclpy.spin(self._node)
 
     def shutdown(self) -> None:
-        self._node.destroy_node()
-        self._rclpy.shutdown()
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+        if self._rclpy.ok():
+            self._rclpy.shutdown()
 
 
 def main() -> None:

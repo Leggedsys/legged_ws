@@ -86,3 +86,53 @@ ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 seria
 # 查看所有 launch 参数
 ros2 launch legged_control robot.launch.py --show-args
 ```
+
+---
+
+## 第三步：位置步态（position_control）
+
+`position_control` 模式现在是显式姿态命令流程：
+
+1. 启动后保持 `passive`，不会因 `/cmd_vel` 自动起身
+2. 收到 `/posture_command true` 后平滑起身到 `default_q`
+3. 起身完成且关节反馈接近站姿后，进入站立待机
+4. 收到非零 `/cmd_vel` 后才进入步态
+5. 收到 `/posture_command false` 后平滑趴下，回到 `passive`
+
+真机启动：
+
+```bash
+ros2 launch legged_control robot.launch.py mode:=position_control
+```
+
+没有手柄时可直接手工发命令：
+
+```bash
+# 起身
+ros2 topic pub --once /posture_command std_msgs/msg/Bool "{data: true}"
+
+# 前进
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.02, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+
+# 原地转向
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.08}}"
+
+# 停止
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+
+# 趴下
+ros2 topic pub --once /posture_command std_msgs/msg/Bool "{data: false}"
+```
+
+### 仿真验证
+
+RViz 仿真默认与真机共用 `src/legged_control/config/robot.yaml`，因此零位和 `default_q` 与实机对齐：
+
+```bash
+ros2 launch legged_control position_control_sim.launch.py
+```
+
+如果使用手柄，`A` 键等价于交替发送：
+
+1. `/posture_command true`
+2. `/posture_command false`

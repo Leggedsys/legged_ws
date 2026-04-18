@@ -2,9 +2,14 @@ import sys
 import os
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from legged_control.teleop_node import _apply_deadzone, _scale_axis
+from legged_control.teleop_node import (
+    _apply_deadzone,
+    _button_is_rising_edge,
+    _normalize_trigger_axis,
+    _scale_axis,
+)
 
 
 class TestApplyDeadzone:
@@ -60,17 +65,57 @@ class TestScaleAxis:
         assert abs(_scale_axis(-1.0, 0.05, 1.0, True) - 1.0) < 1e-9
 
 
+class TestButtonIsRisingEdge:
+    def test_detects_button_press_edge(self):
+        assert _button_is_rising_edge(0, 1) is True
+
+    def test_ignores_button_hold(self):
+        assert _button_is_rising_edge(1, 1) is False
+
+    def test_ignores_button_release(self):
+        assert _button_is_rising_edge(1, 0) is False
+
+
 # ---------------------------------------------------------------------------
 # Trigger (LT/RT) height-rate tests
 # ---------------------------------------------------------------------------
 
 
-def _dz(lt: float, rt: float, deadzone: float = 0.05, max_dz: float = 0.03) -> float:
+def _dz(
+    lt: float,
+    rt: float,
+    deadzone: float = 0.05,
+    max_dz: float = 0.03,
+    lt_released: float = 0.0,
+    rt_released: float = 0.0,
+) -> float:
     """Compute height rate from trigger values (mirrors teleop_node implementation)."""
-    return (
-        _scale_axis(rt, deadzone, max_dz, invert=False)
-        - _scale_axis(lt, deadzone, max_dz, invert=False)
+    return _scale_axis(
+        _normalize_trigger_axis(rt, rt_released), deadzone, max_dz, invert=False
+    ) - _scale_axis(
+        _normalize_trigger_axis(lt, lt_released), deadzone, max_dz, invert=False
     )
+
+
+class TestNormalizeTriggerAxis:
+    def test_keeps_zero_to_one_convention(self):
+        assert _normalize_trigger_axis(0.0, 0.0) == pytest.approx(0.0)
+        assert _normalize_trigger_axis(0.4, 0.0) == pytest.approx(0.4)
+        assert _normalize_trigger_axis(1.0, 0.0) == pytest.approx(1.0)
+
+    def test_maps_negative_one_to_one_convention(self):
+        assert _normalize_trigger_axis(-1.0, -1.0) == pytest.approx(0.0)
+        assert _normalize_trigger_axis(0.0, -1.0) == pytest.approx(0.5)
+        assert _normalize_trigger_axis(1.0, -1.0) == pytest.approx(1.0)
+
+    def test_maps_positive_one_to_negative_one_convention(self):
+        assert _normalize_trigger_axis(1.0, 1.0) == pytest.approx(0.0)
+        assert _normalize_trigger_axis(0.0, 1.0) == pytest.approx(0.5)
+        assert _normalize_trigger_axis(-1.0, 1.0) == pytest.approx(1.0)
+
+    def test_clamps_out_of_range_values(self):
+        assert _normalize_trigger_axis(-2.0, -1.0) == pytest.approx(0.0)
+        assert _normalize_trigger_axis(2.0, 0.0) == pytest.approx(1.0)
 
 
 def test_trigger_both_released_gives_zero():
@@ -86,7 +131,7 @@ def test_trigger_lt_fully_pressed_gives_neg_max_dz():
 
 
 def test_trigger_within_deadzone_gives_zero():
-    assert _dz(lt=0.0, rt=0.03) == pytest.approx(0.0)   # 0.03 < deadzone 0.05
+    assert _dz(lt=0.0, rt=0.03) == pytest.approx(0.0)  # 0.03 < deadzone 0.05
 
 
 def test_trigger_partial_differential():
@@ -100,3 +145,16 @@ def test_trigger_partial_differential():
 
 def test_trigger_both_fully_pressed_cancels():
     assert _dz(lt=1.0, rt=1.0) == pytest.approx(0.0)
+
+
+def test_negative_one_to_one_trigger_convention_released_is_zero():
+    assert _dz(lt=-1.0, rt=-1.0, lt_released=-1.0, rt_released=-1.0) == pytest.approx(0.0)
+
+
+def test_negative_one_to_one_trigger_convention_pressed_scales_correctly():
+    assert _dz(lt=-1.0, rt=1.0, lt_released=-1.0, rt_released=-1.0) == pytest.approx(0.03)
+    assert _dz(lt=1.0, rt=-1.0, lt_released=-1.0, rt_released=-1.0) == pytest.approx(-0.03)
+
+
+def test_positive_one_to_negative_one_trigger_convention_released_is_zero():
+    assert _dz(lt=1.0, rt=1.0, lt_released=1.0, rt_released=1.0) == pytest.approx(0.0)

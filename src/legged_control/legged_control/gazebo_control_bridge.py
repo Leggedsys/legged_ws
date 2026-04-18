@@ -95,7 +95,7 @@ class GazeboControlBridgeNode:  # pragma: no cover - runtime node
                 config_path = str(self.get_parameter("config_path").value or "").strip()
                 if not config_path:
                     share = get_package_share_directory("legged_control")
-                    config_path = os.path.join(share, "config", "robot_sim.yaml")
+                    config_path = os.path.join(share, "config", "robot.yaml")
 
                 self._joint_cfg = _load_joint_cfg_from_path(config_path)
                 self._joint_order = list(self._joint_cfg.keys())
@@ -146,8 +146,11 @@ class GazeboControlBridgeNode:  # pragma: no cover - runtime node
         self._rclpy.spin(self._node)
 
     def shutdown(self) -> None:
-        self._node.destroy_node()
-        self._rclpy.shutdown()
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+        if self._rclpy.ok():
+            self._rclpy.shutdown()
 
 
 def main() -> None:

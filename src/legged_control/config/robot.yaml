@@ -132,13 +132,14 @@ control:
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
   kp: 1.3
-  kd: 0.02
+  kd: 0.23
 
 teleop:
   max_vx:  0.05  # m/s  forward/backward
   max_vy:  0.02  # m/s  lateral
   max_yaw: 0.1   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
+  btn_posture_toggle: 0  # A button: toggle stand up / lie down
   # Axis mapping (standard gamepad layout):
   #   axis_vx:  left stick vertical   (typically axis 1, inverted)
   #   axis_vy:  left stick horizontal (typically axis 0, inverted)
@@ -152,24 +153,30 @@ teleop:
   # Emergency stop button index on gamepad.
   # -1 = not configured; set automatically by calibrate.py during Phase 0.
   btn_emergency_stop: -1
-  axis_lt: 2          # left trigger axis  (0.0=released, 1.0=fully pressed)
-  axis_rt: 5          # right trigger axis
+  axis_lt: 4          # left trigger axis  (observed as 5th /joy axis)
+  axis_rt: 5          # right trigger axis (observed as 6th /joy axis)
   max_dz:  0.03       # m/s height rate limit
 
 standup:
   hold_duration: 5.0   # seconds to hold at 0 before ramping (let motors settle)
   ramp_duration: 8.0   # seconds for 0 → default_q smooth-step ramp
+  lie_down_duration: 2.0   # seconds for default_q → 0 smooth-step ramp
 
 gait:
   stance_height:  0.28
   step_height:    0.06
-  gait_freq:      2.0
+  gait_freq:      1.5
   max_stride_x:   0.08
   max_stride_y:   0.04
+  yaw_stride_scale: 1.8
   idle_timeout:   1.0
   safety_limit_window: 0.5
   safety_limit_ratio:  0.8
-  max_cmd_vx:     0.03
+  tracking_error_threshold: 0.45
+  tracking_error_window: 0.4
+  tracking_error_ratio: 0.9
+  tracking_error_grace_period: 2.0
+  max_cmd_vx:     0.06
   max_cmd_vy:     0.00
   max_cmd_yaw:    0.08
   max_joint_speed: 0.5

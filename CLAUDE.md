@@ -69,6 +69,8 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 
 **`stand`** — Motors hold all joints at their `default_q` using PD gains from `robot.yaml`. Also starts `passive_monitor_node` so the 4-line position display remains active. `stand_node` supports runtime gain tuning: changing `kp`/`kd` in `robot.yaml` and restarting is the typical workflow, but gains can also be updated live via `AsyncParametersClient` without relaunch.
 
+**`position_control`** — Operator-triggered position gait. On launch the robot stays in true passive (`kp=kd=0`) until it receives `/posture_command=true` (gamepad `A` button via `teleop_node`). `gait_node` then ramps from motor-frame zero pose to `default_q`, waits until the actual joints are near `default_q` and nearly settled, and only enters `TROT` after a non-zero `/cmd_vel` is received. `/posture_command=false` performs a smooth lie-down back toward zero and only returns to passive once joint feedback is near zero and nearly settled.
+
 ## Architecture
 
 ### `legged_control`
@@ -79,8 +81,9 @@ Use this to determine `q_min`, `q_max`, and `default_q` values, then edit `confi
 - `stand_node.py` — publishes `default_q` for all 12 joints at 50 Hz on `/joint_commands`; broadcasts kp/kd updates to both bus nodes via `AsyncParametersClient`
 - `joint_aggregator.py` — subscribes to all 12 `/<ns>/joint_states`, publishes `/joint_states_aggregated` in canonical joint order (motor frame, no coordinate conversion); triggers on every incoming message
 - `standup_node.py` — three-phase stand-up: hold at 0 (`hold_duration` s) → smooth-step ramp to `default_q` (`ramp_duration` s) → hold; logs a progress bar during ramp; same runtime kp/kd broadcast as `stand_node`.
-- `teleop_node.py` — subscribes `/joy` (gamepad via `joy_node`); maps left/right sticks to `linear.x/y` and `angular.z`; maps LT/RT triggers (axes 2/5 on Betop Kunpeng 20) to `linear.z` as stance-height rate (0.0=released, 1.0=fully pressed, max 0.03 m/s); publishes `geometry_msgs/Twist` to `/cmd_vel` for `gait_node`. Auto-started in `position_control` mode alongside `joy_node`. Run standalone: `ros2 run legged_control teleop_node`.
+- `teleop_node.py` — subscribes `/joy` (gamepad via `joy_node`); maps left/right sticks to `linear.x/y` and `angular.z`; maps LT/RT triggers (axes 2/5 on Betop Kunpeng 20) to `linear.z` as stance-height rate (0.0=released, 1.0=fully pressed, max 0.03 m/s); publishes `geometry_msgs/Twist` to `/cmd_vel` for `gait_node`; on `A` button rising edge toggles the desired posture and publishes `std_msgs/Bool` on `/posture_command` (`true`=stand up, `false`=lie down). Auto-started in `position_control` mode alongside `joy_node`. Run standalone: `ros2 run legged_control teleop_node`.
 - `launch/robot.launch.py` — single entry point, starts 2 `motor_bus_node` instances (one per serial port) + mode-specific nodes (`passive`, `stand`, `standup`, `position_control`)
+- `launch/position_control_sim.launch.py` — RViz-only simulation path using `fake_motor_bus_node`; by default both control and display read `config/robot.yaml`, so simulated zero/default poses match real hardware config.
 
 ### `unitree_actuator_sdk`
 - Build type: `ament_python` with a C++ extension compiled via `setup.py`
@@ -108,6 +111,7 @@ ros2 launch odin_ros_driver odin1_ros2.launch.py
 | `/joint_states_aggregated` | `sensor_msgs/JointState` | `joint_aggregator` → `gait_node` |
 | `/joy` | `sensor_msgs/Joy` | `joy_node` (gamepad driver) |
 | `/cmd_vel` | `geometry_msgs/Twist` | `teleop_node` → `gait_node` |
+| `/posture_command` | `std_msgs/Bool` | `teleop_node` or manual CLI → `gait_node` (`true` stand up, `false` lie down) |
 | `odin1/cloud_raw` | `sensor_msgs/PointCloud2` | LiDAR (raw, with reflectivity/confidence fields) |
 | `odin1/cloud_slam` | `sensor_msgs/PointCloud2` | LiDAR (SLAM cloud, RGB-colored) |
 | `odin1/image` | `sensor_msgs/Image` | LiDAR RGB camera |
@@ -149,6 +153,7 @@ teleop:
   max_vy:  0.5                # m/s  lateral
   max_yaw: 1.0                # rad/s yaw rate
   deadzone: 0.05              # joystick axis deadzone (fraction of full range)
+  btn_posture_toggle: 0       # gamepad button used by teleop_node to toggle desired posture
   axis_vx:  1                 # left stick vertical   (inverted)
   axis_vy:  0                 # left stick horizontal
   axis_yaw: 3                 # right stick horizontal (inverted)
@@ -160,10 +165,21 @@ teleop:
   axis_rt: 5                  # right trigger axis
   max_dz:  0.03               # m/s height rate limit (RT raises, LT lowers)
 
+standup:
+  hold_duration: 5.0          # used by standalone standup_node; position_control overrides this to 0.0
+  ramp_duration: 8.0          # seconds for 0 -> default_q smooth-step ramp
+  lie_down_duration: 2.0      # seconds for default_q/current target -> 0 smooth-step ramp
+
 gait:
   stance_height: 0.28         # initial height (overridden by FK at runtime)
   stance_height_min: 0.20     # m — minimum height (clamped by height integration)
   stance_height_max: 0.35     # m — maximum height
+  motion_blend_duration: 0.6  # blend from standing default_q into gait targets on motion start
+  yaw_stride_scale: 1.8       # extra gain applied only to yaw-derived foot tangential stride
+  tracking_error_threshold: 0.45    # rad — joint feedback vs commanded target error threshold
+  tracking_error_window: 0.4        # s   — rolling window for tracking error safety
+  tracking_error_ratio: 0.9         # fraction of bad samples in window before FAULT
+  tracking_error_grace_period: 2.0  # s   — ignore tracking error safety right after TROT starts
   # ... other gait params
 ```
 

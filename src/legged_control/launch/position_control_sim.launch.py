@@ -32,6 +32,7 @@ def _robot_description_from_urdf(path: str) -> str:
 def _launch_setup(context, *args, **kwargs):
     cfg = _load_robot_cfg()
     share = get_package_share_directory("legged_control")
+    config_path = LaunchConfiguration("config_path").perform(context)
     joints = cfg["joints"]
     front_joints = [
         joint["name"] for joint in joints if joint["name"].split("_")[0] in ("FR", "FL")
@@ -81,13 +82,14 @@ def _launch_setup(context, *args, **kwargs):
             package="legged_control",
             executable="gait_node",
             name="gait_node",
-            parameters=[{"config_path": LaunchConfiguration("gait_config_path")}],
+            parameters=[{"config_path": config_path}],
             output="screen",
         ),
         Node(
             package="legged_control",
             executable="urdf_joint_state_bridge",
             name="urdf_joint_state_bridge",
+            parameters=[{"config_path": config_path}],
             output="screen",
         ),
         Node(
@@ -121,9 +123,9 @@ def generate_launch_description():
                 description="Absolute path to the quadruped URDF file",
             ),
             DeclareLaunchArgument(
-                "gait_config_path",
-                default_value=os.path.join(share, "config", "robot_sim.yaml"),
-                description="Config file used by gait_node for simulation defaults",
+                "config_path",
+                default_value=os.path.join(share, "config", "robot.yaml"),
+                description="Config file used by simulation control and display bridges",
             ),
             DeclareLaunchArgument(
                 "use_rviz",

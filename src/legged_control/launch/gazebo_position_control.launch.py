@@ -21,7 +21,7 @@ _DEFAULT_SIM_URDF = (
 
 def _launch_setup(context, *args, **kwargs):
     share = get_package_share_directory("legged_control")
-    sim_config = os.path.join(share, "config", "robot_sim.yaml")
+    config_path = os.path.join(share, "config", "robot.yaml")
     physics_launch = os.path.join(share, "launch", "gazebo_physics.launch.py")
 
     return [
@@ -51,7 +51,7 @@ def _launch_setup(context, *args, **kwargs):
             package="legged_control",
             executable="gazebo_control_bridge",
             name="gazebo_control_bridge",
-            parameters=[{"config_path": sim_config}],
+            parameters=[{"config_path": config_path}],
             output="screen",
         ),
         Node(
@@ -60,7 +60,7 @@ def _launch_setup(context, *args, **kwargs):
             name="gait_node",
             parameters=[
                 {
-                    "config_path": sim_config,
+                    "config_path": config_path,
                     "skip_standup": True,
                     "hold_duration": 0.0,
                     "ramp_duration": 0.0,

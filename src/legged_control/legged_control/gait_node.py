@@ -32,6 +32,10 @@ _PHASE_WAIT = "WAIT"
 _PHASE_TROT = "TROT"
 _PHASE_FAULT = "FAULT"
 _PHASE_PASSIVE = "PASSIVE"
+_PHASE_LIE_DOWN = "LIE_DOWN"
+_STANDUP_TARGET_TOL = 0.05
+_LIE_DOWN_ZERO_TOL = 0.03
+_JOINT_SETTLED_VEL_TOL = 0.05
 
 _HIP_POSITIONS = {
     "FL": (0.1426, 0.04654, 0.0),
@@ -69,6 +73,10 @@ def _is_effectively_zero_cmd(
     return all(abs(value) <= eps for value in cmd_vel)
 
 
+def _has_motion_command(cmd_vel: tuple[float, float, float], eps: float = 1e-6) -> bool:
+    return not _is_effectively_zero_cmd(cmd_vel, eps)
+
+
 def _body_to_hip(
     leg: str, foot_body: tuple[float, float, float]
 ) -> tuple[float, float, float]:
@@ -86,14 +94,15 @@ def _leg_stride(
     gait_freq: float,
     max_stride_x: float,
     max_stride_y: float,
+    yaw_stride_scale: float,
 ) -> tuple[float, float]:
     x_nom, y_nom = nominal_foot
     stride_x = cmd_vx / (2.0 * gait_freq)
     stride_y = cmd_vy / (2.0 * gait_freq)
 
     # Yaw command maps to tangential foot motion about the body center.
-    stride_x += (-cmd_yaw * y_nom) / (2.0 * gait_freq)
-    stride_y += (cmd_yaw * x_nom) / (2.0 * gait_freq)
+    stride_x += yaw_stride_scale * (-cmd_yaw * y_nom) / (2.0 * gait_freq)
+    stride_y += yaw_stride_scale * (cmd_yaw * x_nom) / (2.0 * gait_freq)
 
     stride_x = max(-max_stride_x, min(max_stride_x, stride_x))
     stride_y = max(-max_stride_y, min(max_stride_y, stride_y))
@@ -158,7 +167,9 @@ def _ik_derived_targets(
     q_urdf = inverse_kinematics(leg, foot_hip, leg_default_q_urdf)
     if q_urdf is None:
         return None
-    targets, _ = _motor_targets_from_urdf(leg_joints, q_urdf)  # clipping flag unused here
+    targets, _ = _motor_targets_from_urdf(
+        leg_joints, q_urdf
+    )  # clipping flag unused here
     return targets
 
 
@@ -248,18 +259,19 @@ class GaitNode(Node):
         kd_init = float(control_cfg["kd"])
         self.declare_parameter("kp", kp_init)
         self.declare_parameter("kd", kd_init)
-        self.declare_parameter(
-            "hold_duration", float(standup_cfg.get("hold_duration", 2.0))
-        )
+        # In position_control, standup is operator-triggered after motors are already
+        # online, so there is no need to keep the legacy pre-ramp hold.
+        self.declare_parameter("hold_duration", 0.0)
         self.declare_parameter(
             "ramp_duration", float(standup_cfg.get("ramp_duration", 8.0))
         )
-        fk_stance_height = -sum(
-            self._nominal_feet[leg][2] for leg in _LEG_ORDER
-        ) / len(_LEG_ORDER)
         self.declare_parameter(
-            "stance_height", fk_stance_height
+            "lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0))
         )
+        fk_stance_height = -sum(self._nominal_feet[leg][2] for leg in _LEG_ORDER) / len(
+            _LEG_ORDER
+        )
+        self.declare_parameter("stance_height", fk_stance_height)
         self._rederive_defaults(fk_stance_height)
         self.declare_parameter("step_height", float(gait_cfg.get("step_height", 0.06)))
         self.declare_parameter("gait_freq", float(gait_cfg.get("gait_freq", 2.0)))
@@ -292,6 +304,25 @@ class GaitNode(Node):
             "motion_blend_duration", float(gait_cfg.get("motion_blend_duration", 0.6))
         )
         self.declare_parameter(
+            "yaw_stride_scale", float(gait_cfg.get("yaw_stride_scale", 1.8))
+        )
+        self.declare_parameter(
+            "tracking_error_threshold",
+            float(gait_cfg.get("tracking_error_threshold", 0.20)),
+        )
+        self.declare_parameter(
+            "tracking_error_window",
+            float(gait_cfg.get("tracking_error_window", 0.4)),
+        )
+        self.declare_parameter(
+            "tracking_error_ratio",
+            float(gait_cfg.get("tracking_error_ratio", 0.7)),
+        )
+        self.declare_parameter(
+            "tracking_error_grace_period",
+            float(gait_cfg.get("tracking_error_grace_period", 1.0)),
+        )
+        self.declare_parameter(
             "stance_height_min", float(gait_cfg.get("stance_height_min", 0.20))
         )
         self.declare_parameter(
@@ -308,10 +339,14 @@ class GaitNode(Node):
         self._cmd_vel = (0.0, 0.0, 0.0)
         self._dz_rate = 0.0  # written by _on_cmd_vel, read by _tick; safe under SingleThreadedExecutor
         self._joint_state_seen = False
+        self._latest_joint_pos = {name: None for name in self._joint_names}
+        self._latest_joint_vel = {name: None for name in self._joint_names}
         self._fault_broadcast = False
         self._passive_broadcast = False
         self._estop_active = False
+        self._stand_requested = False
         self._last_published_targets: list[float] | None = None
+        self._lie_down_start_targets: list[float] | None = None
         self._motion_started_at: float | None = None
 
         self._gain_clients = [
@@ -320,9 +355,11 @@ class GaitNode(Node):
         ]
 
         self._limit_hits = deque()
+        self._tracking_error_hits = deque()
 
         self._pub = self.create_publisher(JointState, "/joint_commands", 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        self.create_subscription(Bool, "/posture_command", self._on_posture_command, 10)
         self.create_subscription(Bool, "/emergency_stop", self._on_emergency_stop, 10)
         self.create_subscription(
             JointState, "/joint_states_aggregated", self._on_joint_state, 10
@@ -341,7 +378,7 @@ class GaitNode(Node):
             f"kp={kp_init}  kd={kd_init}  stance_height={fk_stance_height:.4f} m"
         )
         self.get_logger().info(
-            "[gait] waiting for fresh /cmd_vel before enabling torque and starting standup"
+            "[gait] waiting for /posture_command=true before enabling torque and starting standup"
         )
 
     def _load_config(self) -> dict:
@@ -388,13 +425,15 @@ class GaitNode(Node):
         # 0.01 mm threshold: prevents IK on floating-point-only ticks near the clamp boundary.
         # (Spec suggested 0.5 mm, but that silently swallows moderate trigger inputs at 50 Hz.)
         if abs(new_h - current_h) > 1e-5:
-            self.set_parameters([
-                rclpy.parameter.Parameter(
-                    "stance_height",
-                    rclpy.parameter.Parameter.Type.DOUBLE,
-                    new_h,
-                )
-            ])
+            self.set_parameters(
+                [
+                    rclpy.parameter.Parameter(
+                        "stance_height",
+                        rclpy.parameter.Parameter.Type.DOUBLE,
+                        new_h,
+                    )
+                ]
+            )
             self._rederive_defaults(new_h)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
@@ -414,8 +453,56 @@ class GaitNode(Node):
                 "[gait] emergency stop cleared, but node remains in FAULT until relaunch"
             )
 
-    def _on_joint_state(self, _msg: JointState) -> None:
+    def _on_joint_state(self, msg: JointState) -> None:
         self._joint_state_seen = True
+        positions = {name: pos for name, pos in zip(msg.name, msg.position)}
+        velocities = {name: vel for name, vel in zip(msg.name, msg.velocity)}
+        for name in self._joint_names:
+            if name in positions:
+                self._latest_joint_pos[name] = float(positions[name])
+            if name in velocities:
+                self._latest_joint_vel[name] = float(velocities[name])
+
+    def _on_posture_command(self, msg: Bool) -> None:
+        if self._phase == _PHASE_FAULT:
+            self.get_logger().warn(
+                "[gait] ignoring posture command while FAULT is active",
+                throttle_duration_sec=1.0,
+            )
+            return
+
+        if bool(msg.data):
+            if self._phase != _PHASE_PASSIVE:
+                self.get_logger().info(
+                    "[gait] posture command=true received while already active; keeping current posture",
+                    throttle_duration_sec=1.0,
+                )
+                return
+            self._stand_requested = True
+            self.get_logger().info("[gait] posture command=true received — preparing standup")
+            return
+
+        if self._phase == _PHASE_PASSIVE:
+            self.get_logger().info(
+                "[gait] posture command=false received while already passive; keeping current posture",
+                throttle_duration_sec=1.0,
+            )
+            return
+
+        if self._phase == _PHASE_LIE_DOWN:
+            self.get_logger().warn(
+                "[gait] posture command=false ignored while lie-down is in progress",
+                throttle_duration_sec=1.0,
+            )
+            return
+
+        self._phase = _PHASE_LIE_DOWN
+        self._phase_start = time.monotonic()
+        self._lie_down_start_targets = list(
+            self._last_published_targets or self._default_targets
+        )
+        self._motion_started_at = None
+        self.get_logger().info("[gait] posture command=false received — starting lie-down")
 
     def _on_gains_changed(self, params: list) -> SetParametersResult:
         new_kp = next((p.value for p in params if p.name == "kp"), None)
@@ -467,6 +554,7 @@ class GaitNode(Node):
         self._broadcast_gains(
             float(self.get_parameter("kp").value), float(self.get_parameter("kd").value)
         )
+        self._stand_requested = False
         self._phase = (
             _PHASE_WAIT
             if bool(self.get_parameter("skip_standup").value)
@@ -476,12 +564,13 @@ class GaitNode(Node):
         self._fault_broadcast = False
         self._passive_broadcast = False
         self._last_published_targets = None
+        self._lie_down_start_targets = None
         if self._phase == _PHASE_WAIT:
             self.get_logger().info(
-                "[gait] remote command received — skipping standup and holding default pose"
+                "[gait] posture command=true received — skipping standup and holding default pose"
             )
         else:
-            self.get_logger().info("[gait] remote command received — starting standup")
+            self.get_logger().info("[gait] posture command=true received — starting standup")
 
     def _enter_passive_mode(self) -> None:
         self._phase = _PHASE_PASSIVE
@@ -489,13 +578,17 @@ class GaitNode(Node):
         self._oscillator = 0.0
         self._joint_state_seen = False
         self._limit_hits.clear()
+        self._tracking_error_hits.clear()
         self._last_published_targets = None
+        self._lie_down_start_targets = None
         self._fault_broadcast = False
+        self._stand_requested = False
+        self._motion_started_at = None
         if not self._passive_broadcast:
             self._broadcast_gains(0.0, 0.0)
             self._passive_broadcast = True
             self.get_logger().warn(
-                "[gait] no fresh /cmd_vel — torque disabled until remote command resumes"
+                "[gait] passive mode — torque disabled until /posture_command=true requests standup"
             )
 
     def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
@@ -508,23 +601,54 @@ class GaitNode(Node):
             return [alpha * q for q in self._default_targets], False
         return list(self._default_targets), True
 
+    def _lie_down_targets(self, elapsed: float) -> tuple[list[float], bool]:
+        duration = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
+        alpha = _smoothstep(elapsed / duration)
+        start_targets = self._lie_down_start_targets or self._default_targets
+        return _blend_targets(
+            start_targets, [0.0] * len(start_targets), alpha
+        ), alpha >= 1.0
+
+    def _is_near_zero_pose(self, tol: float = _LIE_DOWN_ZERO_TOL) -> bool:
+        values = [self._latest_joint_pos[name] for name in self._joint_names]
+        if any(value is None for value in values):
+            return False
+        return all(abs(float(value)) <= tol for value in values)
+
+    def _is_settled(self, vel_tol: float = _JOINT_SETTLED_VEL_TOL) -> bool:
+        values = [self._latest_joint_vel[name] for name in self._joint_names]
+        if any(value is None for value in values):
+            return False
+        return all(abs(float(value)) <= vel_tol for value in values)
+
+    def _is_near_targets(self, targets: list[float], tol: float) -> bool:
+        values = [self._latest_joint_pos[name] for name in self._joint_names]
+        if any(value is None for value in values):
+            return False
+        return all(
+            abs(float(value) - target) <= tol for value, target in zip(values, targets)
+        )
+
+    def _current_motion_cmd(self, now: float) -> tuple[float, float, float]:
+        idle_timeout = float(self.get_parameter("idle_timeout").value)
+        cmd_vx, cmd_vy, cmd_yaw = _command_with_timeout(
+            self._cmd_vel, self._last_cmd_t, now, idle_timeout
+        )
+        return _clamp_cmd_vel(
+            (cmd_vx, cmd_vy, cmd_yaw),
+            float(self.get_parameter("max_cmd_vx").value),
+            float(self.get_parameter("max_cmd_vy").value),
+            float(self.get_parameter("max_cmd_yaw").value),
+        )
+
     def _trot_targets(self) -> tuple[list[float], bool]:
         now = time.monotonic()
         step_height = float(self.get_parameter("step_height").value)
         gait_freq = float(self.get_parameter("gait_freq").value)
         max_stride_x = float(self.get_parameter("max_stride_x").value)
         max_stride_y = float(self.get_parameter("max_stride_y").value)
-        idle_timeout = float(self.get_parameter("idle_timeout").value)
-
-        cmd_vx, cmd_vy, cmd_yaw = _command_with_timeout(
-            self._cmd_vel, self._last_cmd_t, now, idle_timeout
-        )
-        cmd_vx, cmd_vy, cmd_yaw = _clamp_cmd_vel(
-            (cmd_vx, cmd_vy, cmd_yaw),
-            float(self.get_parameter("max_cmd_vx").value),
-            float(self.get_parameter("max_cmd_vy").value),
-            float(self.get_parameter("max_cmd_yaw").value),
-        )
+        yaw_stride_scale = float(self.get_parameter("yaw_stride_scale").value)
+        cmd_vx, cmd_vy, cmd_yaw = self._current_motion_cmd(now)
         if _is_effectively_zero_cmd((cmd_vx, cmd_vy, cmd_yaw)):
             self._motion_started_at = None
             return list(self._default_targets), False
@@ -549,6 +673,7 @@ class GaitNode(Node):
                 gait_freq,
                 max_stride_x,
                 max_stride_y,
+                yaw_stride_scale,
             )
             foot_body = _foot_target(
                 self._nominal_feet[leg],
@@ -602,22 +727,54 @@ class GaitNode(Node):
                 f"[gait] sustained joint limit / IK failure ratio {ratio:.2f} >= {limit_ratio:.2f}; entering FAULT"
             )
 
+    def _tracking_error_exceeded(self, targets: list[float], threshold: float) -> bool:
+        values = [self._latest_joint_pos[name] for name in self._joint_names]
+        if any(value is None for value in values):
+            return False
+        return any(
+            abs(float(value) - target) > threshold
+            for value, target in zip(values, targets)
+        )
+
+    def _update_tracking_error_safety(self, targets: list[float]) -> None:
+        now = time.monotonic()
+        grace_period = float(self.get_parameter("tracking_error_grace_period").value)
+        if self._phase != _PHASE_TROT:
+            self._tracking_error_hits.clear()
+            return
+        if self._motion_started_at is not None and now - self._motion_started_at < grace_period:
+            self._tracking_error_hits.clear()
+            return
+
+        threshold = float(self.get_parameter("tracking_error_threshold").value)
+        window_seconds = float(self.get_parameter("tracking_error_window").value)
+        error_ratio = float(self.get_parameter("tracking_error_ratio").value)
+        window_len = max(1, int(round(window_seconds * self._loop_hz)))
+        self._tracking_error_hits.append(
+            self._tracking_error_exceeded(targets, threshold)
+        )
+        while len(self._tracking_error_hits) > window_len:
+            self._tracking_error_hits.popleft()
+        if len(self._tracking_error_hits) < window_len:
+            return
+        ratio = sum(self._tracking_error_hits) / float(window_len)
+        if ratio >= error_ratio:
+            self._phase = _PHASE_FAULT
+            self._fault_broadcast = False
+            self.get_logger().error(
+                f"[gait] sustained joint tracking error ratio {ratio:.2f} >= {error_ratio:.2f}; entering FAULT"
+            )
+
     def _tick(self) -> None:
         now = time.monotonic()
-        idle_timeout = float(self.get_parameter("idle_timeout").value)
 
         if self._estop_active:
             self._phase = _PHASE_FAULT
 
-        if self._phase != _PHASE_FAULT:
-            fresh_command = _command_is_fresh(self._last_cmd_t, now, idle_timeout)
-            if self._phase == _PHASE_PASSIVE:
-                if fresh_command:
-                    self._enter_active_mode(now)
-                else:
-                    self._enter_passive_mode()
-                    return
-            elif not fresh_command:
+        if self._phase != _PHASE_FAULT and self._phase == _PHASE_PASSIVE:
+            if self._stand_requested:
+                self._enter_active_mode(now)
+            else:
                 self._enter_passive_mode()
                 return
 
@@ -637,10 +794,19 @@ class GaitNode(Node):
             self._publish_positions(self._fault_targets())
             return
 
-        if self._phase == _PHASE_STANDUP:
-            targets, done = self._standup_targets(now - self._phase_start)
+        if self._phase == _PHASE_LIE_DOWN:
+            targets, done = self._lie_down_targets(now - self._phase_start)
             self._publish_positions(targets)
-            if done:
+            if done and self._is_near_zero_pose() and self._is_settled():
+                self._enter_passive_mode()
+            return
+
+        if self._phase == _PHASE_STANDUP:
+            targets, ramp_complete = self._standup_targets(now - self._phase_start)
+            self._publish_positions(targets)
+            if ramp_complete and self._is_near_targets(
+                self._default_targets, _STANDUP_TARGET_TOL
+            ) and self._is_settled():
                 self._phase = _PHASE_WAIT
                 self._phase_start = now
                 self.get_logger().info(
@@ -650,18 +816,33 @@ class GaitNode(Node):
 
         if self._phase == _PHASE_WAIT:
             self._integrate_height()
-            self._publish_positions(list(self._default_targets))
-            if self._joint_state_seen:
+            targets = list(self._default_targets)
+            self._publish_positions(targets)
+            if self._joint_state_seen and _has_motion_command(
+                self._current_motion_cmd(now)
+            ):
                 self._phase = _PHASE_TROT
                 self._phase_start = now
                 self._oscillator = 0.0
-                self.get_logger().info("[gait] motors online — entering TROT")
+                self.get_logger().info("[gait] motion command received — entering TROT")
             return
 
         self._integrate_height()
+        if not _has_motion_command(self._current_motion_cmd(now)):
+            self._phase = _PHASE_WAIT
+            self._phase_start = now
+            self._motion_started_at = None
+            self._publish_positions(list(self._default_targets))
+            self.get_logger().info(
+                "[gait] motion command cleared — returning to standing idle",
+                throttle_duration_sec=1.0,
+            )
+            return
         targets, clipped_any = self._trot_targets()
         self._publish_positions(targets)
         self._update_limit_safety(clipped_any)
+        self._update_tracking_error_safety(targets)
+        self._update_tracking_error_safety(targets)
 
 
 def main() -> None:
@@ -671,4 +852,5 @@ def main() -> None:
         rclpy.spin(node)
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -10,12 +10,14 @@ from legged_control.gait_node import (
     _command_is_fresh,
     _command_with_timeout,
     _foot_target,
+    _has_motion_command,
     _ik_derived_targets,
     _is_effectively_zero_cmd,
     _leg_stride,
     _motor_targets_from_urdf,
     _phase_is_stance,
     _rate_limit_targets,
+    GaitNode,
 )
 
 
@@ -45,6 +47,11 @@ def test_is_effectively_zero_cmd():
     assert _is_effectively_zero_cmd((0.0, 0.0, 1e-3)) is False
 
 
+def test_has_motion_command_is_inverse_of_zero_check():
+    assert _has_motion_command((0.0, 0.0, 0.0)) is False
+    assert _has_motion_command((0.01, 0.0, 0.0)) is True
+
+
 def test_body_to_hip_fl_nominal_vertical_drop():
     x, y, z = _body_to_hip("FL", (0.1426, 0.1592, -0.28))
     assert x == pytest.approx(0.0)
@@ -53,12 +60,19 @@ def test_body_to_hip_fl_nominal_vertical_drop():
 
 
 def test_leg_stride_yaw_creates_opposite_lateral_motion_front_legs():
-    fl = _leg_stride((0.14, 0.16), "FL", 0.0, 0.0, 0.5, 2.0, 0.08, 0.04)
-    fr = _leg_stride((0.14, -0.16), "FR", 0.0, 0.0, 0.5, 2.0, 0.08, 0.04)
+    fl = _leg_stride((0.14, 0.16), "FL", 0.0, 0.0, 0.5, 2.0, 0.08, 0.04, 1.0)
+    fr = _leg_stride((0.14, -0.16), "FR", 0.0, 0.0, 0.5, 2.0, 0.08, 0.04, 1.0)
     assert fl[0] < 0.0
     assert fr[0] > 0.0
     assert fl[1] > 0.0
     assert fr[1] > 0.0
+
+
+def test_leg_stride_yaw_scale_increases_turning_stride():
+    base = _leg_stride((0.14, 0.16), "FL", 0.0, 0.0, 0.5, 2.0, 0.08, 0.04, 1.0)
+    scaled = _leg_stride((0.14, 0.16), "FL", 0.0, 0.0, 0.5, 2.0, 0.08, 0.04, 1.8)
+    assert abs(scaled[0]) > abs(base[0])
+    assert abs(scaled[1]) > abs(base[1])
 
 
 def test_foot_target_uses_stride_y_in_stance():
@@ -102,31 +116,37 @@ def test_motor_targets_from_urdf_applies_conversion_and_clipping():
 # ── _ik_derived_targets ──────────────────────────────────────────────────────
 
 _FL_JOINTS = [
-    {"direction": 1, "zero_offset": 0.0,    "q_min": -0.533, "q_max":  0.467},
-    {"direction": 1, "zero_offset": 1.254,  "q_min": -3.133, "q_max":  0.663},
+    {"direction": 1, "zero_offset": 0.0, "q_min": -0.533, "q_max": 0.467},
+    {"direction": 1, "zero_offset": 1.254, "q_min": -3.133, "q_max": 0.663},
     {"direction": -1, "zero_offset": -2.791, "q_min": -5.554, "q_max": 0.000},
 ]
 # q_urdf = direction * default_q + zero_offset
 _FL_Q_URDF = (0.0, 1 * (-0.37373) + 1.254, -1 * (-1.488672) + (-2.791))
 # = (0.0, 0.88027, -1.302328)
-_FL_NOMINAL_XY = (0.1426, 0.1592)   # body-frame x,y from FK
-_FL_NOMINAL_H  = 0.280              # approximate FK stance height
+_FL_NOMINAL_XY = (0.1426, 0.1592)  # body-frame x,y from FK
+_FL_NOMINAL_H = 0.280  # approximate FK stance height
 
 
 def test_ik_derived_targets_fl_roundtrip():
     """IK at the nominal FK height should recover the original motor angles."""
-    targets = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, _FL_NOMINAL_H)
+    targets = _ik_derived_targets(
+        "FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, _FL_NOMINAL_H
+    )
     assert targets is not None
-    assert targets[0] == pytest.approx(0.0,        abs=1e-2)
-    assert targets[1] == pytest.approx(-0.37373,   abs=1e-2)
-    assert targets[2] == pytest.approx(-1.488672,  abs=1e-2)
+    assert targets[0] == pytest.approx(0.0, abs=1e-2)
+    assert targets[1] == pytest.approx(-0.37373, abs=1e-2)
+    assert targets[2] == pytest.approx(-1.488672, abs=1e-2)
 
 
 def test_ik_derived_targets_lower_height_changes_calf():
     """Lowering stance height bends the knee; calf motor angle must change."""
-    targets_nom   = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.280)
-    targets_lower = _ik_derived_targets("FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.220)
-    assert targets_nom   is not None
+    targets_nom = _ik_derived_targets(
+        "FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.280
+    )
+    targets_lower = _ik_derived_targets(
+        "FL", _FL_NOMINAL_XY, _FL_JOINTS, _FL_Q_URDF, 0.220
+    )
+    assert targets_nom is not None
     assert targets_lower is not None
     assert not math.isclose(targets_nom[2], targets_lower[2], abs_tol=0.01)
     assert not math.isclose(targets_nom[1], targets_lower[1], abs_tol=0.01)
@@ -140,6 +160,7 @@ def test_ik_derived_targets_returns_none_when_unreachable():
 
 # ── _clamp_height ────────────────────────────────────────────────────────────
 
+
 def test_clamp_height_no_clamp():
     assert _clamp_height(0.28, 0.03, 0.02, 0.20, 0.35) == pytest.approx(0.2806)
 
@@ -152,3 +173,11 @@ def test_clamp_height_clamps_max():
 def test_clamp_height_clamps_min():
     # 0.205 + (-0.03) * 1.0 = 0.175 < h_min=0.20 → clamped to 0.20
     assert _clamp_height(0.205, -0.03, 1.0, 0.20, 0.35) == pytest.approx(0.20)
+
+
+def test_tracking_error_exceeded_uses_joint_feedback_against_targets():
+    node = GaitNode.__new__(GaitNode)
+    node._joint_names = ["FR_hip", "FR_thigh"]
+    node._latest_joint_pos = {"FR_hip": 0.0, "FR_thigh": 0.25}
+    assert node._tracking_error_exceeded([0.0, 0.0], 0.2) is True
+    assert node._tracking_error_exceeded([0.0, 0.1], 0.2) is False

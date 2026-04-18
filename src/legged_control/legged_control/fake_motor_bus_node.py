@@ -90,8 +90,11 @@ class FakeMotorBusNode:  # pragma: no cover - exercised via ROS runtime
         self._rclpy.spin(self._node)
 
     def shutdown(self) -> None:
-        self._node.destroy_node()
-        self._rclpy.shutdown()
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+        if self._rclpy.ok():
+            self._rclpy.shutdown()
 
 
 def main() -> None:
