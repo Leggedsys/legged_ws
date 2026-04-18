@@ -291,6 +291,12 @@ class GaitNode(Node):
         self.declare_parameter(
             "motion_blend_duration", float(gait_cfg.get("motion_blend_duration", 0.6))
         )
+        self.declare_parameter(
+            "stance_height_min", float(gait_cfg.get("stance_height_min", 0.20))
+        )
+        self.declare_parameter(
+            "stance_height_max", float(gait_cfg.get("stance_height_max", 0.35))
+        )
         self.declare_parameter("skip_standup", False)
 
         self._loop_hz = float(control_cfg.get("gait_hz", 50.0))
@@ -300,6 +306,7 @@ class GaitNode(Node):
         self._oscillator = 0.0
         self._last_cmd_t: float | None = None
         self._cmd_vel = (0.0, 0.0, 0.0)
+        self._dz_rate = 0.0
         self._joint_state_seen = False
         self._fault_broadcast = False
         self._passive_broadcast = False
@@ -367,8 +374,27 @@ class GaitNode(Node):
                 self._default_targets[idx] = target
             self._nominal_feet[leg] = (x_nom, y_nom, -h)
 
+    def _integrate_height(self) -> None:
+        """Integrate _dz_rate into stance_height for WAIT/TROT phases."""
+        if abs(self._dz_rate) <= 0:
+            return
+        current_h = float(self.get_parameter("stance_height").value)
+        h_min = float(self.get_parameter("stance_height_min").value)
+        h_max = float(self.get_parameter("stance_height_max").value)
+        new_h = _clamp_height(current_h, self._dz_rate, self._dt, h_min, h_max)
+        if abs(new_h - current_h) > 0.0005:
+            self.set_parameters([
+                rclpy.parameter.Parameter(
+                    "stance_height",
+                    rclpy.parameter.Parameter.Type.DOUBLE,
+                    new_h,
+                )
+            ])
+            self._rederive_defaults(new_h)
+
     def _on_cmd_vel(self, msg: Twist) -> None:
         self._cmd_vel = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
+        self._dz_rate = float(msg.linear.z)
         self._last_cmd_t = time.monotonic()
 
     def _on_emergency_stop(self, msg: Bool) -> None:
@@ -618,6 +644,7 @@ class GaitNode(Node):
             return
 
         if self._phase == _PHASE_WAIT:
+            self._integrate_height()
             self._publish_positions(list(self._default_targets))
             if self._joint_state_seen:
                 self._phase = _PHASE_TROT
@@ -626,6 +653,7 @@ class GaitNode(Node):
                 self.get_logger().info("[gait] motors online — entering TROT")
             return
 
+        self._integrate_height()
         targets, clipped_any = self._trot_targets()
         self._publish_positions(targets)
         self._update_limit_safety(clipped_any)
