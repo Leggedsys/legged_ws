@@ -127,6 +127,7 @@ def _foot_target(
     step_height: float,
     stride_x: float,
     stride_y: float,
+    swing_attack: float = 1.0,
 ) -> tuple[float, float, float]:
     x_nom, y_nom, _ = nominal_foot
     # Hip frame: z negative = below hip. stance_height is a positive distance.
@@ -142,10 +143,13 @@ def _foot_target(
         x_end = x_nom + 0.5 * stride_x
         y_start = y_nom - 0.5 * stride_y
         y_end = y_nom + 0.5 * stride_y
-        z_ctrl = z_stance + (4.0 / 3.0) * step_height
+        # Both control points clamped to -0.05 m (5 cm below hip) so IK stays solvable
+        # regardless of step_height or swing_attack magnitude.
+        z_p1 = min(z_stance + (4.0 / 3.0) * step_height * swing_attack, -0.05)
+        z_p2 = min(z_stance + (4.0 / 3.0) * step_height, -0.05)
         x = _cubic_bezier(x_start, x_start, x_end, x_end, t)
         y = _cubic_bezier(y_start, y_start, y_end, y_end, t)
-        z = _cubic_bezier(z_stance, z_ctrl, z_ctrl, z_stance, t)
+        z = _cubic_bezier(z_stance, z_p1, z_p2, z_stance, t)
     return x, y, z
 
 
@@ -286,9 +290,11 @@ class GaitNode(Node):
         fk_stance_height = -sum(self._nominal_feet[leg][2] for leg in _LEG_ORDER) / len(
             _LEG_ORDER
         )
-        self.declare_parameter("stance_height", fk_stance_height)
-        self._rederive_defaults(fk_stance_height)
+        yaml_stance = float(gait_cfg.get("stance_height", fk_stance_height))
+        self.declare_parameter("stance_height", yaml_stance)
+        self._rederive_defaults(yaml_stance)
         self.declare_parameter("step_height", float(gait_cfg.get("step_height", 0.06)))
+        self.declare_parameter("swing_attack", float(gait_cfg.get("swing_attack", 1.0)))
         self.declare_parameter("gait_freq", float(gait_cfg.get("gait_freq", 2.0)))
         self.declare_parameter(
             "max_stride_x", float(gait_cfg.get("max_stride_x", 0.08))
@@ -382,15 +388,14 @@ class GaitNode(Node):
         self.add_on_set_parameters_callback(self._on_gains_changed)
         self.create_timer(self._dt, self._tick)
 
-        yaml_stance = float(gait_cfg.get("stance_height", 0.28))
         if abs(fk_stance_height - yaml_stance) > 0.005:
-            self.get_logger().warn(
-                f"[gait] stance_height in yaml ({yaml_stance:.4f} m) differs from "
-                f"default_q FK ({fk_stance_height:.4f} m); using FK value"
+            self.get_logger().info(
+                f"[gait] stance_height overridden by yaml: {yaml_stance:.4f} m "
+                f"(default_q FK was {fk_stance_height:.4f} m)"
             )
         self.get_logger().info(
             f"gait_node ready — position_control at {self._loop_hz:.1f} Hz  "
-            f"kp={kp_init}  kd={kd_init}  stance_height={fk_stance_height:.4f} m"
+            f"kp={kp_init}  kd={kd_init}  stance_height={yaml_stance:.4f} m"
         )
         self.get_logger().info(
             "[gait] waiting for /posture_command=true before enabling torque and starting standup"
@@ -405,7 +410,7 @@ class GaitNode(Node):
             return yaml.safe_load(f)
 
     def _rederive_defaults(self, h: float) -> None:
-        """Recompute _default_targets and _nominal_feet z for all legs at stance height h."""
+        """Recompute _default_targets, _nominal_feet z, and _leg_default_q_urdf for stance height h."""
         for leg in _LEG_ORDER:
             x_nom, y_nom, _ = self._nominal_feet[leg]
             targets = _ik_derived_targets(
@@ -425,6 +430,12 @@ class GaitNode(Node):
                 idx = self._joint_names.index(joint["name"])
                 self._default_targets[idx] = target
             self._nominal_feet[leg] = (x_nom, y_nom, -h)
+            # Keep preferred IK joints in sync with the current stance configuration
+            # so trot IK always selects the physically correct knee-bend candidate.
+            self._leg_default_q_urdf[leg] = tuple(
+                float(joint["direction"]) * target + float(joint["zero_offset"])
+                for joint, target in zip(self._leg_joints[leg], targets)
+            )
 
     def _integrate_height(self) -> None:
         """Integrate _dz_rate into stance_height for WAIT/TROT phases.
@@ -555,6 +566,11 @@ class GaitNode(Node):
         positions = _rate_limit_targets(
             self._last_published_targets, positions, max_delta
         )
+        # Hard clamp to q_min/q_max regardless of how targets were computed.
+        positions = [
+            min(max(float(pos), float(joint["q_min"])), float(joint["q_max"]))
+            for pos, joint in zip(positions, self._joint_cfg)
+        ]
         self._last_published_targets = list(positions)
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -578,10 +594,17 @@ class GaitNode(Node):
         self._phase_start = now
         self._fault_broadcast = False
         self._passive_broadcast = False
-        actual = [self._latest_joint_pos[n] for n in self._joint_names]
-        self._last_published_targets = (
-            [float(v) for v in actual] if all(v is not None for v in actual) else None
-        )
+        if self._phase == _PHASE_WAIT:
+            # Skipping standup: seed rate limiter from actual position so the
+            # first WAIT tick doesn't jump from an unrelated previous command.
+            actual = [self._latest_joint_pos[n] for n in self._joint_names]
+            self._last_published_targets = (
+                [float(v) for v in actual] if all(v is not None for v in actual) else None
+            )
+        else:
+            # Standup ramp always starts from motor-frame zero; don't seed from
+            # actual position or the rate limiter fights the ramp direction.
+            self._last_published_targets = None
         self._lie_down_start_targets = None
         if self._phase == _PHASE_WAIT:
             self.get_logger().info(
@@ -701,15 +724,17 @@ class GaitNode(Node):
                 step_height,
                 stride_x,
                 stride_y,
+                float(self.get_parameter("swing_attack").value),
             )
             foot_hip = _body_to_hip(leg, foot_body)
             q_urdf = inverse_kinematics(leg, foot_hip, self._leg_default_q_urdf[leg])
             if q_urdf is None:
                 for joint in self._leg_joints[leg]:
-                    targets_by_name[joint["name"]] = float(joint["default_q"])
+                    idx = self._joint_names.index(joint["name"])
+                    targets_by_name[joint["name"]] = self._default_targets[idx]
                 clipped_any = True
                 self.get_logger().warn(
-                    f"[gait] IK failed for {leg}; holding default_q for that leg",
+                    f"[gait] IK failed for {leg}; holding stance default for that leg",
                     throttle_duration_sec=1.0,
                 )
                 continue
@@ -754,6 +779,17 @@ class GaitNode(Node):
             for value, target in zip(values, targets)
         )
 
+    def _worst_tracking_error(
+        self, targets: list[float]
+    ) -> tuple[str, float] | tuple[None, None]:
+        """Return (joint_name, error_rad) for the joint with the largest tracking error."""
+        values = [self._latest_joint_pos[name] for name in self._joint_names]
+        if any(value is None for value in values):
+            return None, None
+        errors = [abs(float(v) - t) for v, t in zip(values, targets)]
+        idx = max(range(len(errors)), key=lambda i: errors[i])
+        return self._joint_names[idx], errors[idx]
+
     def _update_tracking_error_safety(self, targets: list[float]) -> None:
         now = time.monotonic()
         grace_period = float(self.get_parameter("tracking_error_grace_period").value)
@@ -768,19 +804,31 @@ class GaitNode(Node):
         window_seconds = float(self.get_parameter("tracking_error_window").value)
         error_ratio = float(self.get_parameter("tracking_error_ratio").value)
         window_len = max(1, int(round(window_seconds * self._loop_hz)))
-        self._tracking_error_hits.append(
-            self._tracking_error_exceeded(targets, threshold)
-        )
+
+        exceeded = self._tracking_error_exceeded(targets, threshold)
+        self._tracking_error_hits.append(exceeded)
+        # Throttled debug log so operators can see which joint is worst without spamming
+        if exceeded:
+            worst_name, worst_err = self._worst_tracking_error(targets)
+            if worst_name is not None:
+                self.get_logger().warn(
+                    f"[gait] tracking error: worst={worst_name}  err={worst_err:.3f} rad  "
+                    f"threshold={threshold:.3f} rad",
+                    throttle_duration_sec=0.5,
+                )
+
         while len(self._tracking_error_hits) > window_len:
             self._tracking_error_hits.popleft()
         if len(self._tracking_error_hits) < window_len:
             return
         ratio = sum(self._tracking_error_hits) / float(window_len)
         if ratio >= error_ratio:
+            worst_name, worst_err = self._worst_tracking_error(targets)
             self._phase = _PHASE_FAULT
             self._fault_broadcast = False
             self.get_logger().error(
-                f"[gait] sustained joint tracking error ratio {ratio:.2f} >= {error_ratio:.2f}; entering FAULT"
+                f"[gait] sustained joint tracking error ratio {ratio:.2f} >= {error_ratio:.2f}; "
+                f"worst joint: {worst_name}  err={worst_err:.3f} rad — entering FAULT"
             )
 
     def _tick(self) -> None:
@@ -822,14 +870,23 @@ class GaitNode(Node):
         if self._phase == _PHASE_STANDUP:
             targets, ramp_complete = self._standup_targets(now - self._phase_start)
             self._publish_positions(targets)
-            if ramp_complete and self._is_near_targets(
-                self._default_targets, _STANDUP_TARGET_TOL
-            ) and self._is_settled():
-                self._phase = _PHASE_WAIT
-                self._phase_start = now
-                self.get_logger().info(
-                    "[gait] standup complete — waiting for /joint_states_aggregated"
-                )
+            if ramp_complete:
+                near = self._is_near_targets(self._default_targets, _STANDUP_TARGET_TOL)
+                settled = self._is_settled()
+                hold_dur = float(self.get_parameter("hold_duration").value)
+                ramp_dur = float(self.get_parameter("ramp_duration").value)
+                timed_out = (now - self._phase_start) > (hold_dur + ramp_dur + 5.0)
+                if (near and settled) or timed_out:
+                    if timed_out and not (near and settled):
+                        self.get_logger().warn(
+                            "[gait] standup settle timeout — forcing WAIT "
+                            f"(near={near} settled={settled})"
+                        )
+                    self._phase = _PHASE_WAIT
+                    self._phase_start = now
+                    self.get_logger().info(
+                        "[gait] standup complete — waiting for /joint_states_aggregated"
+                    )
             return
 
         if self._phase == _PHASE_WAIT:

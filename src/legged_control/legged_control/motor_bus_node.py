@@ -85,6 +85,23 @@ class MotorBusNode(Node):
             j["name"]: float(j.get("gear_ratio", _sdk_ratio)) for j in joints
         }
 
+        global_kp = float(self.get_parameter("kp").value)
+        global_kd = float(self.get_parameter("kd").value)
+        self._global_kp_init = global_kp
+        self._global_kd_init = global_kd
+        control_cfg = cfg.get("control", {})
+        calf_kp = float(control_cfg["kp_calf"]) if "kp_calf" in control_cfg else global_kp
+        calf_kd = float(control_cfg["kd_calf"]) if "kd_calf" in control_cfg else global_kd
+        # Declare per-joint kp/kd parameters (runtime-tunable via ros2 param set).
+        # Priority: per-joint kp/kd in joint config > group (kp_calf) > global.
+        for j in joints:
+            name = j["name"]
+            is_calf = name.endswith("_calf")
+            group_kp = calf_kp if is_calf else global_kp
+            group_kd = calf_kd if is_calf else global_kd
+            self.declare_parameter(f"kp_{name}", float(j["kp"]) if "kp" in j else group_kp)
+            self.declare_parameter(f"kd_{name}", float(j["kd"]) if "kd" in j else group_kd)
+
         self._cmds = []
         self._datas = []
         for j in joints:
@@ -232,8 +249,10 @@ class MotorBusNode(Node):
             cmd.motorType = sdk.MotorType.GO_M8010_6
             cmd.mode = sdk.queryMotorMode(sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
             offset = self._offsets[name]
-            cmd.kp = effective_kp
-            cmd.kd = effective_kd
+            ratio = effective_kp / self._global_kp_init if self._global_kp_init > 0 else 0.0
+            cmd.kp = ratio * float(self.get_parameter(f"kp_{name}").value)
+            ratio_kd = effective_kd / self._global_kd_init if self._global_kd_init > 0 else 0.0
+            cmd.kd = ratio_kd * float(self.get_parameter(f"kd_{name}").value)
             cmd.q = (self._targets[name] + offset) * gr
             cmd.dq = 0.0
             cmd.tau = 0.0
