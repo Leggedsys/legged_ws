@@ -6,8 +6,10 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -17,6 +19,20 @@ from launch_ros.actions import Node
 _DEFAULT_SIM_URDF = (
     "/home/grayerd/Desktop/Projects/rc/塞北箭4urdf/urdf/塞北箭4_sim.urdf"
 )
+
+# Physics runs immediately (no pause) so gait_position_controller activates
+# right away. Robot spawns high enough to fall for ~0.6s before landing,
+# giving gait_node time to receive posture_command and publish default_q
+# before the feet touch the ground.
+_POSTURE_CMD_DELAY = 1.5  # seconds after launch to auto-send posture_command
+
+
+def _ros2_pub_once(topic: str, msg_type: str, data: str) -> list[str]:
+    return [
+        "zsh", "-lc",
+        f"source /opt/ros/humble/setup.zsh && "
+        f"ros2 topic pub --once {topic} {msg_type} '{data}'",
+    ]
 
 
 def _launch_setup(context, *args, **kwargs):
@@ -33,6 +49,7 @@ def _launch_setup(context, *args, **kwargs):
                 "spawn_roll": LaunchConfiguration("spawn_roll"),
                 "spawn_pitch": LaunchConfiguration("spawn_pitch"),
                 "spawn_yaw": LaunchConfiguration("spawn_yaw"),
+                "start_paused": "false",
             }.items(),
         ),
         Node(
@@ -68,6 +85,20 @@ def _launch_setup(context, *args, **kwargs):
             ],
             output="screen",
         ),
+        # Auto-send posture_command=true so joints reach default_q before landing.
+        TimerAction(
+            period=_POSTURE_CMD_DELAY,
+            actions=[
+                ExecuteProcess(
+                    cmd=_ros2_pub_once(
+                        "/posture_command",
+                        "std_msgs/msg/Bool",
+                        "{data: true}",
+                    ),
+                    output="screen",
+                )
+            ],
+        ),
     ]
 
 
@@ -81,12 +112,12 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "spawn_z",
-                default_value="0.38",
-                description="Initial robot spawn height above ground",
+                default_value="1.80",
+                description="Spawn height — robot free-falls ~0.6s before landing",
             ),
             DeclareLaunchArgument(
                 "spawn_roll",
-                default_value="3.14159",
+                default_value="0.0",
                 description="Initial robot roll in radians",
             ),
             DeclareLaunchArgument(
