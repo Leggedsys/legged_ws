@@ -153,21 +153,49 @@ policy_node
 
 ---
 
-## 5. 动作解码
+## 5. 策略默认站姿与动作解码
 
-```python
-q_target = q_default + action * scale
+### `policy.yaml` 配置（新增文件）
+
+策略相关参数单独存放，不混入 `robot.yaml`：
+
+```yaml
+policy:
+  model_path: ""                    # TorchScript .pt 路径，启动时由 launch arg 传入
+  joint_default_q_urdf:             # 训练时的默认站姿，URDF 帧，rad
+    hip:   0.0
+    thigh: 0.7
+    calf: -1.2
+  action_scale:
+    hip:   0.15
+    thigh: 0.20
+    calf:  0.15
+  hip_sign_flip: [FR_hip, RL_hip]   # 部署到真机时额外乘以 -1 的关节
 ```
 
-| 关节组 | `scale` | `q_default` (URDF frame) |
-|--------|---------|--------------------------|
-| `*_hip` | 0.15 | 0.0 rad |
-| `*_thigh` | 0.20 | 0.7 rad |
-| `*_calf` | 0.15 | −1.2 rad |
+### `q_default_policy` 的三处用途
 
-**符号修正：** FR hip 和 RL hip 在电机帧输出前额外乘以 −1（USD 转换轴方向丢失问题，见 `DOG_JOINT_SIGN`）。
+**`policy_node` 必须使用 `policy.yaml` 中的 `q_default`，而非 `robot.yaml` 的 `default_q`**（两者为不同用途独立维护）：
 
-`q_target` 在 URDF 帧，经 `direction × (q_urdf − zero_offset)` 转换为电机帧后发送给 `motor_bus_node`，即通过已有 `robot.yaml` 中的 `direction` / `zero_offset` 字段完成。
+1. **standup 目标**：从零位 ramp 到 `q_default_policy`（先转换为电机帧）
+2. **obs 组装**：`joint_pos_rel = q_measured_motor − q_default_policy_motor`
+3. **动作解码**：`q_target_urdf = q_default_policy_urdf + action × scale`
+
+### 动作解码流程
+
+```python
+# 1. 解码到 URDF 帧
+q_target_urdf = q_default_policy_urdf + action * scale
+
+# 2. 对 FR_hip / RL_hip 额外乘以 -1（USD 转换轴方向丢失问题）
+for joint in hip_sign_flip:
+    q_target_urdf[joint] *= -1
+
+# 3. 转换为电机帧（通过 robot.yaml 的 direction / zero_offset）
+q_target_motor = direction * (q_target_urdf - zero_offset)
+```
+
+`direction` 和 `zero_offset` 仍从 `robot.yaml` 读取，只有 `q_default` 和 `scale` 来自 `policy.yaml`。
 
 ---
 
