@@ -138,9 +138,17 @@ class HeightScanNode(Node):
 def main() -> None:
     rclpy.init()
     node = HeightScanNode()
+    executor = rclpy.executors.SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            try:
+                executor.spin_once(timeout_sec=0.1)
+            except RuntimeError:
+                # rclpy/TF2 deserialization bug on some Gazebo TF messages
+                pass
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.shutdown()
