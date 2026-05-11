@@ -23,8 +23,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 
-from legged_control.kinematics import forward_kinematics, inverse_kinematics
-from legged_control.standup_node import _smoothstep
+from legged_control.kinematics import forward_kinematics, inverse_kinematics, _smoothstep
 
 
 _PHASE_STANDUP = "STANDUP"
