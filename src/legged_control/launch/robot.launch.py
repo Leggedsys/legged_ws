@@ -200,7 +200,7 @@ def _launch_setup(context, *args, **kwargs):
         ]
 
     raise RuntimeError(
-        f"Unknown mode '{mode}'. Valid modes: passive, position_control, policy, simulation"
+        f"Unknown mode '{mode}'. Valid modes: passive, position_control, policy"
     )
 
 
@@ -210,7 +210,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "mode",
                 default_value="passive",
-                description="Operating mode: passive | stand | standup | position_control",
+                description="Operating mode: passive | position_control | policy",
             ),
             DeclareLaunchArgument(
                 "legs",
