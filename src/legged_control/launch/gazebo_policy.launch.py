@@ -1,10 +1,5 @@
 """Run RL policy against the Gazebo physics simulation.
 
-The URDF must include:
-  - IMU sensor plugin publishing sensor_msgs/Imu on 'odin1/imu'
-  - Depth camera plugin publishing sensor_msgs/Image on /camera/depth/image_rect_raw
-    and sensor_msgs/CameraInfo on /camera/depth/camera_info
-
 Same software stack as real-hardware policy mode:
   state_estimator_node + height_scan_node + policy_node
 """
@@ -18,20 +13,17 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-_DOG_URDF_SHARE = ""
+
 try:
     _DOG_URDF_SHARE = get_package_share_directory("dog_urdf")
 except Exception:
-    pass
-
-_DEFAULT_SIM_URDF = os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
-_POSTURE_CMD_DELAY = 2.0
+    _DOG_URDF_SHARE = ""
 
 
-def _ros2_pub_once(topic, msg_type, data):
-    return ["zsh", "-lc",
-            f"source /opt/ros/humble/setup.zsh && "
-            f"ros2 topic pub --once {topic} {msg_type} '{data}'"]
+def _default_urdf_path():
+    if _DOG_URDF_SHARE:
+        return os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
+    return ""
 
 
 def _launch_setup(context, *args, **kwargs):
@@ -46,7 +38,7 @@ def _launch_setup(context, *args, **kwargs):
             launch_arguments={
                 "urdf_path": LaunchConfiguration("urdf_path"),
                 "spawn_z": LaunchConfiguration("spawn_z"),
-                "start_paused": "false",
+                "start_paused": "true",
             }.items(),
         ),
         Node(package="legged_control", executable="gazebo_control_bridge",
@@ -66,14 +58,19 @@ def _launch_setup(context, *args, **kwargs):
              name="height_scan_node", output="screen"),
         Node(package="joy", executable="joy_node", name="joy_node", output="log"),
         Node(package="legged_control", executable="teleop_node",
-             name="teleop_node", output="screen"),
+             name="teleop_node",
+             parameters=[{"config_path": config_path}],
+             output="screen"),
         Node(package="legged_control", executable="policy_node",
              name="policy_node",
-             parameters=[{"config_path": config_path, "model_path": model_path}],
+             parameters=[{"config_path": config_path, "model_path": model_path,
+                          "ramp_duration": 2.0}],
              output="screen"),
-        TimerAction(period=_POSTURE_CMD_DELAY, actions=[
+        TimerAction(period=0.5, actions=[
             ExecuteProcess(
-                cmd=_ros2_pub_once("/posture_command", "std_msgs/msg/Bool", "{data: true}"),
+                cmd=["zsh", "-lc",
+                     "source /opt/ros/humble/setup.zsh && "
+                     "ros2 topic pub --once /posture_command std_msgs/msg/Bool '{data: true}'"],
                 output="screen",
             )
         ]),
@@ -82,8 +79,8 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument("urdf_path", default_value=_DEFAULT_SIM_URDF),
-        DeclareLaunchArgument("spawn_z", default_value="1.80"),
+        DeclareLaunchArgument("urdf_path", default_value=_default_urdf_path()),
+        DeclareLaunchArgument("spawn_z", default_value="0.50"),
         DeclareLaunchArgument("model_path", default_value="",
                               description="Path to TorchScript .pt policy file"),
         OpaqueFunction(function=_launch_setup),

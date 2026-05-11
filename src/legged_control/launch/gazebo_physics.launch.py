@@ -41,8 +41,10 @@ def _read_text(path: str) -> str:
 
 
 def _prepare_urdf(urdf_path: str, controller_yaml: str) -> str:
-    """Write URDF with injected controller yaml path to a temp file, return the temp path."""
-    content = _read_text(urdf_path).replace("__CONTROLLER_YAML__", controller_yaml)
+    """Write URDF with injected paths to a temp file, return the temp path."""
+    content = _read_text(urdf_path)
+    content = content.replace("__CONTROLLER_YAML__", controller_yaml)
+    content = content.replace("package://dog_urdf/", f"file://{_DOG_URDF_SHARE}/")
     fd, tmp_path = tempfile.mkstemp(suffix=".urdf", prefix="dog_urdf_sim_")
     with os.fdopen(fd, "w") as f:
         f.write(content)
@@ -57,6 +59,7 @@ def _launch_setup(context, *args, **kwargs):
     spawn_pitch = LaunchConfiguration("spawn_pitch").perform(context)
     spawn_yaw = LaunchConfiguration("spawn_yaw").perform(context)
     start_paused = LaunchConfiguration("start_paused").perform(context)
+    gui = LaunchConfiguration("gui").perform(context)
     unpause_delay = float(LaunchConfiguration("unpause_delay").perform(context))
     gazebo_ros_share = "/opt/ros/humble/share/gazebo_ros"
 
@@ -67,7 +70,7 @@ def _launch_setup(context, *args, **kwargs):
             PythonLaunchDescriptionSource(
                 os.path.join(gazebo_ros_share, "launch", "gazebo.launch.py")
             ),
-            launch_arguments={"pause": start_paused}.items(),
+            launch_arguments={"pause": start_paused, "gui": gui}.items(),
         ),
         Node(
             package="robot_state_publisher",
@@ -179,6 +182,11 @@ def generate_launch_description():
                 "start_paused",
                 default_value="true",
                 description="Start Gazebo paused before releasing physics",
+            ),
+            DeclareLaunchArgument(
+                "gui",
+                default_value="true",
+                description="Launch Gazebo GUI (set to false for headless)",
             ),
             DeclareLaunchArgument(
                 "unpause_delay",

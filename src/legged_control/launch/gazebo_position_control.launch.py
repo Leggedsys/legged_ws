@@ -27,21 +27,6 @@ def _default_urdf_path():
         return os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
     return ""
 
-# Physics runs immediately (no pause) so gait_position_controller activates
-# right away. Robot spawns high enough to fall for ~0.6s before landing,
-# giving gait_node time to receive posture_command and publish default_q
-# before the feet touch the ground.
-_POSTURE_CMD_DELAY = 1.5  # seconds after launch to auto-send posture_command
-
-
-def _ros2_pub_once(topic: str, msg_type: str, data: str) -> list[str]:
-    return [
-        "zsh", "-lc",
-        f"source /opt/ros/humble/setup.zsh && "
-        f"ros2 topic pub --once {topic} {msg_type} '{data}'",
-    ]
-
-
 def _launch_setup(context, *args, **kwargs):
     share = get_package_share_directory("legged_control")
     config_path = os.path.join(share, "config", "robot.yaml")
@@ -56,7 +41,7 @@ def _launch_setup(context, *args, **kwargs):
                 "spawn_roll": LaunchConfiguration("spawn_roll"),
                 "spawn_pitch": LaunchConfiguration("spawn_pitch"),
                 "spawn_yaw": LaunchConfiguration("spawn_yaw"),
-                "start_paused": "false",
+                "start_paused": "true",
             }.items(),
         ),
         Node(
@@ -69,6 +54,7 @@ def _launch_setup(context, *args, **kwargs):
             package="legged_control",
             executable="teleop_node",
             name="teleop_node",
+            parameters=[{"config_path": config_path}],
             output="screen",
         ),
         Node(
@@ -85,27 +71,20 @@ def _launch_setup(context, *args, **kwargs):
             parameters=[
                 {
                     "config_path": config_path,
-                    "skip_standup": True,
                     "hold_duration": 0.0,
-                    "ramp_duration": 0.0,
+                    "ramp_duration": 4.0,
                 }
             ],
             output="screen",
         ),
-        # Auto-send posture_command=true so joints reach default_q before landing.
-        TimerAction(
-            period=_POSTURE_CMD_DELAY,
-            actions=[
-                ExecuteProcess(
-                    cmd=_ros2_pub_once(
-                        "/posture_command",
-                        "std_msgs/msg/Bool",
-                        "{data: true}",
-                    ),
-                    output="screen",
-                )
-            ],
-        ),
+        TimerAction(period=0.5, actions=[
+            ExecuteProcess(
+                cmd=["zsh", "-lc",
+                     "source /opt/ros/humble/setup.zsh && "
+                     "ros2 topic pub --once /posture_command std_msgs/msg/Bool '{data: true}'"],
+                output="screen",
+            )
+        ]),
     ]
 
 
@@ -119,7 +98,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "spawn_z",
-                default_value="1.80",
+                default_value="0.50",
                 description="Spawn height — robot free-falls ~0.6s before landing",
             ),
             DeclareLaunchArgument(
