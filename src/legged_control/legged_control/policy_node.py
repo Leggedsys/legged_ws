@@ -108,7 +108,6 @@ def _assemble_obs(
 
 # ── ROS node ──────────────────────────────────────────────────────────────────
 
-import math
 import os
 import time
 
@@ -299,8 +298,8 @@ class PolicyNode(Node):
         new_kp = next((p.value for p in params if p.name == "kp"), None)
         new_kd = next((p.value for p in params if p.name == "kd"), None)
         if new_kp is not None or new_kd is not None:
-            kp = new_kp or self.get_parameter("kp").value
-            kd = new_kd or self.get_parameter("kd").value
+            kp = new_kp if new_kp is not None else self.get_parameter("kp").value
+            kd = new_kd if new_kd is not None else self.get_parameter("kd").value
             self._broadcast_gains(float(kp), float(kd))
         return SetParametersResult(successful=True)
 
