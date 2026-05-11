@@ -18,7 +18,13 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-_DEFAULT_SIM_URDF = "/home/grayerd/Desktop/Projects/rc/塞北箭4urdf/urdf/塞北箭4_sim.urdf"
+_DOG_URDF_SHARE = ""
+try:
+    _DOG_URDF_SHARE = get_package_share_directory("dog_urdf")
+except Exception:
+    pass
+
+_DEFAULT_SIM_URDF = os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
 _POSTURE_CMD_DELAY = 2.0
 
 

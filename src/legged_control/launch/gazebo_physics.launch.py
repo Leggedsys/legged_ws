@@ -2,6 +2,7 @@
 
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -15,12 +16,22 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-_DEFAULT_SIM_URDF = (
-    "/home/grayerd/Desktop/Projects/rc/塞北箭4urdf/urdf/塞北箭4_sim.urdf"
-)
-_DEFAULT_CONTROLLER_YAML = (
-    "/home/grayerd/Desktop/Projects/rc/塞北箭4urdf/config/gazebo_ros2_controllers.yaml"
-)
+try:
+    _DOG_URDF_SHARE = get_package_share_directory("dog_urdf")
+except Exception:
+    _DOG_URDF_SHARE = ""
+
+
+def _default_urdf_path():
+    if _DOG_URDF_SHARE:
+        return os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
+    return ""
+
+
+def _default_controller_yaml():
+    if _DOG_URDF_SHARE:
+        return os.path.join(_DOG_URDF_SHARE, "config", "gazebo_ros2_controllers.yaml")
+    return ""
 
 
 def _read_text(path: str) -> str:
@@ -125,12 +136,12 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "urdf_path",
-                default_value=_DEFAULT_SIM_URDF,
+                default_value=_default_urdf_path(),
                 description="Absolute path to the Gazebo-friendly simulation URDF",
             ),
             DeclareLaunchArgument(
                 "controller_yaml",
-                default_value=_DEFAULT_CONTROLLER_YAML,
+                default_value=_default_controller_yaml(),
                 description="ros2_control controller configuration for Gazebo",
             ),
             DeclareLaunchArgument(

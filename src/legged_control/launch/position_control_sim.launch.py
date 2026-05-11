@@ -11,7 +11,13 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-_DEFAULT_URDF = "/home/grayerd/Desktop/Projects/rc/塞北箭4urdf/urdf/塞北箭4urdf.urdf"
+def _default_urdf_path():
+    try:
+        return os.path.join(
+            get_package_share_directory("dog_urdf"), "urdf", "dog_urdf.urdf"
+        )
+    except Exception:
+        return ""
 
 
 def _load_robot_cfg() -> dict:
@@ -20,13 +26,9 @@ def _load_robot_cfg() -> dict:
         return yaml.safe_load(f)
 
 
-def _robot_description_from_urdf(path: str) -> str:
-    urdf_dir = os.path.dirname(path)
-    package_root = os.path.dirname(urdf_dir)
-    mesh_root = os.path.join(package_root, "meshes")
+def _read_urdf(path: str) -> str:
     with open(path) as f:
-        content = f.read()
-    return content.replace("package://塞北箭4urdf/meshes/", f"file://{mesh_root}/")
+        return f.read()
 
 
 def _launch_setup(context, *args, **kwargs):
@@ -41,7 +43,7 @@ def _launch_setup(context, *args, **kwargs):
         joint["name"] for joint in joints if joint["name"].split("_")[0] in ("RR", "RL")
     ]
     loop_hz = float(cfg["control"].get("gait_hz", 50.0))
-    robot_description = _robot_description_from_urdf(
+    robot_description = _read_urdf(
         LaunchConfiguration("urdf_path").perform(context)
     )
 
@@ -119,7 +121,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "urdf_path",
-                default_value=_DEFAULT_URDF,
+                default_value=_default_urdf_path(),
                 description="Absolute path to the quadruped URDF file",
             ),
             DeclareLaunchArgument(

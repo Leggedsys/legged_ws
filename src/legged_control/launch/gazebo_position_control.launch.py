@@ -16,9 +16,16 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-_DEFAULT_SIM_URDF = (
-    "/home/grayerd/Desktop/Projects/rc/塞北箭4urdf/urdf/塞北箭4_sim.urdf"
-)
+try:
+    _DOG_URDF_SHARE = get_package_share_directory("dog_urdf")
+except Exception:
+    _DOG_URDF_SHARE = ""
+
+
+def _default_urdf_path():
+    if _DOG_URDF_SHARE:
+        return os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
+    return ""
 
 # Physics runs immediately (no pause) so gait_position_controller activates
 # right away. Robot spawns high enough to fall for ~0.6s before landing,
@@ -107,7 +114,7 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "urdf_path",
-                default_value=_DEFAULT_SIM_URDF,
+                default_value=_default_urdf_path(),
                 description="Absolute path to Gazebo-friendly simulation URDF",
             ),
             DeclareLaunchArgument(
