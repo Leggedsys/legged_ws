@@ -1,3 +1,20 @@
+"""state_estimator_node
+
+Subscribes:
+  odin1/imu/filtered  (sensor_msgs/Imu)   — orientation quaternion + angular_velocity
+  /joint_states_aggregated (sensor_msgs/JointState) — motor-frame positions + velocities
+
+Publishes:
+  /state_estimate (std_msgs/Float32MultiArray, 9 floats)
+    data[0:3] = base_lin_vel in yaw frame (m/s)
+    data[3:6] = base_ang_vel in body frame (rad/s)
+    data[6:9] = projected_gravity in body frame (unit vector)
+
+Velocity estimation: complementary filter blending kinematic velocity
+(assuming all four feet in contact) with IMU-integrated velocity.
+Alpha = 0.8 (high trust in kinematics; adjust if drift is observed).
+"""
+
 from __future__ import annotations
 
 import os
@@ -17,13 +34,6 @@ from legged_control.kinematics import (
 )
 
 _LEG_ORDER = ("FL", "FR", "RL", "RR")
-
-_YAML_JOINT_ORDER = [
-    "FR_hip", "FR_thigh", "FR_calf",
-    "FL_hip", "FL_thigh", "FL_calf",
-    "RR_hip", "RR_thigh", "RR_calf",
-    "RL_hip", "RL_thigh", "RL_calf",
-]
 
 
 def _load_joint_cfg(config_path: str) -> dict[str, dict]:
