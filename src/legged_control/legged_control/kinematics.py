@@ -115,6 +115,5 @@ def inverse_kinematics(
 
 
 def _smoothstep(t: float) -> float:
-    """Smooth clamped cubic interpolation in [0, 1]."""
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
