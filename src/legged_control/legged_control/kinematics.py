@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 
 HIP_Y_OFFSET = 0.0204632257018415
 THIGH_Y_OFFSET = 0.0922
@@ -117,3 +119,48 @@ def inverse_kinematics(
 def _smoothstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
+
+
+def _numerical_jacobian(
+    leg: str, q_urdf: tuple[float, float, float], eps: float = 1e-4
+) -> np.ndarray:
+    p0 = np.array(forward_kinematics(leg, q_urdf))
+    J = np.zeros((3, 3))
+    for i in range(3):
+        q_plus = list(q_urdf)
+        q_plus[i] += eps
+        p_plus = np.array(forward_kinematics(leg, tuple(q_plus)))
+        J[:, i] = (p_plus - p0) / eps
+    return J
+
+
+def leg_kinematic_velocity(
+    leg: str,
+    q_urdf: tuple[float, float, float],
+    dq_urdf: tuple[float, float, float],
+) -> np.ndarray:
+    J = _numerical_jacobian(leg, q_urdf)
+    dq = np.array(dq_urdf)
+    return -J @ dq
+
+
+def projected_gravity_from_quat(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    n = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    x, y, z, w = qx/n, qy/n, qz/n, qw/n
+    R = np.array([
+        [1 - 2*(y*y + z*z),   2*(x*y - w*z),     2*(x*z + w*y)],
+        [2*(x*y + w*z),        1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y),        2*(y*z + w*x),     1 - 2*(x*x + y*y)],
+    ])
+    g_world = np.array([0.0, 0.0, -1.0])
+    return R.T @ g_world
+
+
+def yaw_rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    return np.array([
+        [cy, -sy, 0.0],
+        [sy,  cy, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
