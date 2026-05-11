@@ -1,0 +1,40 @@
+policy:
+  # Absolute path to TorchScript .pt file. Override at launch with:
+  #   ros2 launch legged_control robot.launch.py mode:=policy model_path:=/path/to/policy.pt
+  model_path: ""
+
+  # Default stance pose in URDF frame (training convention), yaml joint order.
+  # These values come from the training config (hip=0.0, thigh=0.7, calf=-1.2).
+  # IMPORTANT: verify against hardware in passive mode before first policy run.
+  joint_default_q_urdf:
+    FR_hip:    0.0
+    FR_thigh:  0.7
+    FR_calf:  -1.2
+    FL_hip:    0.0
+    FL_thigh:  0.7
+    FL_calf:  -1.2
+    RR_hip:    0.0
+    RR_thigh:  0.7
+    RR_calf:  -1.2
+    RL_hip:    0.0
+    RL_thigh:  0.7
+    RL_calf:  -1.2
+
+  # Per-joint action scale, yaml order
+  action_scale:
+    FR_hip:   0.15
+    FR_thigh: 0.20
+    FR_calf:  0.15
+    FL_hip:   0.15
+    FL_thigh: 0.20
+    FL_calf:  0.15
+    RR_hip:   0.15
+    RR_thigh: 0.20
+    RR_calf:  0.15
+    RL_hip:   0.15
+    RL_thigh: 0.20
+    RL_calf:  0.15
+
+  # Joints where the training URDF sign differs from deployment URDF.
+  # These are negated before action decode.
+  hip_sign_flip: [FR_hip, RL_hip]

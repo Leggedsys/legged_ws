@@ -104,3 +104,368 @@ def _assemble_obs(
         height_scan,
     ])
     return obs.astype(np.float32)
+
+
+# ── ROS node ──────────────────────────────────────────────────────────────────
+
+import math
+import os
+import time
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Twist
+import rclpy
+import rclpy.parameter
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue, SetParametersResult
+from rcl_interfaces.srv import SetParameters
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Float32MultiArray
+
+from legged_control.kinematics import _smoothstep
+
+_PHASE_PASSIVE = "PASSIVE"
+_PHASE_STANDUP = "STANDUP"
+_PHASE_WAIT    = "WAIT"
+_PHASE_POLICY  = "POLICY"
+_PHASE_LIEDOWN = "LIEDOWN"
+_PHASE_FAULT   = "FAULT"
+
+_STANDUP_TOL = 0.05
+_LIEDOWN_TOL = 0.03
+_VEL_SETTLED = 0.05
+
+
+class PolicyNode(Node):
+    def __init__(self) -> None:
+        super().__init__("policy_node")
+
+        self.declare_parameter("config_path", "")
+        self.declare_parameter("policy_config_path", "")
+        self.declare_parameter("model_path", "")
+
+        cfg = self._load_robot_cfg()
+        policy_cfg = self._load_policy_cfg()
+
+        self._joint_cfg = {j["name"]: j for j in cfg["joints"]}
+        self._joint_names_yaml = [j["name"] for j in cfg["joints"]]
+
+        self._q_default_urdf = self._build_q_default_urdf(policy_cfg)
+        self._action_scale = self._build_action_scale(policy_cfg)
+        self._sign_flip_policy_idx = self._build_sign_flip(policy_cfg)
+        self._q_default_motor = self._urdf_to_motor(self._q_default_urdf)
+
+        control_cfg = cfg["control"]
+        standup_cfg = cfg.get("standup", {})
+        kp = float(control_cfg["kp"])
+        kd = float(control_cfg["kd"])
+        self.declare_parameter("kp", kp)
+        self.declare_parameter("kd", kd)
+        self.declare_parameter("ramp_duration", float(standup_cfg.get("ramp_duration", 8.0)))
+        self.declare_parameter("lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0)))
+
+        loop_hz = float(control_cfg.get("gait_hz", 50.0))
+        self._dt = 1.0 / loop_hz
+
+        model_path = str(self.get_parameter("model_path").value or "").strip()
+        if not model_path:
+            model_path = str(policy_cfg.get("model_path", "") or "")
+        self._policy = None
+        if model_path:
+            try:
+                import torch
+                self._policy = torch.jit.load(model_path)
+                self._policy.eval()
+                self.get_logger().info(f"[policy] loaded model: {model_path}")
+            except Exception as e:
+                self.get_logger().error(f"[policy] failed to load model {model_path}: {e}")
+
+        self._phase = _PHASE_PASSIVE
+        self._phase_start: float | None = None
+        self._stand_requested = False
+        self._lie_down_start: list[float] | None = None
+        self._last_published: list[float] | None = None
+        self._last_action = np.zeros(12, dtype=np.float32)
+        self._passive_broadcast = False
+        self._fault_broadcast = False
+
+        self._joint_pos: dict[str, float] = {}
+        self._joint_vel: dict[str, float] = {}
+        self._state_estimate = np.zeros(9, dtype=np.float32)
+        self._height_scan = np.zeros(325, dtype=np.float32)
+        self._cmd_vel = (0.0, 0.0, 0.0)
+        self._joint_state_seen = False
+
+        self._gain_clients = [
+            self.create_client(SetParameters, "/motor_bus_front/set_parameters"),
+            self.create_client(SetParameters, "/motor_bus_rear/set_parameters"),
+        ]
+
+        self._pub = self.create_publisher(JointState, "/joint_commands", 10)
+        self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
+        self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
+        self.create_subscription(Float32MultiArray, "/height_scan", self._on_scan, 10)
+        self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        self.create_subscription(Bool, "/posture_command", self._on_posture, 10)
+        self.add_on_set_parameters_callback(self._on_gains_changed)
+        self.create_timer(self._dt, self._tick)
+
+        self.get_logger().info(
+            f"policy_node ready — {loop_hz:.0f} Hz  "
+            f"model={'loaded' if self._policy else 'NOT LOADED'}  "
+            f"kp={kp}  kd={kd}"
+        )
+
+    def _load_robot_cfg(self) -> dict:
+        share = get_package_share_directory("legged_control")
+        path = str(self.get_parameter("config_path").value or "").strip()
+        if not path:
+            path = os.path.join(share, "config", "robot.yaml")
+        with open(path) as f:
+            return yaml.safe_load(f)
+
+    def _load_policy_cfg(self) -> dict:
+        share = get_package_share_directory("legged_control")
+        path = str(self.get_parameter("policy_config_path").value or "").strip()
+        if not path:
+            path = os.path.join(share, "config", "policy.yaml")
+        with open(path) as f:
+            return yaml.safe_load(f).get("policy", {})
+
+    def _build_q_default_urdf(self, pcfg: dict) -> np.ndarray:
+        m = pcfg.get("joint_default_q_urdf", {})
+        return np.array([float(m.get(n, 0.0)) for n in _YAML_JOINT_NAMES], dtype=np.float32)
+
+    def _build_action_scale(self, pcfg: dict) -> np.ndarray:
+        m = pcfg.get("action_scale", {})
+        return np.array([float(m.get(n, 0.1)) for n in _YAML_JOINT_NAMES], dtype=np.float32)
+
+    def _build_sign_flip(self, pcfg: dict) -> list[int]:
+        flip_names = pcfg.get("hip_sign_flip", [])
+        result = []
+        for name in flip_names:
+            if name in _POLICY_JOINT_NAMES:
+                result.append(_POLICY_JOINT_NAMES.index(name))
+        return result
+
+    def _urdf_to_motor(self, q_urdf_yaml: np.ndarray) -> np.ndarray:
+        out = np.empty(12, dtype=np.float32)
+        for i, name in enumerate(_YAML_JOINT_NAMES):
+            cfg = self._joint_cfg[name]
+            out[i] = float(cfg["direction"]) * (float(q_urdf_yaml[i]) - float(cfg["zero_offset"]))
+        return out
+
+    def _on_joints(self, msg: JointState) -> None:
+        self._joint_state_seen = True
+        for name, pos, vel in zip(msg.name, msg.position, msg.velocity):
+            self._joint_pos[name] = float(pos)
+            self._joint_vel[name] = float(vel)
+
+    def _on_state(self, msg: Float32MultiArray) -> None:
+        self._state_estimate = np.array(msg.data[:9], dtype=np.float32)
+
+    def _on_scan(self, msg: Float32MultiArray) -> None:
+        self._height_scan = np.array(msg.data[:325], dtype=np.float32)
+
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        self._cmd_vel = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
+
+    def _on_posture(self, msg: Bool) -> None:
+        if self._phase == _PHASE_FAULT:
+            return
+        if bool(msg.data):
+            if self._phase == _PHASE_PASSIVE:
+                self._stand_requested = True
+        else:
+            if self._phase in (_PHASE_WAIT, _PHASE_POLICY, _PHASE_STANDUP):
+                self._phase = _PHASE_LIEDOWN
+                self._phase_start = time.monotonic()
+                self._lie_down_start = list(self._last_published or self._q_default_motor.tolist())
+
+    def _broadcast_gains(self, kp: float, kd: float) -> None:
+        req = SetParameters.Request()
+        req.parameters = [
+            Parameter(name="kp", value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(kp))),
+            Parameter(name="kd", value=ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE, double_value=float(kd))),
+        ]
+        for client in self._gain_clients:
+            if client.service_is_ready():
+                client.call_async(req)
+
+    def _on_gains_changed(self, params: list) -> SetParametersResult:
+        new_kp = next((p.value for p in params if p.name == "kp"), None)
+        new_kd = next((p.value for p in params if p.name == "kd"), None)
+        if new_kp is not None or new_kd is not None:
+            kp = new_kp or self.get_parameter("kp").value
+            kd = new_kd or self.get_parameter("kd").value
+            self._broadcast_gains(float(kp), float(kd))
+        return SetParametersResult(successful=True)
+
+    def _current_pos(self) -> list[float] | None:
+        vals = [self._joint_pos.get(n) for n in self._joint_names_yaml]
+        if any(v is None for v in vals):
+            return None
+        return [float(v) for v in vals]
+
+    def _current_vel(self) -> list[float] | None:
+        vals = [self._joint_vel.get(n) for n in self._joint_names_yaml]
+        if any(v is None for v in vals):
+            return None
+        return [float(v) for v in vals]
+
+    def _is_near(self, targets: list[float], tol: float) -> bool:
+        pos = self._current_pos()
+        if pos is None:
+            return False
+        return all(abs(p - t) <= tol for p, t in zip(pos, targets))
+
+    def _is_settled(self) -> bool:
+        vel = self._current_vel()
+        if vel is None:
+            return False
+        return all(abs(v) <= _VEL_SETTLED for v in vel)
+
+    def _publish(self, positions: list[float]) -> None:
+        self._last_published = list(positions)
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = list(self._joint_names_yaml)
+        msg.position = positions
+        self._pub.publish(msg)
+
+    def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
+        ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
+        alpha = _smoothstep(elapsed / ramp)
+        done = elapsed >= ramp
+        targets = [alpha * q for q in self._q_default_motor.tolist()]
+        return targets, done
+
+    def _liedown_targets(self, elapsed: float) -> tuple[list[float], bool]:
+        dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
+        alpha = _smoothstep(elapsed / dur)
+        start = self._lie_down_start or self._q_default_motor.tolist()
+        targets = [(1.0 - alpha) * s for s in start]
+        return targets, elapsed >= dur
+
+    def _run_inference(self) -> list[float]:
+        pos = self._current_pos()
+        vel = self._current_vel()
+        if pos is None or vel is None or self._policy is None:
+            return self._q_default_motor.tolist()
+
+        pos_arr = np.array(pos, dtype=np.float32)
+        vel_arr = np.array(vel, dtype=np.float32)
+        obs = _assemble_obs(
+            self._state_estimate,
+            self._cmd_vel,
+            pos_arr,
+            vel_arr,
+            self._q_default_motor,
+            self._last_action,
+            self._height_scan,
+        )
+        try:
+            import torch
+            with torch.inference_mode():
+                obs_t = torch.from_numpy(obs).unsqueeze(0)
+                action = self._policy(obs_t).squeeze(0).numpy()
+        except Exception as e:
+            self.get_logger().error(f"[policy] inference error: {e}", throttle_duration_sec=1.0)
+            return self._q_default_motor.tolist()
+
+        self._last_action = action.copy()
+        q_motor = _decode_action(
+            action,
+            self._q_default_urdf,
+            self._action_scale,
+            self._sign_flip_policy_idx,
+            self._joint_cfg,
+        )
+        return q_motor.tolist()
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+
+        if self._phase == _PHASE_PASSIVE:
+            if self._stand_requested:
+                self._broadcast_gains(
+                    float(self.get_parameter("kp").value),
+                    float(self.get_parameter("kd").value),
+                )
+                self._phase = _PHASE_STANDUP
+                self._phase_start = now
+                self._last_published = None
+                self._last_action = np.zeros(12, dtype=np.float32)
+                self._stand_requested = False
+                self._passive_broadcast = False
+                self.get_logger().info("[policy] posture=true -> STANDUP")
+            else:
+                if not self._passive_broadcast:
+                    self._broadcast_gains(0.0, 0.0)
+                    self._passive_broadcast = True
+            return
+
+        if self._phase_start is None:
+            self._phase_start = now
+        elapsed = now - self._phase_start
+
+        if self._phase == _PHASE_STANDUP:
+            targets, done = self._standup_targets(elapsed)
+            self._publish(targets)
+            if done and self._is_near(self._q_default_motor.tolist(), _STANDUP_TOL) and self._is_settled():
+                self._phase = _PHASE_WAIT
+                self._phase_start = now
+                self.get_logger().info("[policy] standup complete -> WAIT")
+            elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
+                self._phase = _PHASE_WAIT
+                self._phase_start = now
+                self.get_logger().warn("[policy] standup timeout -> WAIT")
+            return
+
+        if self._phase == _PHASE_WAIT:
+            self._publish(self._q_default_motor.tolist())
+            if self._joint_state_seen and any(abs(v) > 1e-4 for v in self._cmd_vel):
+                self._phase = _PHASE_POLICY
+                self._phase_start = now
+                self.get_logger().info("[policy] cmd_vel received -> POLICY")
+            return
+
+        if self._phase == _PHASE_POLICY:
+            if all(abs(v) <= 1e-4 for v in self._cmd_vel):
+                self._phase = _PHASE_WAIT
+                self._phase_start = now
+                return
+            targets = self._run_inference()
+            self._publish(targets)
+            return
+
+        if self._phase == _PHASE_LIEDOWN:
+            targets, done = self._liedown_targets(elapsed)
+            self._publish(targets)
+            if done and self._is_near([0.0] * 12, _LIEDOWN_TOL) and self._is_settled():
+                self._phase = _PHASE_PASSIVE
+                self._phase_start = None
+                self._passive_broadcast = False
+                self._last_action = np.zeros(12, dtype=np.float32)
+                self.get_logger().info("[policy] liedown complete -> PASSIVE")
+            return
+
+        if self._phase == _PHASE_FAULT:
+            if not self._fault_broadcast:
+                self._broadcast_gains(0.5, 0.1)
+                self._fault_broadcast = True
+            self._publish(self._last_published or self._q_default_motor.tolist())
+
+
+def main() -> None:
+    rclpy.init()
+    node = PolicyNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
