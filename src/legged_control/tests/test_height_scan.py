@@ -26,7 +26,6 @@ def test_flat_ground_at_stance_height():
 def test_obstacle_clips_to_negative():
     pts = np.array([[0.70, 0.0, 0.80]], dtype=np.float32)
     hs = _build_height_scan(pts)
-    # Cell for x=0.70, y=0.00: x_idx=12, y_idx=6, idx=6*25+12=162
     assert hs[162] == pytest.approx(-1.0, abs=1e-4)
 
 
@@ -40,7 +39,6 @@ def test_multiple_hits_use_highest_point():
     x, y = 0.50, 0.00
     pts = np.array([[x, y, -0.30], [x, y, -0.10]], dtype=np.float32)
     hs = _build_height_scan(pts)
-    # x_idx=8, y_idx=6, idx=158
     assert hs[158] == pytest.approx(0.10, abs=1e-4)
 
 
