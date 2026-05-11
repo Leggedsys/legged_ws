@@ -9,26 +9,26 @@ joints:
     default_q: 0.0
     q_min: -0.484
     q_max: 0.521
-    direction: 1
+    direction: -1
     zero_offset: 0.0
 
   - name: FR_thigh
     motor_id: 1
     gear_ratio: 6.33
-    default_q: 0.37373
-    q_min: -0.650
-    q_max: 3.156
+    default_q: -0.554
+    q_min: -3.133
+    q_max: 0.663
     direction: 1
-    zero_offset: -1.254
+    zero_offset: 1.254
 
   - name: FR_calf
     motor_id: 2
     gear_ratio: 12.66
-    default_q: 1.488672
-    q_min: 0.000
-    q_max: 5.554
+    default_q: -1.591
+    q_min: -2.5
+    q_max: 0.0
     direction: -1
-    zero_offset: 2.791
+    zero_offset: -2.791
 
   - name: FL_hip
     motor_id: 3
@@ -69,20 +69,20 @@ joints:
   - name: RR_thigh
     motor_id: 7
     gear_ratio: 6.33
-    default_q: 0.826636
-    q_min: -0.644
-    q_max: 3.155
+    default_q: -0.554
+    q_min: -3.133
+    q_max: 0.663
     direction: 1
-    zero_offset: -1.254
+    zero_offset: 1.254
 
   - name: RR_calf
     motor_id: 8
     gear_ratio: 12.66
-    default_q: 1.488672
-    q_min: 0.000
-    q_max: 5.538
+    default_q: -1.591
+    q_min: -2.5
+    q_max: 0.0
     direction: -1
-    zero_offset: 2.791
+    zero_offset: -2.791
 
   - name: RL_hip
     motor_id: 9
@@ -90,7 +90,7 @@ joints:
     default_q: 0.0
     q_min: -0.479
     q_max: 0.524
-    direction: 1
+    direction: -1
     zero_offset: 0.0
 
   - name: RL_thigh

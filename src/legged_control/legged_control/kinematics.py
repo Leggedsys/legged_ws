@@ -28,24 +28,30 @@ def _validate_leg(leg: str) -> str:
 
 
 def _leg_signs(leg: str) -> tuple[float, float, float]:
-    """Return (hip axis sign, thigh/calf axis sign, fore-aft x sign)."""
+    """Return (hip axis sign, lateral offset sign, fore-aft x sign).
+
+    hip_sign: maps URDF q1 to physical hip rotation (+1 = forward, -1 = backward).
+        FL +1, FR -1 (flipped), RL +1 (flipped), RR -1.
+    lat_sign: lateral offset direction (+1 = left, -1 = right), used for D_LAT.
+    x_sign: fore-aft sign (+1 = front, -1 = rear), used for L_HIP_X.
+    """
     leg = _validate_leg(leg)
-    hip_sign = 1.0 if leg in FRONT_LEGS else -1.0
-    side_sign = 1.0 if leg in LEFT_LEGS else -1.0
+    hip_sign = {"FL": 1.0, "FR": -1.0, "RL": 1.0, "RR": -1.0}[leg]
+    lat_sign = 1.0 if leg in LEFT_LEGS else -1.0
     x_sign = 1.0 if leg in FRONT_LEGS else -1.0
-    return hip_sign, side_sign, x_sign
+    return hip_sign, lat_sign, x_sign
 
 
 def forward_kinematics(
     leg: str, joints: tuple[float, float, float]
 ) -> tuple[float, float, float]:
     """Return foot position in the hip frame from URDF-frame leg angles."""
-    hip_sign, side_sign, x_sign = _leg_signs(leg)
+    hip_sign, lat_sign, x_sign = _leg_signs(leg)
     q1, q2, q3 = joints
 
     hip_angle = hip_sign * q1
-    thigh_angle = side_sign * q2
-    calf_angle = side_sign * q3
+    thigh_angle = q2
+    calf_angle = q3
 
     x = (
         x_sign * L_HIP_X
@@ -53,7 +59,7 @@ def forward_kinematics(
         - L3 * math.sin(thigh_angle + calf_angle)
     )
     z_plane = -L2 * math.cos(thigh_angle) - L3 * math.cos(thigh_angle + calf_angle)
-    y_plane = side_sign * D_LAT
+    y_plane = lat_sign * D_LAT
 
     y = y_plane * math.cos(hip_angle) - z_plane * math.sin(hip_angle)
     z = y_plane * math.sin(hip_angle) + z_plane * math.cos(hip_angle)
@@ -76,14 +82,14 @@ def inverse_kinematics(
     preferred_joints: tuple[float, float, float] | None = None,
 ) -> tuple[float, float, float] | None:
     """Return URDF-frame (hip, thigh, calf) angles for a foot target in hip frame."""
-    hip_sign, side_sign, x_sign = _leg_signs(leg)
+    hip_sign, lat_sign, x_sign = _leg_signs(leg)
     x, y, z = foot_pos
 
     yz_norm = math.hypot(y, z)
     if yz_norm < D_LAT:
         return None
 
-    acos_arg = max(-1.0, min(1.0, (side_sign * D_LAT) / yz_norm))
+    acos_arg = max(-1.0, min(1.0, (lat_sign * D_LAT) / yz_norm))
     hip_angle = math.atan2(z, y) + math.acos(acos_arg)
     q1 = hip_angle / hip_sign
 
@@ -100,14 +106,14 @@ def inverse_kinematics(
     candidates = []
     for calf_sign in (-1.0, 1.0):
         q3 = calf_sign * math.acos(cos_calf)
-        calf_angle = side_sign * q3
+        calf_angle = q3
         u = -x_prime
         v = -z_plane
         thigh_angle = math.atan2(u, v) - math.atan2(
             L3 * math.sin(calf_angle),
             L2 + L3 * math.cos(calf_angle),
         )
-        q2 = thigh_angle / side_sign
+        q2 = thigh_angle
         candidates.append((q1, q2, q3))
 
     if preferred_joints is not None:

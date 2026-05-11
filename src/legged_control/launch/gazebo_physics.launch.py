@@ -1,6 +1,7 @@
 """Minimal Gazebo physics launch for the quadruped simulation URDF."""
 
 import os
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -39,6 +40,15 @@ def _read_text(path: str) -> str:
         return f.read()
 
 
+def _prepare_urdf(urdf_path: str, controller_yaml: str) -> str:
+    """Write URDF with injected controller yaml path to a temp file, return the temp path."""
+    content = _read_text(urdf_path).replace("__CONTROLLER_YAML__", controller_yaml)
+    fd, tmp_path = tempfile.mkstemp(suffix=".urdf", prefix="dog_urdf_sim_")
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    return tmp_path
+
+
 def _launch_setup(context, *args, **kwargs):
     urdf_path = LaunchConfiguration("urdf_path").perform(context)
     controller_yaml = LaunchConfiguration("controller_yaml").perform(context)
@@ -49,6 +59,8 @@ def _launch_setup(context, *args, **kwargs):
     start_paused = LaunchConfiguration("start_paused").perform(context)
     unpause_delay = float(LaunchConfiguration("unpause_delay").perform(context))
     gazebo_ros_share = "/opt/ros/humble/share/gazebo_ros"
+
+    sim_urdf_path = _prepare_urdf(urdf_path, controller_yaml)
 
     actions = [
         IncludeLaunchDescription(
@@ -62,8 +74,7 @@ def _launch_setup(context, *args, **kwargs):
             executable="robot_state_publisher",
             name="robot_state_publisher",
             parameters=[
-                {"robot_description": _read_text(urdf_path)},
-                controller_yaml,
+                {"robot_description": _read_text(sim_urdf_path)},
             ],
             output="screen",
         ),
@@ -72,10 +83,10 @@ def _launch_setup(context, *args, **kwargs):
             executable="spawn_entity.py",
             name="spawn_quadruped",
             arguments=[
-                "-topic",
-                "robot_description",
+                "-file",
+                sim_urdf_path,
                 "-entity",
-                "saibeijian4_sim",
+                "dog_urdf",
                 "-R",
                 spawn_roll,
                 "-P",
