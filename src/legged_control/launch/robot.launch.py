@@ -2,17 +2,17 @@
 robot.launch.py — unified launch for all robot operating modes.
 
 Launch args:
-  mode          [passive]           passive | stand | standup | position_control
+  mode          [passive]           passive | position_control | policy
   legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
   serial_port_front   [from robot.yaml]   Override serial port for FR/FL motors
   serial_port_rear    [from robot.yaml]   Override serial port for RR/RL motors
+  model_path    []                  Path to TorchScript .pt policy file
 
 Usage:
   ros2 launch legged_control robot.launch.py
-  ros2 launch legged_control robot.launch.py mode:=stand
-  ros2 launch legged_control robot.launch.py mode:=standup
+  ros2 launch legged_control robot.launch.py mode:=position_control
+  ros2 launch legged_control robot.launch.py mode:=policy model_path:=/path/to/policy.pt
   ros2 launch legged_control robot.launch.py legs:=FR
-  ros2 launch legged_control robot.launch.py legs:=FR,RL mode:=stand
   ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1
 """
 
@@ -108,50 +108,29 @@ def _launch_setup(context, *args, **kwargs):
 
     if mode == "passive":
         motors = _bus_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
-        companion = Node(
-            package="legged_control",
-            executable="passive_monitor_node",
-            name="passive_monitor_node",
-            output="screen",
-        )
-        return motors + [companion]
-
-    if mode == "stand":
-        kp = float(control["kp"])
-        kd = float(control["kd"])
-        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
         return motors + [
-            Node(
-                package="legged_control",
-                executable="stand_node",
-                name="stand_node",
-                output="screen",
-            ),
-            Node(
-                package="legged_control",
-                executable="passive_monitor_node",
-                name="passive_monitor_node",
-                output="screen",
-            ),
-        ]
-
-    if mode == "standup":
-        kp = float(control["kp"])
-        kd = float(control["kd"])
-        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
-        return motors + [
-            Node(
-                package="legged_control",
-                executable="joint_aggregator",
-                name="joint_aggregator",
-                output="screen",
-            ),
-            Node(
-                package="legged_control",
-                executable="standup_node",
-                name="standup_node",
-                output="screen",
-            ),
+            Node(package="legged_control", executable="joint_aggregator",
+                 name="joint_aggregator", output="screen"),
+            Node(package="odin_ros_driver", executable="odin1_node",
+                 name="odin1_node", output="log"),
+            Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
+                 name="imu_filter_madgwick",
+                 parameters=[{"use_mag": False, "publish_tf": False,
+                              "fixed_frame": "base_link", "world_frame": "enu"}],
+                 remappings=[("imu/data_raw", "odin1/imu"),
+                             ("imu/data", "odin1/imu/filtered")],
+                 output="log"),
+            Node(package="realsense2_camera", executable="realsense2_camera_node",
+                 name="camera", output="log"),
+            Node(package="legged_control", executable="state_estimator_node",
+                 name="state_estimator_node", output="screen"),
+            Node(package="legged_control", executable="height_scan_node",
+                 name="height_scan_node", output="screen"),
+            Node(package="joy", executable="joy_node", name="joy_node", output="log"),
+            Node(package="legged_control", executable="teleop_node",
+                 name="teleop_node", output="screen"),
+            Node(package="legged_control", executable="passive_monitor_node",
+                 name="passive_monitor_node", output="screen"),
         ]
 
     if mode == "position_control":
@@ -189,8 +168,39 @@ def _launch_setup(context, *args, **kwargs):
             ),
         ]
 
+    if mode == "policy":
+        kp = float(control["kp"])
+        kd = float(control["kd"])
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
+        return motors + [
+            Node(package="legged_control", executable="joint_aggregator",
+                 name="joint_aggregator", output="screen"),
+            Node(package="odin_ros_driver", executable="odin1_node",
+                 name="odin1_node", output="log"),
+            Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
+                 name="imu_filter_madgwick",
+                 parameters=[{"use_mag": False, "publish_tf": False,
+                              "fixed_frame": "base_link", "world_frame": "enu"}],
+                 remappings=[("imu/data_raw", "odin1/imu"),
+                             ("imu/data", "odin1/imu/filtered")],
+                 output="log"),
+            Node(package="realsense2_camera", executable="realsense2_camera_node",
+                 name="camera", output="log"),
+            Node(package="legged_control", executable="state_estimator_node",
+                 name="state_estimator_node", output="screen"),
+            Node(package="legged_control", executable="height_scan_node",
+                 name="height_scan_node", output="screen"),
+            Node(package="joy", executable="joy_node", name="joy_node", output="log"),
+            Node(package="legged_control", executable="teleop_node",
+                 name="teleop_node", output="screen"),
+            Node(package="legged_control", executable="policy_node",
+                 name="policy_node",
+                 parameters=[{"model_path": LaunchConfiguration("model_path")}],
+                 output="screen"),
+        ]
+
     raise RuntimeError(
-        f"Unknown mode '{mode}'. Valid modes: passive, stand, standup, position_control"
+        f"Unknown mode '{mode}'. Valid modes: passive, position_control, policy, simulation"
     )
 
 
@@ -217,6 +227,8 @@ def generate_launch_description():
                 default_value=_YAML_SENTINEL,
                 description="Serial port for rear legs RR/RL (default: from robot.yaml)",
             ),
+            DeclareLaunchArgument("model_path", default_value="",
+                                  description="Path to TorchScript .pt policy file"),
             OpaqueFunction(function=_launch_setup),
         ]
     )

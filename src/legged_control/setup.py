@@ -15,6 +15,7 @@ setup(
                 "config/robot.yaml",
                 "config/robot_sim.yaml",
                 "config/position_control_sim.rviz",
+                "config/policy.yaml",
             ],
         ),
         (
@@ -24,6 +25,7 @@ setup(
                 "launch/position_control_sim.launch.py",
                 "launch/gazebo_physics.launch.py",
                 "launch/gazebo_position_control.launch.py",
+                "launch/gazebo_policy.launch.py",
             ],
         ),
     ],
