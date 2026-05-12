@@ -6,7 +6,7 @@ together with visualization tools for validating sensor data.
 Hardware layer (real/):
   motor_bus_front / motor_bus_rear  — joint position readout (kp=kd=0)
   joint_aggregator                  — aggregated joint states
-  odin1_node + imu_filter_madgwick  — IMU
+  host_sdk_sample + imu_filter_madgwick  — IMU
   realsense2_camera_node            — depth camera
   joy_node                          — gamepad
 
@@ -140,7 +140,7 @@ def _launch_setup(context, *args, **kwargs):
     nodes += [
         Node(
             package="odin_ros_driver",
-            executable="odin1_node",
+            executable="host_sdk_sample",
             name="odin1_node",
             output="log",
         ),
@@ -164,6 +164,10 @@ def _launch_setup(context, *args, **kwargs):
             package="realsense2_camera",
             executable="realsense2_camera_node",
             name="camera",
+            remappings=[
+                ("/camera/camera/depth/camera_info", "/camera/depth/camera_info"),
+                ("/camera/camera/depth/image_rect_raw", "/camera/depth/image_rect_raw"),
+            ],
             output="log",
         ),
         Node(

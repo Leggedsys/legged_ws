@@ -2,7 +2,7 @@
 
 Starts all nodes that talk directly to physical hardware:
   - motor_bus_node (×2, front/rear)  : read joint positions, accept joint commands
-  - odin1_node + imu_filter_madgwick : IMU
+  - host_sdk_sample + imu_filter_madgwick : IMU
   - realsense2_camera_node           : depth camera
   - joy_node                         : gamepad
 
@@ -125,7 +125,7 @@ def _launch_setup(context, *args, **kwargs):
     nodes += [
         Node(
             package="odin_ros_driver",
-            executable="odin1_node",
+            executable="host_sdk_sample",
             name="odin1_node",
             output="log",
         ),

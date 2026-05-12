@@ -102,6 +102,8 @@ class MotorBusNode(Node):
             self.declare_parameter(f"kp_{name}", float(j["kp"]) if "kp" in j else group_kp)
             self.declare_parameter(f"kd_{name}", float(j["kd"]) if "kd" in j else group_kd)
 
+        self._motor_ids = {j["name"]: int(j["motor_id"]) for j in joints}
+
         self._cmds = []
         self._datas = []
         for j in joints:
@@ -163,6 +165,7 @@ class MotorBusNode(Node):
                 cmd.mode = sdk.queryMotorMode(
                     sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC
                 )
+                cmd.id = self._motor_ids[name]
                 cmd.kp = 0.0
                 cmd.kd = 0.0
                 cmd.q = 0.0
@@ -177,16 +180,27 @@ class MotorBusNode(Node):
                 cmd.mode = sdk.queryMotorMode(
                     sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC
                 )
+                cmd.id = self._motor_ids[name]
                 cmd.kp = 0.0
                 cmd.kd = 0.0
                 cmd.q = 0.0
                 cmd.dq = 0.0
                 cmd.tau = 0.0
                 self._serial.sendRecv(cmd, data)
-                samples[name].append(float(data.q) / self._gear_ratios[name])
+                if data.correct and int(data.motor_id) == self._motor_ids[name]:
+                    samples[name].append(float(data.q) / self._gear_ratios[name])
             time.sleep(0.01)
 
-        offsets = {name: statistics.median(samples[name]) for name in self._names}
+        offsets: dict = {}
+        for name in self._names:
+            vals = samples[name]
+            if not vals:
+                self.get_logger().warn(
+                    f"  {name}: no valid samples — using zero offset"
+                )
+                offsets[name] = 0.0
+            else:
+                offsets[name] = statistics.median(vals)
         for name, off in offsets.items():
             self.get_logger().info(f"  {name}: offset={off:.4f} rad")
         return offsets
@@ -244,10 +258,11 @@ class MotorBusNode(Node):
             self._cmds, self._datas, self._pubs, self._names
         ):
             gr = self._gear_ratios[name]
-            # Re-set motorType/mode every tick — sendRecv may overwrite them
+            # Re-set motorType/mode/id every tick — sendRecv may overwrite them
             data.motorType = sdk.MotorType.GO_M8010_6
             cmd.motorType = sdk.MotorType.GO_M8010_6
             cmd.mode = sdk.queryMotorMode(sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+            cmd.id = self._motor_ids[name]
             offset = self._offsets[name]
             ratio = effective_kp / self._global_kp_init if self._global_kp_init > 0 else 0.0
             cmd.kp = ratio * float(self.get_parameter(f"kp_{name}").value)
@@ -257,6 +272,9 @@ class MotorBusNode(Node):
             cmd.dq = 0.0
             cmd.tau = 0.0
             self._serial.sendRecv(cmd, data)
+
+            if not data.correct or int(data.motor_id) != self._motor_ids[name]:
+                continue
 
             pos = float(data.q) / gr - offset
             # Reject single-frame spikes: clamp to ±1.0 rad change per tick

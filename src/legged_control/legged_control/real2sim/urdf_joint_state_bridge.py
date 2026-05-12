@@ -51,6 +51,8 @@ class URDFJointStateBridgeNode:  # pragma: no cover - exercised via ROS runtime
                 self.get_logger().info(
                     "urdf_joint_state_bridge ready — publishing /joint_states in URDF frame"
                 )
+                self._has_motor_data = False
+                self.create_timer(1.0, self._publish_default_fallback)
 
             def _load_joint_cfg(self) -> dict[str, dict]:
                 share = get_package_share_directory("legged_control")
@@ -62,6 +64,7 @@ class URDFJointStateBridgeNode:  # pragma: no cover - exercised via ROS runtime
                 return {joint["name"]: joint for joint in cfg["joints"]}
 
             def _on_joint_states(self, msg: JointState) -> None:
+                self._has_motor_data = True
                 names, positions, velocities = _motor_to_urdf_joint_state(
                     list(msg.name),
                     list(msg.position),
@@ -73,6 +76,23 @@ class URDFJointStateBridgeNode:  # pragma: no cover - exercised via ROS runtime
                 out.name = names
                 out.position = positions
                 out.velocity = velocities
+                self._pub.publish(out)
+
+            def _publish_default_fallback(self) -> None:
+                """Publish default joint state at 1 Hz so robot_state_publisher
+                can build the TF tree even without motor data."""
+                if self._has_motor_data:
+                    return
+                names = []
+                positions = []
+                for name, cfg in self._joint_cfg.items():
+                    names.append(_joint_name_to_urdf_joint(name))
+                    positions.append(float(cfg["zero_offset"]))
+                out = JointState()
+                out.header.stamp = self.get_clock().now().to_msg()
+                out.name = names
+                out.position = positions
+                out.velocity = [0.0] * len(names)
                 self._pub.publish(out)
 
         self._rclpy = rclpy

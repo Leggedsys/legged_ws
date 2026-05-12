@@ -11,17 +11,18 @@
 **职责：** 在终端以 2 Hz 输出完整观测向量，用于数据链路快速核查。
 
 显示内容：
+
 - 各关节位置偏差（相对 `policy.yaml` 中 `q_default`）与速度
 - 机身线速度、角速度、重力投影（来自 `/state_estimate`）
 - 速度指令
 - 高程图统计（均值、标准差、最小值、最大值）
 
-| | Topic | 类型 |
-|---|---|---|
-| 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState` |
-| 订阅 | `/state_estimate` | `std_msgs/Float32MultiArray` (9 floats) |
-| 订阅 | `/height_scan` | `std_msgs/Float32MultiArray` (325 floats) |
-| 订阅 | `/cmd_vel` | `geometry_msgs/Twist` |
+|      | Topic                        | 类型                                        |
+| ---- | ---------------------------- | ------------------------------------------- |
+| 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState`                  |
+| 订阅 | `/state_estimate`          | `std_msgs/Float32MultiArray` (9 floats)   |
+| 订阅 | `/height_scan`             | `std_msgs/Float32MultiArray` (325 floats) |
+| 订阅 | `/cmd_vel`                 | `geometry_msgs/Twist`                     |
 
 ---
 
@@ -34,11 +35,11 @@
 
 箭头长度与速度大小成正比，锚点在 `base_link` 原点。
 
-| | Topic | 类型 |
-|---|---|---|
-| 发布 | `/vel_viz` | `visualization_msgs/MarkerArray` |
-| 订阅 | `/state_estimate` | `std_msgs/Float32MultiArray` |
-| 订阅 | `/cmd_vel` | `geometry_msgs/Twist` |
+|      | Topic               | 类型                               |
+| ---- | ------------------- | ---------------------------------- |
+| 发布 | `/vel_viz`        | `visualization_msgs/MarkerArray` |
+| 订阅 | `/state_estimate` | `std_msgs/Float32MultiArray`     |
+| 订阅 | `/cmd_vel`        | `geometry_msgs/Twist`            |
 
 ---
 
@@ -108,11 +109,11 @@ ros2 launch legged_control test.launch.py
 
 `direction` / `zero_offset` / `default_q` 确认后，逐项检查：
 
-| 验证项 | 操作 | 预期结果 |
-|--------|------|----------|
-| **重力方向** | 机器人水平放置 | 终端 `proj_grav ≈ [0, 0, -1]` |
-| **重力方向** | 机器人前倾约 30° | `gx` 明显增大 |
-| **速度估计** | 静止 | `lin_vel ≈ [0, 0, 0]` |
-| **速度估计** | 水平推动机器人 | 绿色箭头与推动方向一致 |
-| **高程图** | 相机对准平地 | RViz PointCloud2 均匀分布，`mean ≈ camera_height` |
-| **速度指令** | 推摇杆前进 | 蓝色箭头指向 +x 方向 |
+| 验证项             | 操作              | 预期结果                                             |
+| ------------------ | ----------------- | ---------------------------------------------------- |
+| **重力方向** | 机器人水平放置    | 终端 `proj_grav ≈ [0, 0, -1]`                     |
+| **重力方向** | 机器人前倾约 30° | `gx` 明显增大                                      |
+| **速度估计** | 静止              | `lin_vel ≈ [0, 0, 0]`                             |
+| **速度估计** | 水平推动机器人    | 绿色箭头与推动方向一致                               |
+| **高程图**   | 相机对准平地      | RViz PointCloud2 均匀分布，`mean ≈ camera_height` |
+| **速度指令** | 推摇杆前进        | 蓝色箭头指向 +x 方向                                 |
