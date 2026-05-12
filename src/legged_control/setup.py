@@ -15,6 +15,7 @@ setup(
                 "config/robot.yaml",
                 "config/robot_sim.yaml",
                 "config/position_control_sim.rviz",
+                "config/passive_mode.rviz",
                 "config/policy.yaml",
             ],
         ),

@@ -23,7 +23,8 @@ from __future__ import annotations
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import CameraInfo, Image
+import struct
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import Float32MultiArray
 from tf2_ros import Buffer, TransformListener
 import tf2_geometry_msgs  # noqa: F401 — needed to register PointStamped transforms
@@ -84,6 +85,7 @@ class HeightScanNode(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
         self._pub = self.create_publisher(Float32MultiArray, "/height_scan", 10)
+        self._cloud_pub = self.create_publisher(PointCloud2, "/height_scan_cloud", 10)
         self.create_subscription(CameraInfo, "/camera/depth/camera_info", self._on_info, 1)
         self.create_subscription(Image, "/camera/depth/image_rect_raw", self._on_depth, 10)
         self.get_logger().info("height_scan_node ready — waiting for camera_info")
@@ -95,6 +97,35 @@ class HeightScanNode(Node):
             self.get_logger().info(
                 f"camera_info received: fx={self._fx:.1f} fy={self._fy:.1f}"
             )
+
+    def _pub_cloud(self, hs: np.ndarray, depth_msg: Image) -> None:
+        points = []
+        for yi in range(_N_Y):
+            for xi in range(_N_X):
+                idx = yi * _N_X + xi
+                x = _X_MIN + xi * _RES
+                y = _Y_MIN + yi * _RES
+                z = -float(hs[idx])  # terrain_z = -hs_value
+                points.append((x, y, z))
+
+        cloud = PointCloud2()
+        cloud.header.stamp = depth_msg.header.stamp
+        cloud.header.frame_id = "base_link"
+        cloud.height = 1
+        cloud.width = len(points)
+        cloud.fields = [
+            PointField(name="x", offset=0,  datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4,  datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8,  datatype=PointField.FLOAT32, count=1),
+        ]
+        cloud.is_bigendian = False
+        cloud.point_step = 12
+        cloud.row_step = cloud.point_step * len(points)
+        cloud.is_dense = True
+        cloud.data = bytes(b"".join(
+            struct.pack("fff", x, y, z) for x, y, z in points
+        ))
+        self._cloud_pub.publish(cloud)
 
     def _on_depth(self, msg: Image) -> None:
         if self._fx is None:
@@ -133,6 +164,7 @@ class HeightScanNode(Node):
         out = Float32MultiArray()
         out.data = hs.tolist()
         self._pub.publish(out)
+        self._pub_cloud(hs, msg)
 
 
 def main() -> None:

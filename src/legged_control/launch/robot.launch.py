@@ -17,6 +17,7 @@ Usage:
 """
 
 import os
+import tempfile
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
@@ -24,6 +25,23 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+try:
+    _DOG_URDF_SHARE = get_package_share_directory("dog_urdf")
+except Exception:
+    _DOG_URDF_SHARE = ""
+
+
+def _robot_description() -> str:
+    """Load URDF, resolve package:// URLs and placeholder, return XML string."""
+    if not _DOG_URDF_SHARE:
+        return ""
+    urdf_path = os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
+    with open(urdf_path) as f:
+        content = f.read()
+    content = content.replace("__CONTROLLER_YAML__", "")
+    content = content.replace("package://dog_urdf/", f"file://{_DOG_URDF_SHARE}/")
+    return content
 
 _YAML_SENTINEL = "__from_yaml__"
 
@@ -107,8 +125,24 @@ def _launch_setup(context, *args, **kwargs):
     joints = [j for j in cfg["joints"] if j["name"].split("_")[0] in active_legs]
 
     if mode == "passive":
+        share = get_package_share_directory("legged_control")
+        config_path = os.path.join(share, "config", "robot.yaml")
+        rviz_config = os.path.join(share, "config", "passive_mode.rviz")
         motors = _bus_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
-        return motors + [
+        robot_desc = _robot_description()
+        viz_nodes = []
+        if robot_desc:
+            viz_nodes = [
+                Node(package="robot_state_publisher", executable="robot_state_publisher",
+                     name="robot_state_publisher",
+                     parameters=[{"robot_description": robot_desc}], output="log"),
+                Node(package="legged_control", executable="urdf_joint_state_bridge",
+                     name="urdf_joint_state_bridge",
+                     parameters=[{"config_path": config_path}], output="log"),
+                Node(package="rviz2", executable="rviz2", name="rviz2",
+                     arguments=["-d", rviz_config], output="log"),
+            ]
+        return motors + viz_nodes + [
             Node(package="legged_control", executable="joint_aggregator",
                  name="joint_aggregator", output="screen"),
             Node(package="odin_ros_driver", executable="odin1_node",

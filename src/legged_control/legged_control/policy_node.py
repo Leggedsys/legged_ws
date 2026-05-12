@@ -131,9 +131,10 @@ _PHASE_POLICY  = "POLICY"
 _PHASE_LIEDOWN = "LIEDOWN"
 _PHASE_FAULT   = "FAULT"
 
-_STANDUP_TOL = 0.05
-_LIEDOWN_TOL = 0.03
-_VEL_SETTLED = 0.05
+_STANDUP_TOL  = 0.05
+_LIEDOWN_TOL  = 0.05
+_VEL_SETTLED  = 0.05
+_LIEDOWN_TIMEOUT = 3.0  # seconds past lie_down_duration before forcing PASSIVE
 
 
 class PolicyNode(Node):
@@ -444,12 +445,18 @@ class PolicyNode(Node):
         if self._phase == _PHASE_LIEDOWN:
             targets, done = self._liedown_targets(elapsed)
             self._publish(targets)
-            if done and self._is_near([0.0] * 12, _LIEDOWN_TOL) and self._is_settled():
+            lie_down_dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
+            near_zero = self._is_near([0.0] * 12, _LIEDOWN_TOL) and self._is_settled()
+            timed_out = done and elapsed > lie_down_dur + _LIEDOWN_TIMEOUT
+            if (done and near_zero) or timed_out:
                 self._phase = _PHASE_PASSIVE
                 self._phase_start = None
                 self._passive_broadcast = False
                 self._last_action = np.zeros(12, dtype=np.float32)
-                self.get_logger().info("[policy] liedown complete -> PASSIVE")
+                if timed_out and not near_zero:
+                    self.get_logger().warn("[policy] liedown timeout -> PASSIVE")
+                else:
+                    self.get_logger().info("[policy] liedown complete -> PASSIVE")
             return
 
         if self._phase == _PHASE_FAULT:
