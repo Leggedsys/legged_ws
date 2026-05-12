@@ -30,7 +30,7 @@ setup(
                 "launch/robot.launch.py",
                 "launch/test.launch.py",
                 "launch/gazebo_physics.launch.py",
-                "launch/gazebo_policy.launch.py",
+                "launch/gazebo_sim.launch.py",
             ],
         ),
     ],
