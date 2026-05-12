@@ -20,6 +20,10 @@ setup(
             ],
         ),
         (
+            "share/" + package_name + "/models",
+            ["models/policy.pt"],
+        ),
+        (
             "share/" + package_name + "/launch",
             [
                 "launch/robot.launch.py",

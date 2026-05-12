@@ -175,6 +175,9 @@ class PolicyNode(Node):
         model_path = str(self.get_parameter("model_path").value or "").strip()
         if not model_path:
             model_path = str(policy_cfg.get("model_path", "") or "")
+        if model_path.startswith("__package__/"):
+            share = get_package_share_directory("legged_control")
+            model_path = os.path.join(share, model_path[len("__package__/"):])
         self._policy = None
         if model_path:
             try:

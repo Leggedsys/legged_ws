@@ -1,7 +1,7 @@
 policy:
   # Absolute path to TorchScript .pt file. Override at launch with:
   #   ros2 launch legged_control robot.launch.py mode:=policy model_path:=/path/to/policy.pt
-  model_path: ""
+  model_path: "__package__/models/policy.pt"
 
   # Default stance pose in URDF frame (training convention), yaml joint order.
   # These values come from the training config (hip=0.0, thigh=0.7, calf=-1.2).
