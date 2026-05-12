@@ -49,6 +49,7 @@ class JointAggregatorNode(Node):
 
         cfg = self._load_config()
         self._names = [j["name"] for j in cfg["joints"]]
+        self._joint_cfg = {j["name"]: j for j in cfg["joints"]}
         self._latest: dict = {
             name: {"position": 0.0, "velocity": 0.0, "stamp": None}
             for name in self._names
@@ -109,8 +110,11 @@ class JointAggregatorNode(Node):
 
         for name in self._names:
             entry = self._latest[name]
-            out.position.append(float(entry["position"]))
-            out.velocity.append(float(entry["velocity"]))
+            cfg = self._joint_cfg[name]
+            direction = float(cfg["direction"])
+            zero_offset = float(cfg["zero_offset"])
+            out.position.append(direction * float(entry["position"]) + zero_offset)
+            out.velocity.append(direction * float(entry["velocity"]))
 
         self._pub.publish(out)
 

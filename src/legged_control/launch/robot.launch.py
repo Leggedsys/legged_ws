@@ -84,6 +84,7 @@ def _bus_nodes(
                         "loop_hz": motor_hz,
                     }
                 ],
+                remappings=[("/joint_commands", "/joint_commands_motor")],
                 output="log",
             )
         )
@@ -145,6 +146,8 @@ def _launch_setup(context, *args, **kwargs):
         return motors + viz_nodes + [
             Node(package="legged_control", executable="joint_aggregator",
                  name="joint_aggregator", output="screen"),
+            Node(package="legged_control", executable="motor_command_bridge",
+                 name="motor_command_bridge", output="log"),
             Node(package="odin_ros_driver", executable="host_sdk_sample",
                  name="odin1_node", output="log"),
             Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
@@ -174,6 +177,8 @@ def _launch_setup(context, *args, **kwargs):
         return motors + [
             Node(package="legged_control", executable="joint_aggregator",
                  name="joint_aggregator", output="screen"),
+            Node(package="legged_control", executable="motor_command_bridge",
+                 name="motor_command_bridge", output="log"),
             Node(package="odin_ros_driver", executable="host_sdk_sample",
                  name="odin1_node", output="log"),
             Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",

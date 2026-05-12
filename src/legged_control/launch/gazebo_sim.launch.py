@@ -42,7 +42,6 @@ def _default_urdf_path():
 
 def _launch_setup(context, *args, **kwargs):
     share = get_package_share_directory("legged_control")
-    robot_cfg = os.path.join(share, "config", "robot_sim.yaml")
     model_path = LaunchConfiguration("model_path").perform(context)
 
     physics_launch = os.path.join(share, "launch", "gazebo_physics.launch.py")
@@ -81,21 +80,8 @@ def _launch_setup(context, *args, **kwargs):
         ),
         Node(
             package="legged_control",
-            executable="joint_aggregator",
-            name="joint_aggregator",
-            output="screen",
-        ),
-        Node(
-            package="legged_control",
-            executable="urdf_joint_state_bridge",
-            name="urdf_joint_state_bridge",
-            output="log",
-        ),
-        Node(
-            package="legged_control",
             executable="state_estimator_node",
             name="state_estimator_node",
-            parameters=[{"config_path": robot_cfg}],
             output="screen",
         ),
         Node(
@@ -120,10 +106,7 @@ def _launch_setup(context, *args, **kwargs):
             package="legged_control",
             executable="policy_node",
             name="policy_node",
-            parameters=[{
-                "model_path": model_path,
-                "config_path": robot_cfg,
-            }],
+            parameters=[{"model_path": model_path}],
             output="screen",
         ),
         Node(

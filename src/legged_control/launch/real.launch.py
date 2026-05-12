@@ -110,6 +110,7 @@ def _launch_setup(context, *args, **kwargs):
                 "kd":           kd,
                 "loop_hz":      motor_hz,
             }],
+            remappings=[("/joint_commands", "/joint_commands_motor")],
             output="log",
         ))
 
@@ -119,6 +120,14 @@ def _launch_setup(context, *args, **kwargs):
         executable="joint_aggregator",
         name="joint_aggregator",
         output="screen",
+    ))
+
+    # motor_command_bridge — /joint_commands (URDF) → /joint_commands_motor (motor frame)
+    nodes.append(Node(
+        package="legged_control",
+        executable="motor_command_bridge",
+        name="motor_command_bridge",
+        output="log",
     ))
 
     # IMU

@@ -17,11 +17,7 @@ Alpha = 0.8 (high trust in kinematics; adjust if drift is observed).
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
-import yaml
-from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
@@ -36,41 +32,22 @@ from legged_control.kinematics import (
 _LEG_ORDER = ("FL", "FR", "RL", "RR")
 
 
-def _load_joint_cfg(config_path: str) -> dict[str, dict]:
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-    return {j["name"]: j for j in cfg["joints"]}
-
-
-def _motor_to_urdf(q_motor: float, direction: float, zero_offset: float) -> float:
-    return direction * q_motor + zero_offset
-
-
 def _leg_q_urdf(
-    leg: str, joint_pos: dict[str, float], joint_cfg: dict[str, dict]
+    leg: str, joint_pos: dict[str, float]
 ) -> tuple[float, float, float] | None:
     names = [f"{leg}_hip", f"{leg}_thigh", f"{leg}_calf"]
     if any(n not in joint_pos for n in names):
         return None
-    return tuple(
-        _motor_to_urdf(
-            joint_pos[n],
-            float(joint_cfg[n]["direction"]),
-            float(joint_cfg[n]["zero_offset"]),
-        )
-        for n in names
-    )
+    return tuple(joint_pos[n] for n in names)
 
 
 def _leg_dq_urdf(
-    leg: str, joint_vel: dict[str, float], joint_cfg: dict[str, dict]
+    leg: str, joint_vel: dict[str, float]
 ) -> tuple[float, float, float] | None:
     names = [f"{leg}_hip", f"{leg}_thigh", f"{leg}_calf"]
     if any(n not in joint_vel for n in names):
         return None
-    return tuple(
-        float(joint_cfg[n]["direction"]) * joint_vel[n] for n in names
-    )
+    return tuple(joint_vel[n] for n in names)
 
 
 class StateEstimatorNode(Node):
@@ -78,12 +55,6 @@ class StateEstimatorNode(Node):
         super().__init__("state_estimator_node")
 
         self.declare_parameter("config_path", "")
-        config_path = str(self.get_parameter("config_path").value or "").strip()
-        if not config_path:
-            share = get_package_share_directory("legged_control")
-            config_path = os.path.join(share, "config", "robot.yaml")
-        self._joint_cfg = _load_joint_cfg(config_path)
-
         self.declare_parameter("velocity_alpha", 0.8)
 
         self._quat = (0.0, 0.0, 0.0, 1.0)  # (x, y, z, w)
@@ -118,8 +89,8 @@ class StateEstimatorNode(Node):
         R_yaw = yaw_rotation_matrix(*self._quat)
         kin_velocities = []
         for leg in _LEG_ORDER:
-            q = _leg_q_urdf(leg, self._joint_pos, self._joint_cfg)
-            dq = _leg_dq_urdf(leg, self._joint_vel, self._joint_cfg)
+            q = _leg_q_urdf(leg, self._joint_pos)
+            dq = _leg_dq_urdf(leg, self._joint_vel)
             if q is None or dq is None:
                 continue
             v_body = leg_kinematic_velocity(leg, q, dq)

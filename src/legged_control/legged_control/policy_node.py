@@ -61,7 +61,6 @@ def _decode_action(
     q_default_urdf_yaml: np.ndarray,
     action_scale_yaml: np.ndarray,
     sign_flip_policy_idx: list[int],
-    joint_cfg: dict[str, dict],
     soft_q_min_urdf: np.ndarray,
     soft_q_max_urdf: np.ndarray,
 ) -> np.ndarray:
@@ -71,34 +70,22 @@ def _decode_action(
 
     action_yaml = _reorder_policy_to_yaml(action)
     q_target_urdf = q_default_urdf_yaml + action_yaml * action_scale_yaml
-    q_target_urdf = np.clip(q_target_urdf, soft_q_min_urdf, soft_q_max_urdf)
-
-    q_motor = np.empty(12, dtype=np.float32)
-    for i, name in enumerate(_YAML_JOINT_NAMES):
-        cfg = joint_cfg[name]
-        direction = float(cfg["direction"])
-        zero_offset = float(cfg["zero_offset"])
-        q_m = direction * (float(q_target_urdf[i]) - zero_offset)
-        q_motor[i] = float(np.clip(q_m, float(cfg["q_min"]), float(cfg["q_max"])))
-
-    return q_motor
+    return np.clip(q_target_urdf, soft_q_min_urdf, soft_q_max_urdf)
 
 
 def _assemble_obs(
     state_estimate: np.ndarray,
     cmd_vel: tuple[float, float, float],
-    joint_pos_motor_yaml: np.ndarray,
-    joint_vel_motor_yaml: np.ndarray,
-    q_default_motor_yaml: np.ndarray,
+    joint_pos_urdf_yaml: np.ndarray,
+    joint_vel_urdf_yaml: np.ndarray,
+    q_default_urdf_yaml: np.ndarray,
     last_action_policy: np.ndarray,
     height_scan: np.ndarray,
-    direction_yaml: np.ndarray,
 ) -> np.ndarray:
-    # Convert motor-frame to URDF-frame: q_urdf_rel = direction * (q_motor - q_default_motor)
     joint_pos_rel_policy = _reorder_yaml_to_policy(
-        direction_yaml * (joint_pos_motor_yaml - q_default_motor_yaml)
+        joint_pos_urdf_yaml - q_default_urdf_yaml
     )
-    joint_vel_policy = _reorder_yaml_to_policy(direction_yaml * joint_vel_motor_yaml)
+    joint_vel_policy = _reorder_yaml_to_policy(joint_vel_urdf_yaml)
 
     obs = np.concatenate([
         state_estimate[:9],
@@ -153,17 +140,11 @@ class PolicyNode(Node):
         cfg = self._load_robot_cfg()
         policy_cfg = self._load_policy_cfg()
 
-        self._joint_cfg = {j["name"]: j for j in cfg["joints"]}
         self._joint_names_yaml = [j["name"] for j in cfg["joints"]]
 
         self._q_default_urdf = self._build_q_default_urdf(policy_cfg)
         self._action_scale = self._build_action_scale(policy_cfg)
         self._sign_flip_policy_idx = self._build_sign_flip(policy_cfg)
-        self._q_default_motor = self._urdf_to_motor(self._q_default_urdf)
-        self._direction_yaml = np.array(
-            [float(self._joint_cfg[n]["direction"]) for n in _YAML_JOINT_NAMES],
-            dtype=np.float32,
-        )
         self._soft_q_min_urdf, self._soft_q_max_urdf = self._build_soft_limits(policy_cfg)
 
         control_cfg = cfg["control"]
@@ -278,13 +259,6 @@ class PolicyNode(Node):
             q_max.append(float(hi))
         return np.array(q_min, dtype=np.float32), np.array(q_max, dtype=np.float32)
 
-    def _urdf_to_motor(self, q_urdf_yaml: np.ndarray) -> np.ndarray:
-        out = np.empty(12, dtype=np.float32)
-        for i, name in enumerate(_YAML_JOINT_NAMES):
-            cfg = self._joint_cfg[name]
-            out[i] = float(cfg["direction"]) * (float(q_urdf_yaml[i]) - float(cfg["zero_offset"]))
-        return out
-
     def _on_joints(self, msg: JointState) -> None:
         self._joint_state_seen = True
         for name, pos, vel in zip(msg.name, msg.position, msg.velocity):
@@ -310,7 +284,7 @@ class PolicyNode(Node):
             if self._phase in (_PHASE_WAIT, _PHASE_POLICY, _PHASE_STANDUP):
                 self._phase = _PHASE_LIEDOWN
                 self._phase_start = time.monotonic()
-                self._lie_down_start = list(self._last_published or self._q_default_motor.tolist())
+                self._lie_down_start = list(self._last_published or self._q_default_urdf.tolist())
 
     def _broadcast_gains(self, kp: float, kd: float) -> None:
         req = SetParameters.Request()
@@ -365,35 +339,25 @@ class PolicyNode(Node):
         msg.position = positions
         self._pub.publish(msg)
 
-    def _clip_hardware(self, targets: list[float]) -> list[float]:
-        return [
-            float(np.clip(
-                targets[i],
-                float(self._joint_cfg[n]["q_min"]),
-                float(self._joint_cfg[n]["q_max"]),
-            ))
-            for i, n in enumerate(self._joint_names_yaml)
-        ]
-
     def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
         done = elapsed >= ramp
-        targets = [alpha * q for q in self._q_default_motor.tolist()]
-        return self._clip_hardware(targets), done
+        targets = [alpha * q for q in self._q_default_urdf.tolist()]
+        return targets, done
 
     def _liedown_targets(self, elapsed: float) -> tuple[list[float], bool]:
         dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / dur)
-        start = self._lie_down_start or self._q_default_motor.tolist()
+        start = self._lie_down_start or self._q_default_urdf.tolist()
         targets = [(1.0 - alpha) * s for s in start]
-        return self._clip_hardware(targets), elapsed >= dur
+        return targets, elapsed >= dur
 
     def _run_inference(self) -> list[float]:
         pos = self._current_pos()
         vel = self._current_vel()
         if pos is None or vel is None or self._policy is None:
-            return self._q_default_motor.tolist()
+            return self._q_default_urdf.tolist()
 
         pos_arr = np.array(pos, dtype=np.float32)
         vel_arr = np.array(vel, dtype=np.float32)
@@ -402,10 +366,9 @@ class PolicyNode(Node):
             self._cmd_vel,
             pos_arr,
             vel_arr,
-            self._q_default_motor,
+            self._q_default_urdf,
             self._last_action,
             self._height_scan,
-            self._direction_yaml,
         )
         try:
             import torch
@@ -414,19 +377,18 @@ class PolicyNode(Node):
                 action = self._policy(obs_t).squeeze(0).numpy()
         except Exception as e:
             self.get_logger().error(f"[policy] inference error: {e}", throttle_duration_sec=1.0)
-            return self._q_default_motor.tolist()
+            return self._q_default_urdf.tolist()
 
         self._last_action = action.copy()
-        q_motor = _decode_action(
+        q_urdf = _decode_action(
             action,
             self._q_default_urdf,
             self._action_scale,
             self._sign_flip_policy_idx,
-            self._joint_cfg,
             self._soft_q_min_urdf,
             self._soft_q_max_urdf,
         )
-        return q_motor.tolist()
+        return q_urdf.tolist()
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -457,7 +419,7 @@ class PolicyNode(Node):
         if self._phase == _PHASE_STANDUP:
             targets, done = self._standup_targets(elapsed)
             self._publish(targets)
-            if done and self._is_near(self._q_default_motor.tolist(), _STANDUP_TOL) and self._is_settled():
+            if done and self._is_near(self._q_default_urdf.tolist(), _STANDUP_TOL) and self._is_settled():
                 self._phase = _PHASE_WAIT
                 self._phase_start = now
                 self.get_logger().info("[policy] standup complete -> WAIT")
@@ -468,7 +430,7 @@ class PolicyNode(Node):
             return
 
         if self._phase == _PHASE_WAIT:
-            self._publish(self._q_default_motor.tolist())
+            self._publish(self._q_default_urdf.tolist())
             if self._joint_state_seen and any(abs(v) > 1e-4 for v in self._cmd_vel):
                 self._phase = _PHASE_POLICY
                 self._phase_start = now
@@ -505,7 +467,7 @@ class PolicyNode(Node):
             if not self._fault_broadcast:
                 self._broadcast_gains(0.5, 0.1)
                 self._fault_broadcast = True
-            self._publish(self._last_published or self._q_default_motor.tolist())
+            self._publish(self._last_published or self._q_default_urdf.tolist())
 
 
 def main() -> None:
