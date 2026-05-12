@@ -26,6 +26,30 @@ Visualization Manager:
       Update Interval: 0
       Value: true
       Visual Enabled: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Class: rviz_default_plugins/PointCloud2
+      Color Transformer: FlatColor
+      Color:
+        R: 0.2
+        G: 0.8
+        B: 0.2
+        A: 1.0
+      Enabled: true
+      Name: HeightScan
+      Topic:
+        Value: /height_scan_cloud
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: VelocityArrows
+      Topic:
+        Value: /vel_viz
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -39,10 +63,10 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.4
+      Distance: 1.8
       Focal Point:
-        X: 0
+        X: 0.3
         Y: 0
         Z: 0
-      Pitch: 0.65
-      Yaw: 0.9
+      Pitch: 0.55
+      Yaw: 0.8

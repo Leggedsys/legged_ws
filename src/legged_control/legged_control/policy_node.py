@@ -92,11 +92,13 @@ def _assemble_obs(
     q_default_motor_yaml: np.ndarray,
     last_action_policy: np.ndarray,
     height_scan: np.ndarray,
+    direction_yaml: np.ndarray,
 ) -> np.ndarray:
+    # Convert motor-frame to URDF-frame: q_urdf_rel = direction * (q_motor - q_default_motor)
     joint_pos_rel_policy = _reorder_yaml_to_policy(
-        joint_pos_motor_yaml - q_default_motor_yaml
+        direction_yaml * (joint_pos_motor_yaml - q_default_motor_yaml)
     )
-    joint_vel_policy = _reorder_yaml_to_policy(joint_vel_motor_yaml)
+    joint_vel_policy = _reorder_yaml_to_policy(direction_yaml * joint_vel_motor_yaml)
 
     obs = np.concatenate([
         state_estimate[:9],
@@ -158,6 +160,10 @@ class PolicyNode(Node):
         self._action_scale = self._build_action_scale(policy_cfg)
         self._sign_flip_policy_idx = self._build_sign_flip(policy_cfg)
         self._q_default_motor = self._urdf_to_motor(self._q_default_urdf)
+        self._direction_yaml = np.array(
+            [float(self._joint_cfg[n]["direction"]) for n in _YAML_JOINT_NAMES],
+            dtype=np.float32,
+        )
         self._soft_q_min_urdf, self._soft_q_max_urdf = self._build_soft_limits(policy_cfg)
 
         control_cfg = cfg["control"]
@@ -399,6 +405,7 @@ class PolicyNode(Node):
             self._q_default_motor,
             self._last_action,
             self._height_scan,
+            self._direction_yaml,
         )
         try:
             import torch

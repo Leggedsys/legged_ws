@@ -1,5 +1,5 @@
 """
-teleop_node — reads /joy, publishes /cmd_vel for gait_node.
+teleop_node — reads /joy, publishes /cmd_vel and /posture_command.
 
 Pure functions (_apply_deadzone, _scale_axis, _normalize_trigger_axis,
 _button_is_rising_edge) have no ROS2 dependency and can be unit-tested directly.
@@ -75,8 +75,7 @@ try:
 
         Reads all configuration from robot.yaml teleop section.
         Publishes geometry_msgs/Twist on every /joy message received.
-        During e-stop (btn_emergency_stop held), publishes zero Twist every frame
-        so gait_node keeps receiving commands and stays in standing posture.
+        During e-stop (btn_emergency_stop held), publishes zero Twist every frame.
         """
 
         def __init__(self):

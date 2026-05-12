@@ -9,8 +9,7 @@ Published immediately whenever any joint receives a new message.
 Joint order matches robot.yaml joints list (FR_hip ... RL_calf, index 0-11).
 All values are in motor frame (no direction/zero_offset conversion).
 
-Effort field is intentionally not forwarded — downstream consumers (gait_node)
-use only position and velocity.
+Effort field is intentionally not forwarded — downstream consumers use only position and velocity.
 """
 
 import os

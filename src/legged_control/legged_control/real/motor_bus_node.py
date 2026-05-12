@@ -109,7 +109,7 @@ class MotorBusNode(Node):
             cmd.motorType = sdk.MotorType.GO_M8010_6
             cmd.mode = sdk.queryMotorMode(sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
             cmd.id = j["motor_id"]
-            cmd.q = float(j["default_q"])
+            cmd.q = 0.0
             cmd.dq = 0.0
             cmd.tau = 0.0
             self._cmds.append(cmd)
