@@ -62,6 +62,8 @@ def _decode_action(
     action_scale_yaml: np.ndarray,
     sign_flip_policy_idx: list[int],
     joint_cfg: dict[str, dict],
+    soft_q_min_urdf: np.ndarray,
+    soft_q_max_urdf: np.ndarray,
 ) -> np.ndarray:
     action = action_policy.copy()
     for idx in sign_flip_policy_idx:
@@ -69,6 +71,7 @@ def _decode_action(
 
     action_yaml = _reorder_policy_to_yaml(action)
     q_target_urdf = q_default_urdf_yaml + action_yaml * action_scale_yaml
+    q_target_urdf = np.clip(q_target_urdf, soft_q_min_urdf, soft_q_max_urdf)
 
     q_motor = np.empty(12, dtype=np.float32)
     for i, name in enumerate(_YAML_JOINT_NAMES):
@@ -155,6 +158,7 @@ class PolicyNode(Node):
         self._action_scale = self._build_action_scale(policy_cfg)
         self._sign_flip_policy_idx = self._build_sign_flip(policy_cfg)
         self._q_default_motor = self._urdf_to_motor(self._q_default_urdf)
+        self._soft_q_min_urdf, self._soft_q_max_urdf = self._build_soft_limits(policy_cfg)
 
         control_cfg = cfg["control"]
         standup_cfg = cfg.get("standup", {})
@@ -249,6 +253,22 @@ class PolicyNode(Node):
                 result.append(_POLICY_JOINT_NAMES.index(name))
         return result
 
+    def _build_soft_limits(
+        self, pcfg: dict
+    ) -> tuple[np.ndarray, np.ndarray]:
+        lims = pcfg.get("joint_soft_limits", {})
+        hip   = lims.get("hip",   [-0.45,  0.45])
+        thigh = lims.get("thigh", [-1.48,  0.68])
+        calf  = lims.get("calf",  [-2.295, -0.405])
+        type_map = {"hip": hip, "thigh": thigh, "calf": calf}
+        q_min, q_max = [], []
+        for name in _YAML_JOINT_NAMES:
+            jtype = name.split("_")[1]  # "hip" / "thigh" / "calf"
+            lo, hi = type_map[jtype]
+            q_min.append(float(lo))
+            q_max.append(float(hi))
+        return np.array(q_min, dtype=np.float32), np.array(q_max, dtype=np.float32)
+
     def _urdf_to_motor(self, q_urdf_yaml: np.ndarray) -> np.ndarray:
         out = np.empty(12, dtype=np.float32)
         for i, name in enumerate(_YAML_JOINT_NAMES):
@@ -336,19 +356,29 @@ class PolicyNode(Node):
         msg.position = positions
         self._pub.publish(msg)
 
+    def _clip_hardware(self, targets: list[float]) -> list[float]:
+        return [
+            float(np.clip(
+                targets[i],
+                float(self._joint_cfg[n]["q_min"]),
+                float(self._joint_cfg[n]["q_max"]),
+            ))
+            for i, n in enumerate(self._joint_names_yaml)
+        ]
+
     def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
         done = elapsed >= ramp
         targets = [alpha * q for q in self._q_default_motor.tolist()]
-        return targets, done
+        return self._clip_hardware(targets), done
 
     def _liedown_targets(self, elapsed: float) -> tuple[list[float], bool]:
         dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / dur)
         start = self._lie_down_start or self._q_default_motor.tolist()
         targets = [(1.0 - alpha) * s for s in start]
-        return targets, elapsed >= dur
+        return self._clip_hardware(targets), elapsed >= dur
 
     def _run_inference(self) -> list[float]:
         pos = self._current_pos()
@@ -383,6 +413,8 @@ class PolicyNode(Node):
             self._action_scale,
             self._sign_flip_policy_idx,
             self._joint_cfg,
+            self._soft_q_min_urdf,
+            self._soft_q_max_urdf,
         )
         return q_motor.tolist()
 

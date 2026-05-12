@@ -38,3 +38,11 @@ policy:
   # Joints where the training URDF sign differs from deployment URDF.
   # These are negated before action decode.
   hip_sign_flip: [FR_hip, RL_hip]
+
+  # Soft joint limits in URDF frame used to clip policy output (POLICY phase only).
+  # Derived from training hard limits with 0.9× range, symmetric around midpoint.
+  # Standup/liedown uses robot.yaml q_min/q_max (hardware limits) instead.
+  joint_soft_limits:
+    hip:   [-0.450,  0.450]
+    thigh: [-1.480,  0.680]
+    calf:  [-2.295, -0.405]
