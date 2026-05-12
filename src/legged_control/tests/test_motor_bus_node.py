@@ -1,5 +1,5 @@
 # src/legged_control/tests/test_motor_bus_node.py
-from legged_control.motor_bus_node import _ns_from_joint_name, _filter_joints
+from legged_control.real.motor_bus_node import _ns_from_joint_name, _filter_joints
 
 
 def test_ns_hip():

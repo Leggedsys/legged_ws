@@ -3,7 +3,7 @@ import pytest
 
 
 def _build_height_scan(points_base_link: np.ndarray) -> np.ndarray:
-    from legged_control.height_scan_node import _build_height_scan as _f
+    from legged_control.real2sim.height_scan_node import _build_height_scan as _f
     return _f(points_base_link)
 
 

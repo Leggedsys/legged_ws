@@ -4,7 +4,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from legged_control.teleop_node import (
+from legged_control.real2sim.teleop_node import (
     _apply_deadzone,
     _button_is_rising_edge,
     _normalize_trigger_axis,
