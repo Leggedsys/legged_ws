@@ -207,6 +207,19 @@ def _launch_setup(context, *args, **kwargs):
         ),
     ]
 
+    # ── static transforms ────────────────────────────────────────────────────
+
+    # base_link → camera_link: measure physical install position.
+    # X=forward, Y=left, Z=up, PITCH=downward positive.
+    nodes.append(Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="camera_base_tf",
+        arguments=["0.15", "0.0", "0.12", "0.0", "0.5236", "0.0",
+                   "base_link", "camera_link"],
+        output="log",
+    ))
+
     # ── test / visualization layer ────────────────────────────────────────────
 
     robot_desc = _robot_description()
