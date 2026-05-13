@@ -10,10 +10,10 @@ Launch args:
 
 import os
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
-from launch.conditions import IfCondition
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.actions import IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
@@ -93,7 +93,36 @@ def _launch_setup(context, *args, **kwargs):
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
+        # ── initial pose: zero_offset (real motor-zero → URDF) ────────────
+        # Wait for Gazebo + controllers, then set dog to zero_offset (趴姿)
+        TimerAction(period=4.0, actions=[
+            ExecuteProcess(
+                cmd=[
+                    "ros2", "topic", "pub", "--once",
+                    "/gait_position_controller/commands",
+                    "std_msgs/msg/Float64MultiArray",
+                    str(_build_init_pose()),
+                ],
+                output="screen",
+            )
+        ]),
     ]
+
+
+def _build_init_pose() -> str:
+    """Read zero_offset from robot.yaml, reorder to sim order, return JSON."""
+    share = get_package_share_directory("legged_control")
+    with open(os.path.join(share, "config", "robot.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    joints = {j["name"]: j for j in cfg["joints"]}
+    sim_order = [
+        "FL_hip", "FL_thigh", "FL_calf",
+        "FR_hip", "FR_thigh", "FR_calf",
+        "RL_hip", "RL_thigh", "RL_calf",
+        "RR_hip", "RR_thigh", "RR_calf",
+    ]
+    vals = [float(joints[n]["zero_offset"]) for n in sim_order]
+    return '{"data": ' + str(vals).replace(" ", "") + "}"
 
 
 def generate_launch_description():

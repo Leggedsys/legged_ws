@@ -179,6 +179,8 @@ class PolicyNode(Node):
         self._phase_start: float | None = None
         self._stand_requested = False
         self._lie_down_start: list[float] | None = None
+        self._standup_start: list[float] | None = None  # joint pos at STANDUP entry
+        self._initial_pos: list[float] | None = None     # first joint pos seen in PASSIVE
         self._last_published: list[float] | None = None
         self._last_action = np.zeros(12, dtype=np.float32)
         self._passive_broadcast = False
@@ -343,14 +345,17 @@ class PolicyNode(Node):
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
         done = elapsed >= ramp
-        targets = [alpha * q for q in self._q_default_urdf.tolist()]
+        start = self._standup_start or self._q_default_urdf.tolist()
+        goal = self._q_default_urdf.tolist()
+        targets = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
         return targets, done
 
     def _liedown_targets(self, elapsed: float) -> tuple[list[float], bool]:
         dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / dur)
         start = self._lie_down_start or self._q_default_urdf.tolist()
-        targets = [(1.0 - alpha) * s for s in start]
+        goal = self._initial_pos or [0.0] * 12
+        targets = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
         return targets, elapsed >= dur
 
     def _run_inference(self) -> list[float]:
@@ -394,6 +399,10 @@ class PolicyNode(Node):
         now = time.monotonic()
 
         if self._phase == _PHASE_PASSIVE:
+            # capture initial resting position (used as liedown target)
+            pos = self._current_pos()
+            if pos is not None and self._initial_pos is None:
+                self._initial_pos = list(pos)
             if self._stand_requested:
                 self._broadcast_gains(
                     float(self.get_parameter("kp").value),
@@ -401,6 +410,7 @@ class PolicyNode(Node):
                 )
                 self._phase = _PHASE_STANDUP
                 self._phase_start = now
+                self._standup_start = list(self._current_pos() or self._q_default_urdf.tolist())
                 self._last_published = None
                 self._last_action = np.zeros(12, dtype=np.float32)
                 self._stand_requested = False
