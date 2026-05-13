@@ -1,6 +1,6 @@
 # processing 层
 
-数据转换层。将 real 层输出的原始硬件数据处理成策略（policy）所需的标准格式。本层不与任何物理硬件直接通信。
+数据处理层。消费标准 ROS2 topic，产出策略 (policy) 所需的观测向量分量。**虚实共用**——不区分数据来自真实硬件还是 Gazebo 仿真。
 
 ---
 
@@ -8,46 +8,38 @@
 
 ### state_estimator_node
 
-**职责：** 融合 IMU 与关节反馈，估计机身状态，输出策略观测向量的前 9 维。
+**职责：** 融合 IMU 姿态与关节运动学，估计机身线速度、角速度和重力方向。
 
-速度估计采用互补滤波（运动学权重 0.8，IMU 积分权重 0.2）。
+速度估计：互补滤波（运动学雅可比 0.8 + IMU 积分 0.2）。关节数据直接使用 URDF 坐标系（`joint_aggregator` 或 `gazebo_control_bridge` 已完成转换）。
 
-| 输出索引 | 内容 | 坐标系 |
-|----------|------|--------|
-| 0–2 | 机身线速度 (m/s) | yaw frame |
-| 3–5 | 机身角速度 (rad/s) | body frame |
-| 6–8 | 归一化重力方向 | body frame |
+输出 9 维向量 `[vx, vy, vz, wx, wy, wz, gx, gy, gz]`。
 
 | | Topic | 类型 |
 |---|---|---|
 | 发布 | `/state_estimate` | `std_msgs/Float32MultiArray` (9 floats) |
 | 订阅 | `odin1/imu/filtered` | `sensor_msgs/Imu` |
-| 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState` |
-
----
+| 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState` (URDF frame) |
 
 ### height_scan_node
 
-**职责：** 将深度相机深度图光线投射到 base_link 平面，生成策略观测向量的高度扫描段（obs[48:373]）。
+**职责：** 将深度图投射到 `base_link` 平面，生成 325 格高度扫描。
 
-扫描网格：x ∈ [0.10, 1.30] m，y ∈ [−0.30, 0.30] m，分辨率 0.05 m，25×13 = 325 格，x 快变。格值 clip 到 [−1, 1]，正值表示地面低于传感器。
+网格：x ∈ [0.10, 1.30] m，y ∈ [−0.30, +0.30] m，步长 0.05 m。格值 = −z_terrain（地面低于 base_link 为正）。
 
-依赖静态 TF：`base_link → camera_link`。
+依赖 TF：`base_link → camera_link`（已由 URDF 固定关节定义）。
 
 | | Topic | 类型 |
 |---|---|---|
 | 发布 | `/height_scan` | `std_msgs/Float32MultiArray` (325 floats) |
-| 发布 | `/height_scan_cloud` | `sensor_msgs/PointCloud2`（RViz 可视化） |
-| 订阅 | `/camera/depth/image_rect_raw` | `sensor_msgs/Image` (16UC1, mm) |
+| 发布 | `/height_scan_cloud` | `sensor_msgs/PointCloud2` (RViz) |
+| 订阅 | `/camera/depth/image_rect_raw` | `sensor_msgs/Image` |
 | 订阅 | `/camera/depth/camera_info` | `sensor_msgs/CameraInfo` |
-
----
 
 ### teleop_node
 
-**职责：** 将手柄原始轴值映射为速度指令和姿态指令，供策略消费。
+**职责：** 手柄 (`/joy`) → 速度指令 (`/cmd_vel`) + 姿态指令 (`/posture_command`)。
 
-左摇杆：前进/侧移；右摇杆：偏航；LT/RT：站立高度变化率；A 键：切换站立/卧倒。所有轴映射和死区均通过 `robot.yaml` 的 `teleop` 段配置。
+轴映射、死区、反转均由 `robot.yaml` 的 `teleop` 段配置。
 
 | | Topic | 类型 |
 |---|---|---|
@@ -57,27 +49,21 @@
 
 ---
 
-### urdf_joint_state_bridge
-
-**职责：** 将 real 层输出的电机坐标系关节数据转换为 URDF 坐标系，供可视化（`robot_state_publisher` / RViz）和需要 URDF 坐标的上层节点使用。
-
-转换：`q_urdf = direction × q_motor + zero_offset`，参数来自 `robot.yaml`。关节名加 `_joint` 后缀以匹配 URDF（`FR_hip` → `FR_hip_joint`）。
-
-| | Topic | 类型 |
-|---|---|---|
-| 发布 | `/joint_states` | `sensor_msgs/JointState`（URDF frame） |
-| 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState`（motor frame） |
-
----
-
 ## 层接口
 
 ```
-real 层输入                    real2sim 处理              对外发布（供策略消费）
-──────────────────────────────────────────────────────────────────────────────
-/joint_states_aggregated  →  state_estimator_node   →  /state_estimate
+数据源 (real/ 或 sim/)          processing 处理               对外输出 (消费方)
+─────────────────────────────────────────────────────────────────────────
+/joint_states_aggregated  →  state_estimator_node   →  /state_estimate (policy)
 odin1/imu/filtered        →  state_estimator_node
-/camera/depth/...         →  height_scan_node       →  /height_scan
-/joy                      →  teleop_node            →  /cmd_vel, /posture_command
-/joint_states_aggregated  →  urdf_joint_state_bridge →  /joint_states（URDF frame）
+/camera/depth/*           →  height_scan_node       →  /height_scan (policy)
+/joy                      →  teleop_node            →  /cmd_vel (policy)
 ```
+
+## 数据源来源
+
+| 真机模式 | 仿真模式 |
+|---------|---------|
+| `real/joint_aggregator`（motor→URDF） | `sim/gazebo_control_bridge`（重排 Gazebo→YAML） |
+| `odin_ros_driver/host_sdk_sample` | URDF IMU 插件 |
+| `realsense2_camera_node` | URDF depth 插件 |
