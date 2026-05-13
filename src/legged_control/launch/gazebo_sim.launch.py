@@ -57,6 +57,7 @@ def _launch_setup(context, *args, **kwargs):
     share = get_package_share_directory("legged_control")
     model_path = LaunchConfiguration("model_path").perform(context)
     physics_launch = os.path.join(share, "launch", "gazebo_physics.launch.py")
+    init_pose_json = _build_init_pose_cmd()
 
     return [
         IncludeLaunchDescription(
@@ -92,12 +93,11 @@ def _launch_setup(context, *args, **kwargs):
         # Set initial趴姿 after controllers load and Gazebo unpauses
         TimerAction(period=5.0, actions=[
             ExecuteProcess(
-                cmd=[
-                    "ros2", "topic", "pub", "--once",
-                    "/gait_position_controller/commands",
-                    "std_msgs/msg/Float64MultiArray",
-                    _build_init_pose_cmd(),
-                ],
+                cmd=["bash", "-c",
+                     "source /opt/ros/humble/setup.bash && "
+                     "ros2 topic pub --once /gait_position_controller/commands "
+                     "std_msgs/msg/Float64MultiArray "
+                     + "'" + init_pose_json + "'"],
                 output="screen",
             )
         ]),
