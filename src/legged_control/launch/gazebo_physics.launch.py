@@ -61,9 +61,23 @@ def _launch_setup(context, *args, **kwargs):
     start_paused = LaunchConfiguration("start_paused").perform(context)
     gui = LaunchConfiguration("gui").perform(context)
     unpause_delay = float(LaunchConfiguration("unpause_delay").perform(context))
+    joint_init = LaunchConfiguration("joint_init").perform(context)
     gazebo_ros_share = "/opt/ros/humble/share/gazebo_ros"
 
     sim_urdf_path = _prepare_urdf(urdf_path, controller_yaml)
+
+    spawn_args = [
+        "-file", sim_urdf_path,
+        "-entity", "dog_urdf",
+        "-R", spawn_roll,
+        "-P", spawn_pitch,
+        "-Y", spawn_yaw,
+        "-z", spawn_z,
+    ]
+    if joint_init:
+        for pair in joint_init.split(";"):
+            if pair:
+                spawn_args += ["-J", pair]
 
     actions = [
         IncludeLaunchDescription(
@@ -85,20 +99,7 @@ def _launch_setup(context, *args, **kwargs):
             package="gazebo_ros",
             executable="spawn_entity.py",
             name="spawn_quadruped",
-            arguments=[
-                "-file",
-                sim_urdf_path,
-                "-entity",
-                "dog_urdf",
-                "-R",
-                spawn_roll,
-                "-P",
-                spawn_pitch,
-                "-Y",
-                spawn_yaw,
-                "-z",
-                spawn_z,
-            ],
+            arguments=spawn_args,
             output="screen",
         ),
         Node(
@@ -192,6 +193,11 @@ def generate_launch_description():
                 "unpause_delay",
                 default_value="3.0",
                 description="Seconds to wait before unpausing physics",
+            ),
+            DeclareLaunchArgument(
+                "joint_init",
+                default_value="",
+                description="Semicolon-separated initial joint pos: FL_hip_joint=0.0;FR_thigh_joint=1.254",
             ),
             OpaqueFunction(function=_launch_setup),
         ]
