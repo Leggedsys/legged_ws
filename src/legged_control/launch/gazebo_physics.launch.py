@@ -190,7 +190,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "unpause_delay",
-                default_value="8.0",
+                default_value="3.0",
                 description="Seconds to wait before unpausing physics",
             ),
             OpaqueFunction(function=_launch_setup),

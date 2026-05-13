@@ -89,7 +89,7 @@ def _launch_setup(context, *args, **kwargs):
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
-        # Set initial趴姿 before Gazebo unpauses (to avoid launch from stance→趴姿 transition)
+        # Set initial趴姿 after controllers load and Gazebo unpauses
         TimerAction(period=5.0, actions=[
             ExecuteProcess(
                 cmd=[
