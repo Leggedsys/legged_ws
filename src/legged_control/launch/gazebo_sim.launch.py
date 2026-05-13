@@ -89,8 +89,8 @@ def _launch_setup(context, *args, **kwargs):
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
-        # Set initial趴姿 after controllers load (ROS2 spawn_entity has no -J)
-        TimerAction(period=6.0, actions=[
+        # Set initial趴姿 before Gazebo unpauses (to avoid launch from stance→趴姿 transition)
+        TimerAction(period=5.0, actions=[
             ExecuteProcess(
                 cmd=[
                     "ros2", "topic", "pub", "--once",
