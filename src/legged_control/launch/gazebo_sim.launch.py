@@ -13,7 +13,7 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.actions import IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
@@ -37,8 +37,8 @@ def _default_urdf_path():
     return ""
 
 
-def _build_joint_init() -> str:
-    """Read zero_offset from robot.yaml, produce 'name=val;...' for spawn_entity -J."""
+def _build_init_pose_cmd() -> str:
+    """Read zero_offset from robot.yaml, reorder to sim order, return JSON for Float64MultiArray data field."""
     share = get_package_share_directory("legged_control")
     with open(os.path.join(share, "config", "robot.yaml")) as f:
         cfg = yaml.safe_load(f)
@@ -49,10 +49,8 @@ def _build_joint_init() -> str:
         "RL_hip", "RL_thigh", "RL_calf",
         "RR_hip", "RR_thigh", "RR_calf",
     ]
-    pairs = []
-    for name in sim_order:
-        pairs.append(f"{name}_joint={float(joints[name]['zero_offset'])}")
-    return ";".join(pairs)
+    vals = [float(joints[n]["zero_offset"]) for n in sim_order]
+    return '{"data": ' + str(vals).replace(" ", "") + "}"
 
 
 def _launch_setup(context, *args, **kwargs):
@@ -67,7 +65,6 @@ def _launch_setup(context, *args, **kwargs):
                 "urdf_path": LaunchConfiguration("urdf_path"),
                 "spawn_z": LaunchConfiguration("spawn_z"),
                 "gui": LaunchConfiguration("gui"),
-                "joint_init": _build_joint_init(),
             }.items(),
         ),
         Node(package="legged_control", executable="gazebo_control_bridge",
@@ -92,6 +89,18 @@ def _launch_setup(context, *args, **kwargs):
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
+        # Set initial趴姿 after controllers load (ROS2 spawn_entity has no -J)
+        TimerAction(period=6.0, actions=[
+            ExecuteProcess(
+                cmd=[
+                    "ros2", "topic", "pub", "--once",
+                    "/gait_position_controller/commands",
+                    "std_msgs/msg/Float64MultiArray",
+                    _build_init_pose_cmd(),
+                ],
+                output="screen",
+            )
+        ]),
     ]
 
 
