@@ -385,6 +385,9 @@ class PolicyNode(Node):
             return self._q_default_urdf.tolist()
 
         self._last_action = action.copy()
+        self.get_logger().info(
+            f"[policy] raw_action: {[f'{x:+.4f}' for x in action]}"
+        )
         q_urdf = _decode_action(
             action,
             self._q_default_urdf,
@@ -392,6 +395,11 @@ class PolicyNode(Node):
             self._sign_flip_policy_idx,
             self._soft_q_min_urdf,
             self._soft_q_max_urdf,
+        )
+        self.get_logger().info(
+            f"[policy] q_target(URDF)={[f'{x:+.4f}' for x in q_urdf]}  "
+            f"pos_rel(obs first 4)={[f'{x:+.3f}' for x in obs[12:16]]}  "
+            f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}"
         )
         return q_urdf.tolist()
 
