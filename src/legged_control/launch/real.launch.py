@@ -1,30 +1,29 @@
 """real.launch.py — hardware interface layer.
 
-Starts all nodes that talk directly to physical hardware:
-  - motor_bus_node (×2, front/rear)  : read joint positions, accept joint commands
-  - host_sdk_sample + imu_filter_madgwick : IMU
+Starts ALL hardware data-source nodes:
+  - motor_bus_node ×2 (front/rear)  : RS485 motor I/O
+  - joint_aggregator                 : merge + motor→URDF
+  - motor_command_bridge             : URDF cmd → motor frame
+  - urdf_joint_state_bridge          : → /joint_states (TF tree)
+  - host_sdk_sample + imu_filter    : Odin1 IMU
   - realsense2_camera_node           : depth camera
   - joy_node                         : gamepad
+  - odin static TF                   : connect odin→URDF TF trees
 
-Published topics (outputs to upper layers):
-  /joint_states_aggregated  sensor_msgs/JointState   12-joint positions & velocities
-  odin1/imu/filtered        sensor_msgs/Imu          filtered IMU
-  /camera/color/image_raw   sensor_msgs/Image        RGB image
-  /camera/depth/...         sensor_msgs/Image        depth
-  /joy                      sensor_msgs/Joy           gamepad axes/buttons
-
-Subscribed topics (inputs from upper layers):
-  /joint_commands           sensor_msgs/JointState   12-joint position targets
+Published topics:
+  /joint_states_aggregated     (URDF frame)
+  /joint_states                (TF tree)
+  /joint_commands_motor        (motor frame, for motor_bus)
+  odin1/imu                    (raw IMU)
+  odin1/imu/filtered           (filtered IMU)
+  /camera/depth/image_rect_raw
+  /camera/depth/camera_info
+  /joy
 
 Launch args:
-  serial_port_front  [/dev/ttyUSB0]   serial port for FR/FL motors
-  serial_port_rear   [/dev/ttyUSB1]   serial port for RR/RL motors
-  legs               [all]            all | FR | FL | RR | RL | comma-separated
-
-Usage:
-  ros2 launch legged_control real.launch.py
-  ros2 launch legged_control real.launch.py serial_port_front:=/dev/ttyUSB0
-  ros2 launch legged_control real.launch.py legs:=FR
+  serial_port_front  [/dev/ttyUSB0]
+  serial_port_rear   [/dev/ttyUSB1]
+  legs               [all]
 """
 
 import os
@@ -35,6 +34,17 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+from legged_control.launch_common import (
+    make_imu_filter,
+    make_joy,
+    make_joint_aggregator,
+    make_motor_command_bridge,
+    make_odin1_node,
+    make_odin_tf,
+    make_realsense,
+    make_urdf_joint_state_bridge,
+)
 
 _VALID_LEGS = {"FR", "FL", "RR", "RL"}
 _YAML_SENTINEL = "__from_yaml__"
@@ -81,10 +91,7 @@ def _launch_setup(context, *args, **kwargs):
     kd = float(control["kd"])
 
     active_legs = _parse_legs(legs_arg)
-    joints = [
-        j for j in cfg["joints"]
-        if j["name"].split("_")[0] in active_legs
-    ]
+    joints = [j for j in cfg["joints"] if j["name"].split("_")[0] in active_legs]
 
     port_map = {"front": sp_front, "rear": sp_rear}
     groups = {
@@ -94,7 +101,7 @@ def _launch_setup(context, *args, **kwargs):
 
     nodes = []
 
-    # motor_bus_node × 2 (front / rear)
+    # motor_bus_node ×2
     for group, (node_name, port) in groups.items():
         group_joints = [j for j in joints if _leg_group(j["name"]) == group]
         if not group_joints:
@@ -114,85 +121,28 @@ def _launch_setup(context, *args, **kwargs):
             output="log",
         ))
 
-    # joint_aggregator — merges 12 individual joint topics into one
-    nodes.append(Node(
-        package="legged_control",
-        executable="joint_aggregator",
-        name="joint_aggregator",
-        output="screen",
-    ))
+    # real-layer convertors
+    nodes.append(make_joint_aggregator())
+    nodes.append(make_motor_command_bridge())
+    nodes.append(make_urdf_joint_state_bridge())
 
-    # motor_command_bridge — /joint_commands (URDF) → /joint_commands_motor (motor frame)
-    nodes.append(Node(
-        package="legged_control",
-        executable="motor_command_bridge",
-        name="motor_command_bridge",
-        output="log",
-    ))
-
-    # IMU
-    nodes += [
-        Node(
-            package="odin_ros_driver",
-            executable="host_sdk_sample",
-            name="odin1_node",
-            output="log",
-        ),
-        Node(
-            package="imu_filter_madgwick",
-            executable="imu_filter_madgwick_node",
-            name="imu_filter_madgwick",
-            parameters=[{
-                "use_mag":     False,
-                "publish_tf":  False,
-                "fixed_frame": "base_link",
-                "world_frame": "enu",
-            }],
-            remappings=[
-                ("imu/data_raw", "odin1/imu"),
-                ("imu/data",     "odin1/imu/filtered"),
-            ],
-            output="log",
-        ),
-    ]
-
-    # Depth camera
-    nodes.append(Node(
-        package="realsense2_camera",
-        executable="realsense2_camera_node",
-        name="camera",
-        output="log",
-    ))
-
-    # Gamepad
-    nodes.append(Node(
-        package="joy",
-        executable="joy_node",
-        name="joy_node",
-        output="log",
-    ))
+    # external sensors
+    nodes.append(make_odin1_node())
+    nodes.append(make_imu_filter())
+    nodes.append(make_realsense())
+    nodes.append(make_joy())
+    nodes.append(make_odin_tf())
 
     return nodes
 
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument(
-            "serial_port_front",
-            default_value=_YAML_SENTINEL,
-            description="Serial port for FR/FL motors (default: from robot.yaml)",
-        ),
-        DeclareLaunchArgument(
-            "serial_port_rear",
-            default_value=_YAML_SENTINEL,
-            description="Serial port for RR/RL motors (default: from robot.yaml)",
-        ),
-        DeclareLaunchArgument(
-            "legs",
-            default_value="all",
-            description=(
-                "Legs to activate: all | FR | FL | RR | RL | comma-separated"
-            ),
-        ),
+        DeclareLaunchArgument("serial_port_front", default_value=_YAML_SENTINEL,
+                              description="Serial port for FR/FL motors"),
+        DeclareLaunchArgument("serial_port_rear", default_value=_YAML_SENTINEL,
+                              description="Serial port for RR/RL motors"),
+        DeclareLaunchArgument("legs", default_value="all",
+                              description="Legs: all | FR | FL | RR | RL | comma-separated"),
         OpaqueFunction(function=_launch_setup),
     ])

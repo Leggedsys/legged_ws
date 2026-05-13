@@ -1,49 +1,44 @@
-"""
-robot.launch.py — real robot launch.
+"""robot.launch.py — real robot with modes.
 
 Launch args:
   mode          [passive]           passive | policy
-  legs          [all]               all | FR | FL | RR | RL | comma-separated e.g. FR,FL
-  serial_port_front   [from robot.yaml]   Override serial port for FR/FL motors
-  serial_port_rear    [from robot.yaml]   Override serial port for RR/RL motors
+  legs          [all]
+  serial_port_front   [from robot.yaml]
+  serial_port_rear    [from robot.yaml]
   model_path    []                  Path to TorchScript .pt policy file
-
-Usage:
-  ros2 launch legged_control robot.launch.py
-  ros2 launch legged_control robot.launch.py mode:=policy
-  ros2 launch legged_control robot.launch.py mode:=policy model_path:=/path/to/policy.pt
-  ros2 launch legged_control robot.launch.py legs:=FR
-  ros2 launch legged_control robot.launch.py serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1
 """
 
 import os
-import tempfile
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
 from launch_ros.actions import Node
 
-try:
-    _DOG_URDF_SHARE = get_package_share_directory("dog_urdf")
-except Exception:
-    _DOG_URDF_SHARE = ""
-
-
-def _robot_description() -> str:
-    """Load URDF, resolve package:// URLs and placeholder, return XML string."""
-    if not _DOG_URDF_SHARE:
-        return ""
-    urdf_path = os.path.join(_DOG_URDF_SHARE, "urdf", "dog_urdf.urdf")
-    with open(urdf_path) as f:
-        content = f.read()
-    content = content.replace("__CONTROLLER_YAML__", "")
-    content = content.replace("package://dog_urdf/", f"file://{_DOG_URDF_SHARE}/")
-    return content
+from legged_control.launch_common import (
+    make_imu_filter,
+    make_joy,
+    make_joint_aggregator,
+    make_motor_command_bridge,
+    make_obs_assembler,
+    make_odin1_node,
+    make_odin_tf,
+    make_realsense,
+    make_robot_state_publisher,
+    make_state_estimator,
+    make_height_scan,
+    make_teleop,
+    make_urdf_joint_state_bridge,
+    make_obs_monitor,
+    make_vel_viz,
+    make_rviz2,
+)
 
 _YAML_SENTINEL = "__from_yaml__"
+_VALID_LEGS = {"FR", "FL", "RR", "RL"}
 
 
 def _load_config() -> dict:
@@ -53,45 +48,7 @@ def _load_config() -> dict:
 
 
 def _leg_group(joint_name: str) -> str:
-    """'FR_hip' → 'front',  'RR_hip' → 'rear'"""
     return "front" if joint_name.split("_")[0] in ("FR", "FL") else "rear"
-
-
-def _bus_nodes(
-    joints: list, port_map: dict, motor_hz: float, kp: float, kd: float
-) -> list:
-    """Start one motor_bus_node per non-empty leg group."""
-    groups = {
-        "front": ("motor_bus_front", port_map["front"]),
-        "rear": ("motor_bus_rear", port_map["rear"]),
-    }
-    nodes = []
-    for group, (node_name, port) in groups.items():
-        group_joints = [j for j in joints if _leg_group(j["name"]) == group]
-        if not group_joints:
-            continue
-        nodes.append(
-            Node(
-                package="legged_control",
-                executable="motor_bus_node",
-                name=node_name,
-                parameters=[
-                    {
-                        "serial_port": port,
-                        "joint_names": [j["name"] for j in group_joints],
-                        "kp": kp,
-                        "kd": kd,
-                        "loop_hz": motor_hz,
-                    }
-                ],
-                remappings=[("/joint_commands", "/joint_commands_motor")],
-                output="log",
-            )
-        )
-    return nodes
-
-
-_VALID_LEGS = {"FR", "FL", "RR", "RL"}
 
 
 def _parse_legs(legs_arg: str) -> set:
@@ -102,9 +59,27 @@ def _parse_legs(legs_arg: str) -> set:
     if invalid:
         raise RuntimeError(
             f"Unknown leg(s): {', '.join(sorted(invalid))}. "
-            f"Valid values: FR, FL, RR, RL, all"
+            f"Valid: FR, FL, RR, RL, all"
         )
     return selected
+
+
+def _bus_nodes(joints: list, port_map: dict, motor_hz: float, kp: float, kd: float) -> list:
+    groups = {"front": ("motor_bus_front", port_map["front"]),
+              "rear":  ("motor_bus_rear",  port_map["rear"])}
+    nodes = []
+    for group, (node_name, port) in groups.items():
+        group_joints = [j for j in joints if _leg_group(j["name"]) == group]
+        if not group_joints:
+            continue
+        nodes.append(Node(
+            package="legged_control", executable="motor_bus_node", name=node_name,
+            parameters=[{"serial_port": port, "joint_names": [j["name"] for j in group_joints],
+                         "kp": kp, "kd": kd, "loop_hz": motor_hz}],
+            remappings=[("/joint_commands", "/joint_commands_motor")],
+            output="log",
+        ))
+    return nodes
 
 
 def _launch_setup(context, *args, **kwargs):
@@ -125,114 +100,60 @@ def _launch_setup(context, *args, **kwargs):
     active_legs = _parse_legs(legs_arg)
     joints = [j for j in cfg["joints"] if j["name"].split("_")[0] in active_legs]
 
+    # ── real layer (always) ──────────────────────────────────────────────
+    if mode == "passive":
+        motors = _bus_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
+    elif mode == "policy":
+        motors = _bus_nodes(joints, port_map, motor_hz,
+                            kp=float(control["kp"]), kd=float(control["kd"]))
+    else:
+        raise RuntimeError(f"Unknown mode '{mode}'. Valid: passive, policy")
+
+    nodes = (
+        motors
+        + [make_joint_aggregator(), make_motor_command_bridge(),
+           make_urdf_joint_state_bridge(),
+           make_odin1_node(), make_imu_filter(), make_realsense(), make_joy(),
+           make_odin_tf()]
+    )
+
+    # ── processing (always) ──────────────────────────────────────────────
+    nodes += [make_state_estimator(), make_height_scan(), make_teleop(),
+              make_obs_assembler()]
+
+    # ── mode-specific extras ─────────────────────────────────────────────
+    rsp = make_robot_state_publisher()
+    if rsp is not None:
+        nodes.append(rsp)
+
     if mode == "passive":
         share = get_package_share_directory("legged_control")
-        config_path = os.path.join(share, "config", "robot.yaml")
-        rviz_config = os.path.join(share, "config", "passive_mode.rviz")
-        motors = _bus_nodes(joints, port_map, motor_hz, kp=0.0, kd=0.0)
-        robot_desc = _robot_description()
-        viz_nodes = []
-        if robot_desc:
-            viz_nodes = [
-                Node(package="robot_state_publisher", executable="robot_state_publisher",
-                     name="robot_state_publisher",
-                     parameters=[{"robot_description": robot_desc}], output="log"),
-                Node(package="legged_control", executable="urdf_joint_state_bridge",
-                     name="urdf_joint_state_bridge",
-                     parameters=[{"config_path": config_path}], output="log"),
-                Node(package="rviz2", executable="rviz2", name="rviz2",
-                     arguments=["-d", rviz_config], output="log"),
-            ]
-        return motors + viz_nodes + [
-            Node(package="legged_control", executable="joint_aggregator",
-                 name="joint_aggregator", output="screen"),
-            Node(package="legged_control", executable="motor_command_bridge",
-                 name="motor_command_bridge", output="log"),
-            Node(package="odin_ros_driver", executable="host_sdk_sample",
-                 name="odin1_node", output="log"),
-            Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
-                 name="imu_filter_madgwick",
-                 parameters=[{"use_mag": False, "publish_tf": False,
-                              "fixed_frame": "base_link", "world_frame": "enu"}],
-                 remappings=[("imu/data_raw", "odin1/imu"),
-                             ("imu/data", "odin1/imu/filtered")],
-                 output="log"),
-            Node(package="realsense2_camera", executable="realsense2_camera_node",
-                 name="camera", output="log"),
-            Node(package="legged_control", executable="state_estimator_node",
-                 name="state_estimator_node", output="screen"),
-            Node(package="legged_control", executable="height_scan_node",
-                 name="height_scan_node", output="screen"),
-            Node(package="joy", executable="joy_node", name="joy_node", output="log"),
-            Node(package="legged_control", executable="teleop_node",
-                 name="teleop_node", output="screen"),
-            Node(package="legged_control", executable="obs_monitor_node",
-                 name="obs_monitor_node", output="screen"),
+        rviz_cfg = os.path.join(share, "config", "passive_mode.rviz")
+        nodes += [
+            Node(package="rviz2", executable="rviz2", name="rviz2",
+                 arguments=["-d", rviz_cfg], output="log"),
+            make_obs_monitor(),
         ]
 
     if mode == "policy":
-        kp = float(control["kp"])
-        kd = float(control["kd"])
-        motors = _bus_nodes(joints, port_map, motor_hz, kp=kp, kd=kd)
-        return motors + [
-            Node(package="legged_control", executable="joint_aggregator",
-                 name="joint_aggregator", output="screen"),
-            Node(package="legged_control", executable="motor_command_bridge",
-                 name="motor_command_bridge", output="log"),
-            Node(package="odin_ros_driver", executable="host_sdk_sample",
-                 name="odin1_node", output="log"),
-            Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
-                 name="imu_filter_madgwick",
-                 parameters=[{"use_mag": False, "publish_tf": False,
-                              "fixed_frame": "base_link", "world_frame": "enu"}],
-                 remappings=[("imu/data_raw", "odin1/imu"),
-                             ("imu/data", "odin1/imu/filtered")],
-                 output="log"),
-            Node(package="realsense2_camera", executable="realsense2_camera_node",
-                 name="camera", output="log"),
-            Node(package="legged_control", executable="state_estimator_node",
-                 name="state_estimator_node", output="screen"),
-            Node(package="legged_control", executable="height_scan_node",
-                 name="height_scan_node", output="screen"),
-            Node(package="joy", executable="joy_node", name="joy_node", output="log"),
-            Node(package="legged_control", executable="teleop_node",
-                 name="teleop_node", output="screen"),
-            Node(package="legged_control", executable="policy_node",
-                 name="policy_node",
-                 parameters=[{"model_path": LaunchConfiguration("model_path")}],
-                 output="screen"),
-        ]
+        nodes.append(Node(
+            package="legged_control", executable="policy_node",
+            name="policy_node",
+            parameters=[{"model_path": LaunchConfiguration("model_path")}],
+            output="screen",
+        ))
 
-    raise RuntimeError(
-        f"Unknown mode '{mode}'. Valid modes: passive, policy"
-    )
+    return nodes
 
 
 def generate_launch_description():
-    return LaunchDescription(
-        [
-            DeclareLaunchArgument(
-                "mode",
-                default_value="passive",
-                description="Operating mode: passive | policy",
-            ),
-            DeclareLaunchArgument(
-                "legs",
-                default_value="all",
-                description="Legs to activate: all | FR | FL | RR | RL | comma-separated e.g. FR,FL",
-            ),
-            DeclareLaunchArgument(
-                "serial_port_front",
-                default_value=_YAML_SENTINEL,
-                description="Serial port for front legs FR/FL (default: from robot.yaml)",
-            ),
-            DeclareLaunchArgument(
-                "serial_port_rear",
-                default_value=_YAML_SENTINEL,
-                description="Serial port for rear legs RR/RL (default: from robot.yaml)",
-            ),
-            DeclareLaunchArgument("model_path", default_value="",
-                                  description="Path to TorchScript .pt policy file"),
-            OpaqueFunction(function=_launch_setup),
-        ]
-    )
+    return LaunchDescription([
+        DeclareLaunchArgument("mode", default_value="passive",
+                              description="passive | policy"),
+        DeclareLaunchArgument("legs", default_value="all"),
+        DeclareLaunchArgument("serial_port_front", default_value=_YAML_SENTINEL),
+        DeclareLaunchArgument("serial_port_rear", default_value=_YAML_SENTINEL),
+        DeclareLaunchArgument("model_path", default_value="",
+                              description="Path to TorchScript .pt policy file"),
+        OpaqueFunction(function=_launch_setup),
+    ])
