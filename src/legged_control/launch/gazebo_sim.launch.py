@@ -107,7 +107,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("urdf_path", default_value=_default_urdf_path()),
-        DeclareLaunchArgument("spawn_z", default_value="0.50"),
+        DeclareLaunchArgument("spawn_z", default_value="0.28"),
         DeclareLaunchArgument("model_path", default_value=""),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("gui", default_value="true"),
