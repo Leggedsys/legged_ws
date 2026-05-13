@@ -37,8 +37,8 @@ def _default_urdf_path():
     return ""
 
 
-def _build_init_pose_cmd() -> str:
-    """Read zero_offset from robot.yaml, reorder to sim order, return JSON for Float64MultiArray data field."""
+def _build_ramp_step(step: int) -> str:
+    """Build趴姿 ramp step i (0..5), 0=standing (0), 5=full趴姿 (zero_offset)."""
     share = get_package_share_directory("legged_control")
     with open(os.path.join(share, "config", "robot.yaml")) as f:
         cfg = yaml.safe_load(f)
@@ -49,7 +49,8 @@ def _build_init_pose_cmd() -> str:
         "RL_hip", "RL_thigh", "RL_calf",
         "RR_hip", "RR_thigh", "RR_calf",
     ]
-    vals = [float(joints[n]["zero_offset"]) for n in sim_order]
+    alpha = step / 5.0
+    vals = [alpha * float(joints[n]["zero_offset"]) for n in sim_order]
     return '{"data": ' + str(vals).replace(" ", "") + "}"
 
 
@@ -89,6 +90,15 @@ def _launch_setup(context, *args, **kwargs):
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
+        # Ramp to趴姿 over 2s (5 steps) to avoid physics explosion
+        TimerAction(period=3.0, actions=[
+            ExecuteProcess(cmd=["bash", "-c",
+                "source /opt/ros/humble/setup.bash && "
+                + " && ".join(
+                    f"sleep 0.4 && ros2 topic pub --once /gait_position_controller/commands std_msgs/msg/Float64MultiArray '{_build_ramp_step(i)}'"
+                    for i in range(6)
+                )], output="screen"),
+        ]),
     ]
 
 
