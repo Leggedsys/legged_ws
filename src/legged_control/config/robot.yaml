@@ -139,3 +139,21 @@ teleop:
 standup:
   ramp_duration: 8.0       # seconds for 0 → q_default smooth-step ramp
   lie_down_duration: 2.0   # seconds for current → 0 smooth-step ramp
+
+sensors:
+  # Camera (RealSense D435) install position relative to base_link.
+  # Used by test.launch.py static_transform_publisher.
+  # X=forward, Y=left, Z=up, PITCH=downward (rad)
+  camera:
+    x: 0.15
+    y: 0.0
+    z: 0.12
+    pitch: 0.5236   # ~30°
+
+  # Odin1 UVDAR install position relative to base_link.
+  # Used by test.launch.py static_transform_publisher.
+  # Odin driver publishes odom→odin1_base_link; this connects it to the URDF tree.
+  odin:
+    x: 0.10
+    y: 0.0
+    z: 0.08
