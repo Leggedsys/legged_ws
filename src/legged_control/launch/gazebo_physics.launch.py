@@ -170,7 +170,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "spawn_pitch",
-                default_value="3.14159",
+                default_value="0.0",
                 description="Initial robot pitch in radians",
             ),
             DeclareLaunchArgument(
