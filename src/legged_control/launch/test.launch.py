@@ -207,36 +207,6 @@ def _launch_setup(context, *args, **kwargs):
         ),
     ]
 
-    # ── static transforms (from robot.yaml sensors section) ──────────────────
-
-    sensors_cfg = cfg.get("sensors", {})
-    cam = sensors_cfg.get("camera", {})
-    odin = sensors_cfg.get("odin", {})
-
-    def _tf_args(section: dict, x: str = "0.0", y: str = "0.0", z: str = "0.0",
-                 pitch: str = "0.0", parent: str = "base_link", child: str = ""):
-        return [
-            str(section.get("x", x)), str(section.get("y", y)),
-            str(section.get("z", z)), "0.0",
-            str(section.get("pitch", pitch)), "0.0",
-            parent, child,
-        ]
-
-    nodes.append(Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="camera_base_tf",
-        arguments=_tf_args(cam, child="camera_link"),
-        output="log",
-    ))
-    nodes.append(Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        name="odin_base_tf",
-        arguments=_tf_args(odin, child="odin1_base_link"),
-        output="log",
-    ))
-
     # ── test / visualization layer ────────────────────────────────────────────
 
     robot_desc = _robot_description()
