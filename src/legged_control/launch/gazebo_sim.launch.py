@@ -20,16 +20,9 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from legged_control.launch_common import (
-    make_imu_filter,
-    make_joy,
-    make_obs_assembler,
-    make_robot_state_publisher,
-    make_state_estimator,
-    make_height_scan,
-    make_teleop,
-    make_obs_monitor,
-    make_vel_viz,
-    make_rviz2,
+    make_state_estimator, make_height_scan, make_teleop,
+    make_obs_assembler, make_robot_state_publisher,
+    make_obs_monitor, make_vel_viz, make_rviz2,
 )
 
 try:
@@ -71,14 +64,22 @@ def _launch_setup(context, *args, **kwargs):
             name="gazebo_control_bridge",
             output="screen",
         ),
-        make_imu_filter(),
+        Node(
+            package="imu_filter_madgwick",
+            executable="imu_filter_madgwick_node",
+            name="imu_filter_madgwick",
+            parameters=[{"use_mag": False, "publish_tf": False,
+                         "fixed_frame": "base_link", "world_frame": "enu"}],
+            remappings=[("imu/data_raw", "odin1/imu"),
+                        ("imu/data", "odin1/imu/filtered")],
+            output="log",
+        ),
         # ── processing (shared with real) ────────────────────────────────
         make_state_estimator(),
         make_height_scan(),
         make_teleop(),
         make_obs_assembler(),
-        # ── teleop ───────────────────────────────────────────────────────
-        make_joy(),
+        Node(package="joy", executable="joy_node", name="joy_node", output="log"),
         # ── policy ───────────────────────────────────────────────────────
         Node(
             package="legged_control",

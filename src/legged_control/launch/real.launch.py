@@ -1,29 +1,22 @@
-"""real.launch.py — hardware interface layer.
+"""real.launch.py — all real-hardware data-source nodes.
 
-Starts ALL hardware data-source nodes:
-  - motor_bus_node ×2 (front/rear)  : RS485 motor I/O
-  - joint_aggregator                 : merge + motor→URDF
-  - motor_command_bridge             : URDF cmd → motor frame
-  - urdf_joint_state_bridge          : → /joint_states (TF tree)
-  - host_sdk_sample + imu_filter    : Odin1 IMU
-  - realsense2_camera_node           : depth camera
-  - joy_node                         : gamepad
-  - odin static TF                   : connect odin→URDF TF trees
-
-Published topics:
-  /joint_states_aggregated     (URDF frame)
-  /joint_states                (TF tree)
-  /joint_commands_motor        (motor frame, for motor_bus)
-  odin1/imu                    (raw IMU)
-  odin1/imu/filtered           (filtered IMU)
-  /camera/depth/image_rect_raw
-  /camera/depth/camera_info
-  /joy
+Starts:
+  motor_bus_node ×2   kp/kd from config (or overridden)
+  joint_aggregator     merge + motor→URDF
+  motor_command_bridge URDF cmd → motor frame
+  urdf_joint_state_bridge → /joint_states (TF tree)
+  host_sdk_sample      Odin1 IMU
+  imu_filter_madgwick  IMU filter
+  realsense2_camera    depth camera (with topic remap)
+  joy_node             gamepad
+  static TF            odin1_base_link → base_link
 
 Launch args:
   serial_port_front  [/dev/ttyUSB0]
   serial_port_rear   [/dev/ttyUSB1]
   legs               [all]
+  kp_override        [-1]   negative = use robot.yaml control.kp
+  kd_override        [-1]   negative = use robot.yaml control.kd
 """
 
 import os
@@ -34,17 +27,6 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
-from legged_control.launch_common import (
-    make_imu_filter,
-    make_joy,
-    make_joint_aggregator,
-    make_motor_command_bridge,
-    make_odin1_node,
-    make_odin_tf,
-    make_realsense,
-    make_urdf_joint_state_bridge,
-)
 
 _VALID_LEGS = {"FR", "FL", "RR", "RL"}
 _YAML_SENTINEL = "__from_yaml__"
@@ -80,6 +62,8 @@ def _launch_setup(context, *args, **kwargs):
     sp_front = LaunchConfiguration("serial_port_front").perform(context)
     sp_rear  = LaunchConfiguration("serial_port_rear").perform(context)
     legs_arg = LaunchConfiguration("legs").perform(context)
+    kp_override = float(LaunchConfiguration("kp_override").perform(context))
+    kd_override = float(LaunchConfiguration("kd_override").perform(context))
 
     if sp_front == _YAML_SENTINEL:
         sp_front = control["serial_port_front"]
@@ -87,8 +71,8 @@ def _launch_setup(context, *args, **kwargs):
         sp_rear = control["serial_port_rear"]
 
     motor_hz = float(control["motor_hz"])
-    kp = float(control["kp"])
-    kd = float(control["kd"])
+    kp = kp_override if kp_override >= 0 else float(control["kp"])
+    kd = kd_override if kd_override >= 0 else float(control["kd"])
 
     active_legs = _parse_legs(legs_arg)
     joints = [j for j in cfg["joints"] if j["name"].split("_")[0] in active_legs]
@@ -101,48 +85,57 @@ def _launch_setup(context, *args, **kwargs):
 
     nodes = []
 
-    # motor_bus_node ×2
     for group, (node_name, port) in groups.items():
         group_joints = [j for j in joints if _leg_group(j["name"]) == group]
         if not group_joints:
             continue
         nodes.append(Node(
-            package="legged_control",
-            executable="motor_bus_node",
-            name=node_name,
-            parameters=[{
-                "serial_port":  port,
-                "joint_names":  [j["name"] for j in group_joints],
-                "kp":           kp,
-                "kd":           kd,
-                "loop_hz":      motor_hz,
-            }],
+            package="legged_control", executable="motor_bus_node", name=node_name,
+            parameters=[{"serial_port": port,
+                         "joint_names": [j["name"] for j in group_joints],
+                         "kp": kp, "kd": kd, "loop_hz": motor_hz}],
             remappings=[("/joint_commands", "/joint_commands_motor")],
             output="log",
         ))
 
-    # real-layer convertors
-    nodes.append(make_joint_aggregator())
-    nodes.append(make_motor_command_bridge())
-    nodes.append(make_urdf_joint_state_bridge())
-
-    # external sensors
-    nodes.append(make_odin1_node())
-    nodes.append(make_imu_filter())
-    nodes.append(make_realsense())
-    nodes.append(make_joy())
-    nodes.append(make_odin_tf())
+    nodes += [
+        Node(package="legged_control", executable="joint_aggregator",
+             name="joint_aggregator", output="screen"),
+        Node(package="legged_control", executable="motor_command_bridge",
+             name="motor_command_bridge", output="log"),
+        Node(package="legged_control", executable="urdf_joint_state_bridge",
+             name="urdf_joint_state_bridge", output="log"),
+        Node(package="odin_ros_driver", executable="host_sdk_sample",
+             name="odin1_node", output="log"),
+        Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
+             name="imu_filter_madgwick",
+             parameters=[{"use_mag": False, "publish_tf": False,
+                          "fixed_frame": "base_link", "world_frame": "enu"}],
+             remappings=[("imu/data_raw", "odin1/imu"),
+                         ("imu/data", "odin1/imu/filtered")],
+             output="log"),
+        Node(package="realsense2_camera", executable="realsense2_camera_node",
+             name="camera",
+             remappings=[("/camera/camera/depth/camera_info", "/camera/depth/camera_info"),
+                         ("/camera/camera/depth/image_rect_raw", "/camera/depth/image_rect_raw")],
+             output="log"),
+        Node(package="joy", executable="joy_node", name="joy_node", output="log"),
+        Node(package="tf2_ros", executable="static_transform_publisher",
+             name="odin_base_tf",
+             arguments=["-0.10", "0.0", "-0.08", "0.0", "0.0", "0.0",
+                        "odin1_base_link", "base_link"],
+             output="log"),
+    ]
 
     return nodes
 
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument("serial_port_front", default_value=_YAML_SENTINEL,
-                              description="Serial port for FR/FL motors"),
-        DeclareLaunchArgument("serial_port_rear", default_value=_YAML_SENTINEL,
-                              description="Serial port for RR/RL motors"),
-        DeclareLaunchArgument("legs", default_value="all",
-                              description="Legs: all | FR | FL | RR | RL | comma-separated"),
+        DeclareLaunchArgument("serial_port_front", default_value=_YAML_SENTINEL),
+        DeclareLaunchArgument("serial_port_rear", default_value=_YAML_SENTINEL),
+        DeclareLaunchArgument("legs", default_value="all"),
+        DeclareLaunchArgument("kp_override", default_value="-1"),
+        DeclareLaunchArgument("kd_override", default_value="-1"),
         OpaqueFunction(function=_launch_setup),
     ])
