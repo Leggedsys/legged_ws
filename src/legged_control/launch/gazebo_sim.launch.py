@@ -95,7 +95,7 @@ def _launch_setup(context, *args, **kwargs):
         make_rviz2(),
         # ── initial pose: zero_offset (real motor-zero → URDF) ────────────
         # Wait for Gazebo + controllers, then set dog to zero_offset (趴姿)
-        TimerAction(period=4.0, actions=[
+        TimerAction(period=8.0, actions=[
             ExecuteProcess(
                 cmd=[
                     "ros2", "topic", "pub", "--once",
