@@ -399,10 +399,6 @@ class PolicyNode(Node):
         now = time.monotonic()
 
         if self._phase == _PHASE_PASSIVE:
-            # capture initial resting position (used as liedown target)
-            pos = self._current_pos()
-            if pos is not None and self._initial_pos is None:
-                self._initial_pos = list(pos)
             if self._stand_requested:
                 self._broadcast_gains(
                     float(self.get_parameter("kp").value),
@@ -410,7 +406,10 @@ class PolicyNode(Node):
                 )
                 self._phase = _PHASE_STANDUP
                 self._phase_start = now
-                self._standup_start = list(self._current_pos() or self._q_default_urdf.tolist())
+                snapshot = list(self._current_pos() or self._q_default_urdf.tolist())
+                self._standup_start = snapshot
+                if self._initial_pos is None:
+                    self._initial_pos = snapshot
                 self._last_published = None
                 self._last_action = np.zeros(12, dtype=np.float32)
                 self._stand_requested = False
