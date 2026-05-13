@@ -57,7 +57,6 @@ def _launch_setup(context, *args, **kwargs):
     share = get_package_share_directory("legged_control")
     model_path = LaunchConfiguration("model_path").perform(context)
     physics_launch = os.path.join(share, "launch", "gazebo_physics.launch.py")
-    init_pose_json = _build_init_pose_cmd()
 
     return [
         IncludeLaunchDescription(
@@ -90,24 +89,13 @@ def _launch_setup(context, *args, **kwargs):
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
-        # Set initial趴姿 after controllers load and Gazebo unpauses
-        TimerAction(period=5.0, actions=[
-            ExecuteProcess(
-                cmd=["bash", "-c",
-                     "source /opt/ros/humble/setup.bash && "
-                     "ros2 topic pub --once /gait_position_controller/commands "
-                     "std_msgs/msg/Float64MultiArray "
-                     + "'" + init_pose_json + "'"],
-                output="screen",
-            )
-        ]),
     ]
 
 
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("urdf_path", default_value=_default_urdf_path()),
-        DeclareLaunchArgument("spawn_z", default_value="0.28"),
+        DeclareLaunchArgument("spawn_z", default_value="0.36"),
         DeclareLaunchArgument("model_path", default_value=""),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("gui", default_value="true"),
