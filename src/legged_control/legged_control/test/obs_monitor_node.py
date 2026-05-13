@@ -55,6 +55,30 @@ class PassiveMonitorNode(Node):
         self._height_scan = np.zeros(325)
         self._cmd_vel = (0.0, 0.0, 0.0)
 
+        # Load hardware limits (motor frame) and convert to URDF frame
+        self._q_urdf_min = np.full(12, -float("inf"))
+        self._q_urdf_max = np.full(12, float("inf"))
+        try:
+            with open(os.path.join(share, "config", "robot.yaml")) as f:
+                rcfg = yaml.safe_load(f)
+            for j in rcfg.get("joints", []):
+                name = j["name"]
+                if name in _YAML_JOINT_NAMES:
+                    idx = _YAML_JOINT_NAMES.index(name)
+                    direction = float(j.get("direction", 1))
+                    zero_offset = float(j.get("zero_offset", 0.0))
+                    qm_min = float(j.get("q_min", -999))
+                    qm_max = float(j.get("q_max", 999))
+                    # Convert motor-frame limits to URDF frame
+                    self._q_urdf_min[idx] = direction * qm_min + zero_offset
+                    self._q_urdf_max[idx] = direction * qm_max + zero_offset
+                    # Ensure min < max after direction flip
+                    if self._q_urdf_min[idx] > self._q_urdf_max[idx]:
+                        self._q_urdf_min[idx], self._q_urdf_max[idx] = (
+                            self._q_urdf_max[idx], self._q_urdf_min[idx])
+        except Exception:
+            pass
+
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
         self.create_subscription(Float32MultiArray, "/height_scan", self._on_scan, 10)
@@ -98,7 +122,20 @@ class PassiveMonitorNode(Node):
             "│ JOINTS       pos_rel(rad)   vel(rad/s)                   │",
         ]
         for i, name in enumerate(_YAML_JOINT_NAMES):
-            lines.append(f"│  {name:<12}  {pos_rel[i]:+7.3f}       {self._joint_vel[i]:+7.3f}            │")
+            flag = " "
+            pos = self._joint_pos[i]
+            lo = self._q_urdf_min[i]
+            hi = self._q_urdf_max[i]
+            if not np.isnan(pos) and hi > lo:
+                rng = hi - lo
+                margin = 0.05 * rng
+                if pos <= lo + margin:
+                    flag = "*"  # near low limit
+                elif pos >= hi - margin:
+                    flag = "!"  # near high limit
+            lines.append(
+                f"│{flag} {name:<12}  {pos_rel[i]:+7.3f}       {self._joint_vel[i]:+7.3f}            │"
+            )
         lines += [
             "│ IMU                                                      │",
             f"│  lin_vel    vx={lv[0]:+6.3f}  vy={lv[1]:+6.3f}  vz={lv[2]:+6.3f}     │",
