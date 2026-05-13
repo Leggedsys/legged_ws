@@ -460,7 +460,7 @@ class PolicyNode(Node):
             targets, done = self._liedown_targets(elapsed)
             self._publish(targets)
             lie_down_dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
-            near_zero = self._is_near([0.0] * 12, _LIEDOWN_TOL) and self._is_settled()
+            near_zero = self._is_near(self._initial_pos or [0.0] * 12, _LIEDOWN_TOL) and self._is_settled()
             timed_out = done and elapsed > lie_down_dur + _LIEDOWN_TIMEOUT
             if (done and near_zero) or timed_out:
                 self._phase = _PHASE_PASSIVE
