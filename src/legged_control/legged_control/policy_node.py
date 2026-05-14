@@ -116,6 +116,33 @@ from std_msgs.msg import Bool, Float32MultiArray
 
 from legged_control.kinematics import _smoothstep
 
+# ── obs validation (training 2σ ranges) ────────────────────────────────────────
+
+_OBS_CHECKS = {
+    "base_lin_vel":  [("vx", 0, -0.70, 1.47), ("vy", 1, -0.34, 0.38), ("vz", 2, -0.36, 0.47)],
+    "base_ang_vel":  [("wx", 3, -2.25, 2.16), ("wy", 4, -1.61, 1.67), ("wz", 5, -1.27, 1.35)],
+    "proj_grav":     [("gx", 6, -0.04, 0.18), ("gy", 7, -0.17, 0.08), ("gz", 8, -1.06, -0.93)],
+    "vel_cmd":       [("vx", 9, -0.68, 1.59), ("vy", 10, -0.33, 0.33), ("wz", 11, -1.10, 1.09)],
+    "joint_pos":     [("pos", 12 + i, -0.30, 0.30) for i in range(12)],
+    "joint_vel":     [("vel", 24 + i, -6.0, 6.0) for i in range(12)],
+    "last_action":   [("act", 36 + i, -3.0, 3.0) for i in range(12)],
+    "height_mean":   [("hs", 0, 0.19, 0.43)],  # idx unused, check np.nanmean(height_scan)
+}
+
+
+def _validate_obs(obs: np.ndarray, height_scan: np.ndarray) -> list[str]:
+    bad = []
+    for group_name, checks in _OBS_CHECKS.items():
+        for label, idx, lo, hi in checks:
+            if group_name == "height_mean":
+                v = float(np.nanmean(height_scan))
+            else:
+                v = float(obs[idx])
+            if not (lo <= v <= hi):
+                bad.append(f"{label}={v:+.3f}[{lo:+.1f},{hi:+.1f}]")
+    return bad
+
+
 _PHASE_PASSIVE = "PASSIVE"
 _PHASE_STANDUP = "STANDUP"
 _PHASE_WAIT    = "WAIT"
@@ -375,6 +402,13 @@ class PolicyNode(Node):
             self._last_action,
             self._height_scan,
         )
+        bad = _validate_obs(obs, self._height_scan)
+        if bad:
+            self.get_logger().warn(
+                f"obs anomaly: {' | '.join(bad[:6])}"
+                + (f" ...+{len(bad)-6}" if len(bad) > 6 else ""),
+                throttle_duration_sec=3.0,
+            )
         try:
             import torch
             with torch.inference_mode():
@@ -449,6 +483,23 @@ class PolicyNode(Node):
         if self._phase == _PHASE_WAIT:
             self._publish(self._q_default_urdf.tolist())
             if self._joint_state_seen and any(abs(v) > 1e-4 for v in self._cmd_vel):
+                pos = self._current_pos()
+                vel = self._current_vel()
+                if pos is not None and vel is not None:
+                    obs = _assemble_obs(self._state_estimate, self._cmd_vel,
+                                       np.array(pos, dtype=np.float32),
+                                       np.array(vel, dtype=np.float32),
+                                       self._q_default_urdf,
+                                       self._last_action,
+                                       self._height_scan)
+                    bad = _validate_obs(obs, self._height_scan)
+                    if bad:
+                        self.get_logger().error(
+                            f"🚨 obs out of range: {', '.join(bad[:8])}"
+                            + (f" ...+{len(bad)-8} more" if len(bad) > 8 else ""),
+                            throttle_duration_sec=2.0,
+                        )
+                        return  # stay in WAIT, don't enter POLICY
                 self._phase = _PHASE_POLICY
                 self._phase_start = now
                 self.get_logger().info("[policy] cmd_vel received -> POLICY")
