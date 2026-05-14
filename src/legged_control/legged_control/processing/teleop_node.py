@@ -101,6 +101,7 @@ try:
             self._posture_standing = False
             self._lt_released_raw: float | None = None
             self._rt_released_raw: float | None = None
+            self._estop_lying_down = False
 
             self._pub = self.create_publisher(Twist, "/cmd_vel", 10)
             self._posture_command_pub = self.create_publisher(Bool, "/posture_command", 10)
@@ -138,6 +139,7 @@ try:
             )
 
             if not estop_active:
+                self._estop_lying_down = False
                 axes = msg.axes
                 dz = self._deadzone
 
@@ -174,6 +176,13 @@ try:
                     False,
                 )
                 twist.linear.z = rt - lt
+
+            else:
+                # E-stop active — publish zero twist and trigger lie-down once
+                if not self._estop_lying_down:
+                    self._estop_lying_down = True
+                    self._posture_command_pub.publish(Bool(data=False))
+                    self.get_logger().warn("E-STOP: posture_command=false → lie-down")
 
             self._pub.publish(twist)
 

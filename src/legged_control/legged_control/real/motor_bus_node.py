@@ -276,6 +276,19 @@ class MotorBusNode(Node):
             if not data.correct or int(data.motor_id) != self._motor_ids[name]:
                 continue
 
+            # Motor temp / error monitoring
+            t = int(data.temp)
+            me = int(data.merror)
+            if t > 80:
+                self.get_logger().error(f"MOTOR OVERHEAT {name}: {t}°C", throttle_duration_sec=2.0)
+            elif t > 65:
+                self.get_logger().warn(f"motor warm {name}: {t}°C", throttle_duration_sec=5.0)
+            if me != 0:
+                labels = {1: "overheat", 2: "overcurrent", 3: "overvoltage", 4: "encoder"}
+                self.get_logger().error(
+                    f"MOTOR FAULT {name}: {labels.get(me, f'unknown({me})')}", throttle_duration_sec=2.0
+                )
+
             pos = float(data.q) / gr - offset
             # Reject single-frame spikes: clamp to ±1.0 rad change per tick
             if abs(pos - self._last_pos[name]) < 1.0:
