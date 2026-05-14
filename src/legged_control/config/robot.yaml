@@ -120,9 +120,9 @@ control:
   kd: 0.26
 
 teleop:
-  max_vx:  0.50  # m/s  forward/backward
+  max_vx:  1.00  # m/s  forward/backward
   max_vy:  0.05  # m/s  lateral
-  max_yaw: 0.5   # rad/s yaw rate
+  max_yaw: 1.0   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
   btn_posture_toggle: 0  # A button: toggle stand up / lie down
   axis_vx:  1
