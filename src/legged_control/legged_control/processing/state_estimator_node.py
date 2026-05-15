@@ -1,8 +1,9 @@
 """state_estimator_node
 
 Subscribes:
-  odin1/imu/filtered  (sensor_msgs/Imu)   — orientation quaternion + angular_velocity
-  /joint_states_aggregated (sensor_msgs/JointState) — motor-frame positions + velocities
+  odin1/imu/filtered        (sensor_msgs/Imu)         — orientation + angular_velocity
+  /odin1/odometry           (nav_msgs/Odometry)       — VIO linear velocity
+  /joint_states_aggregated  (sensor_msgs/JointState)   — URDF-frame joint states
 
 Publishes:
   /state_estimate (std_msgs/Float32MultiArray, 9 floats)
@@ -10,16 +11,18 @@ Publishes:
     data[3:6] = base_ang_vel in body frame (rad/s)
     data[6:9] = projected_gravity in body frame (unit vector)
 
-Velocity estimation: complementary filter blending kinematic velocity
-(assuming all four feet in contact) with IMU-integrated velocity.
-Alpha = 0.8 (high trust in kinematics; adjust if drift is observed).
+Velocity: prefers VIO odometry (stable, no foot-slip assumption).
+Falls back to leg kinematics if odometry is unavailable.
 """
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float32MultiArray
 
@@ -30,6 +33,7 @@ from legged_control.kinematics import (
 )
 
 _LEG_ORDER = ("FL", "FR", "RL", "RR")
+_ODOM_TIMEOUT = 0.15  # seconds before VIO considered stale
 
 
 def _leg_q_urdf(
@@ -54,9 +58,6 @@ class StateEstimatorNode(Node):
     def __init__(self) -> None:
         super().__init__("state_estimator_node")
 
-        self.declare_parameter("config_path", "")
-        self.declare_parameter("velocity_alpha", 0.8)
-
         self._quat = (0.0, 0.0, 0.0, 1.0)  # (x, y, z, w)
         self._ang_vel = (0.0, 0.0, 0.0)
         self._lin_vel = np.zeros(3)
@@ -64,12 +65,15 @@ class StateEstimatorNode(Node):
         self._joint_vel: dict[str, float] = {}
         self._imu_ready = False
 
+        # VIO odometry
+        self._odom_lin_vel = np.zeros(3)       # world frame m/s
+        self._odom_stamp: float | None = None  # monotonic timestamp
+
         self._pub = self.create_publisher(Float32MultiArray, "/state_estimate", 10)
         self.create_subscription(Imu, "odin1/imu/filtered", self._on_imu, 10)
-        self.create_subscription(
-            JointState, "/joint_states_aggregated", self._on_joints, 10
-        )
-        self.get_logger().info("state_estimator_node ready")
+        self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
+        self.create_subscription(Odometry, "/odin1/odometry", self._on_odom, 10)
+        self.get_logger().info("state_estimator_node ready — VIO + kinematics")
 
     def _on_imu(self, msg: Imu) -> None:
         o = msg.orientation
@@ -84,9 +88,22 @@ class StateEstimatorNode(Node):
             self._joint_pos[name] = float(pos)
             self._joint_vel[name] = float(vel)
 
+    def _on_odom(self, msg: Odometry) -> None:
+        t = msg.twist.twist
+        self._odom_lin_vel = np.array([t.linear.x, t.linear.y, t.linear.z])
+        self._odom_stamp = time.monotonic()
+
     def _estimate_velocity(self) -> np.ndarray:
-        alpha = float(self.get_parameter("velocity_alpha").value)
         R_yaw = yaw_rotation_matrix(*self._quat)
+        now = time.monotonic()
+
+        # Prefer VIO odometry if recent
+        if self._odom_stamp is not None and (now - self._odom_stamp) < _ODOM_TIMEOUT:
+            v_odom_yaw = R_yaw @ self._odom_lin_vel
+            self._lin_vel = v_odom_yaw
+            return self._lin_vel
+
+        # Fallback: leg kinematics (all 4 feet in contact assumption)
         kin_velocities = []
         for leg in _LEG_ORDER:
             q = _leg_q_urdf(leg, self._joint_pos)
@@ -95,10 +112,9 @@ class StateEstimatorNode(Node):
                 continue
             v_body = leg_kinematic_velocity(leg, q, dq)
             kin_velocities.append(R_yaw @ v_body)
-        if not kin_velocities:
-            return self._lin_vel
-        v_kin = np.mean(kin_velocities, axis=0)
-        self._lin_vel = alpha * v_kin + (1.0 - alpha) * self._lin_vel
+        if kin_velocities:
+            v_kin = np.mean(kin_velocities, axis=0)
+            self._lin_vel = 0.8 * v_kin + 0.2 * self._lin_vel
         return self._lin_vel
 
     def _publish(self) -> None:
