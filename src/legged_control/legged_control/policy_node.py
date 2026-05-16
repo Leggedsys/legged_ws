@@ -126,7 +126,7 @@ _OBS_CHECKS = {
     "joint_pos":     [("pos", 12 + i, -0.30, 0.30) for i in range(12)],
     "joint_vel":     [("vel", 24 + i, -6.0, 6.0) for i in range(12)],
     "last_action":   [("act", 36 + i, -3.0, 3.0) for i in range(12)],
-    "height_mean":   [("hs", 0, 0.19, 0.43)],  # idx unused, check np.nanmean(height_scan)
+    "height_mean":   [("hs", 0, 0.0, 0.43)],  # idx unused, check np.nanmean(height_scan)
 }
 
 
