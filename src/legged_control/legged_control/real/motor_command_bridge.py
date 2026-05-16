@@ -67,6 +67,7 @@ class MotorCommandBridge(Node):
         out.header.stamp = self.get_clock().now().to_msg()
         out.name = list(self._names)
         out.position = []
+        calfs = {}  # debug
         for name in self._names:
             cfg = self._joint_cfg[name]
             direction = float(cfg["direction"])
@@ -83,6 +84,17 @@ class MotorCommandBridge(Node):
                 q_motor = prev + max_step * (1.0 if delta > 0 else -1.0)
             self._last_cmd[name] = q_motor
             out.position.append(q_motor)
+            if name.endswith("_calf"):
+                calfs[name] = (q_urdf, q_motor, int(cfg.get("motor_id", -1)))
+        # Debug: log calf conversions every 2s
+        if calfs:
+            self.get_logger().info(
+                f"calves: " + " | ".join(
+                    f"{n}: urdf={u:+.3f}→motor={m:+.3f} id={mid}"
+                    for n, (u, m, mid) in calfs.items()
+                ),
+                throttle_duration_sec=2.0,
+            )
         self._pub.publish(out)
 
 
