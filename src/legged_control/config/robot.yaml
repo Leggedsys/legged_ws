@@ -27,17 +27,17 @@ joints:
   - name: FR_thigh
     motor_id: 1
     gear_ratio: 6.33
-    q_min: -2.830
-    q_max:  0.320
-    direction:    1
+    q_min: -0.320
+    q_max:  2.830
+    direction:    -1
     zero_offset:  1.254
 
   - name: FR_calf
     motor_id: 2
     gear_ratio: 12.66
-    q_min: -2.800
-    q_max:  0.010
-    direction:    -1
+    q_min: -0.010
+    q_max:  2.800
+    direction:    1
     zero_offset:  -2.791
 
   - name: FL_hip
@@ -51,17 +51,17 @@ joints:
   - name: FL_thigh
     motor_id: 4
     gear_ratio: 6.33
-    q_min: -0.320
-    q_max:  2.830
-    direction:    -1
+    q_min: -2.830
+    q_max:  0.320
+    direction:    1
     zero_offset:  1.254
 
   - name: FL_calf
     motor_id: 5
     gear_ratio: 12.66
-    q_min: -0.010
-    q_max:  2.800
-    direction:    1
+    q_min: -2.800
+    q_max:  0.010
+    direction:    -1
     zero_offset:  -2.791
 
   - name: RR_hip
