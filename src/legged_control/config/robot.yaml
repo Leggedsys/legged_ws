@@ -140,3 +140,6 @@ teleop:
 standup:
   ramp_duration: 6.0       # seconds for 0 → q_default smooth-step ramp
   lie_down_duration: 2.0   # seconds for current → 0 smooth-step ramp
+
+height_scan:
+  default_height: 0.30     # m — fallback when grid cell has no depth data

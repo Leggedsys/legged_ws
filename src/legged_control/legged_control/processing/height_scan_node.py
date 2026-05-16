@@ -35,6 +35,9 @@ _N_X, _N_Y = 25, 13
 _RES = 0.05
 _N_CELLS = _N_X * _N_Y  # 325
 
+# Default fallback for empty grid cells — loaded from robot.yaml at init
+_NOMINAL_HEIGHT = 0.30
+
 
 def _build_height_scan(points_base_link: np.ndarray) -> np.ndarray:
     grid = np.full(_N_CELLS, np.nan, dtype=np.float32)
@@ -60,7 +63,7 @@ def _build_height_scan(points_base_link: np.ndarray) -> np.ndarray:
 
     result = np.where(
         np.isnan(grid),
-        0.0,
+        _NOMINAL_HEIGHT,  # no data → assume flat ground at stance height
         np.where(grid > 0.0, -1.0, np.clip(-grid, -1.0, 1.0)),
     )
 
@@ -79,7 +82,7 @@ def _deproject_pixel(
 class HeightScanNode(Node):
     def __init__(self) -> None:
         super().__init__("height_scan_node")
-
+        self._load_nominal()
         self._fx = self._fy = self._cx = self._cy = None
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -89,6 +92,17 @@ class HeightScanNode(Node):
         self.create_subscription(CameraInfo, "/camera/depth/camera_info", self._on_info, 1)
         self.create_subscription(Image, "/camera/depth/image_rect_raw", self._on_depth, 10)
         self.get_logger().info("height_scan_node ready — waiting for camera_info")
+
+    def _load_nominal(self) -> None:
+        global _NOMINAL_HEIGHT
+        try:
+            share = get_package_share_directory("legged_control")
+            with open(os.path.join(share, "config", "robot.yaml")) as f:
+                cfg = yaml.safe_load(f)
+            hs_cfg = cfg.get("height_scan", {})
+            _NOMINAL_HEIGHT = float(hs_cfg.get("default_height", 0.30))
+        except Exception:
+            pass
 
     def _on_info(self, msg: CameraInfo) -> None:
         if self._fx is None:
