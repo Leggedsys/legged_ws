@@ -70,7 +70,7 @@ def _launch_setup(context, *args, **kwargs):
             PythonLaunchDescriptionSource(
                 os.path.join(gazebo_ros_share, "launch", "gazebo.launch.py")
             ),
-            launch_arguments={"pause": start_paused, "gui": gui}.items(),
+            launch_arguments={"pause": start_paused, "gui": gui, "force_system": "false"}.items(),
         ),
         Node(
             package="robot_state_publisher",
