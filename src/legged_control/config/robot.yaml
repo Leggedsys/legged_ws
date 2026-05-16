@@ -19,96 +19,96 @@ joints:
   - name: FR_hip
     motor_id: 0
     gear_ratio: 6.33
-    q_min: -0.484
-    q_max:  0.521
+    q_min: -0.500
+    q_max:  0.500
     direction:    -1
     zero_offset:  0.0
 
   - name: FR_thigh
     motor_id: 1
     gear_ratio: 6.33
-    q_min: -3.133
-    q_max:  0.663
+    q_min: -2.830
+    q_max:  0.320
     direction:    1
     zero_offset:  1.254
 
   - name: FR_calf
     motor_id: 2
     gear_ratio: 12.66
-    q_min: -2.5
-    q_max: 0.000
+    q_min: -2.800
+    q_max:  0.010
     direction:    -1
     zero_offset:  -2.791
 
   - name: FL_hip
     motor_id: 3
     gear_ratio: 6.33
-    q_min: -0.533
-    q_max:  0.467
+    q_min: -0.500
+    q_max:  0.500
     direction:    1
     zero_offset:  0.0
 
   - name: FL_thigh
     motor_id: 4
     gear_ratio: 6.33
-    q_min: -3.133
-    q_max: 0.663
+    q_min: -0.320
+    q_max:  2.830
     direction:    -1
     zero_offset:  1.254
 
   - name: FL_calf
     motor_id: 5
     gear_ratio: 12.66
-    q_min: -2.5
-    q_max: 0.000
+    q_min: -0.010
+    q_max:  2.800
     direction:    1
     zero_offset:  -2.791
 
   - name: RR_hip
     motor_id: 6
     gear_ratio: 6.33
-    q_min: -0.523
-    q_max:  0.489
+    q_min: -0.500
+    q_max:  0.500
     direction:    1
     zero_offset:  0.0
 
   - name: RR_thigh
     motor_id: 7
     gear_ratio: 6.33
-    q_min: -3.133
-    q_max:  0.663
+    q_min: -0.320
+    q_max:  2.830
     direction:    -1
     zero_offset:  1.254
 
   - name: RR_calf
     motor_id: 8
     gear_ratio: 12.66
-    q_min: -2.5
-    q_max: 0.000
+    q_min: -0.010
+    q_max:  2.800
     direction:    1
     zero_offset:  -2.791
 
   - name: RL_hip
     motor_id: 9
     gear_ratio: 6.33
-    q_min: -0.479
-    q_max:  0.524
+    q_min: -0.500
+    q_max:  0.500
     direction:    -1
     zero_offset:  0.0
 
   - name: RL_thigh
     motor_id: 10
     gear_ratio: 6.33
-    q_min: -3.143
-    q_max:  0.651
+    q_min: -2.830
+    q_max:  0.320
     direction:    1
     zero_offset:  1.254
 
   - name: RL_calf
     motor_id: 11
     gear_ratio: 12.66
-    q_min: -2.5
-    q_max: 0.000
+    q_min: -2.800
+    q_max:  0.010
     direction:    -1
     zero_offset:  -2.791
 
