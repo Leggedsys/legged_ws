@@ -122,7 +122,7 @@ def _launch_setup(context, *args, **kwargs):
         Node(package="joy", executable="joy_node", name="joy_node", output="log"),
         Node(package="tf2_ros", executable="static_transform_publisher",
              name="odin_base_tf",
-             arguments=["-0.10", "0.0", "-0.08", "0.0", "0.0", "0.0",
+             arguments=["-0.08558", "0.0349", "-0.142", "0.0", "0.0", "0.0",
                         "odin1_base_link", "base_link"],
              output="log"),
     ]
