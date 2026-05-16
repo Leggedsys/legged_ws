@@ -23,7 +23,8 @@ from launch_ros.actions import Node
 
 from legged_control.launch_common import (
     make_state_estimator, make_height_scan, make_teleop,
-    make_obs_assembler, make_robot_state_publisher, make_obs_monitor,
+    make_obs_assembler, make_robot_state_publisher,
+    make_obs_monitor, make_vel_viz, make_rviz2,
 )
 
 _YAML_SENTINEL = "__from_yaml__"
@@ -66,22 +67,18 @@ def _launch_setup(context, *args, **kwargs):
     rsp = make_robot_state_publisher()
     if rsp is not None:
         nodes.append(rsp)
+    nodes += [make_obs_monitor(), make_vel_viz()]
 
     if mode == "passive":
-        rviz_cfg = os.path.join(share, "config", "passive_mode.rviz")
+        nodes.append(make_rviz2())
+    elif mode == "policy":
         nodes += [
-            Node(package="rviz2", executable="rviz2", name="rviz2",
-                 arguments=["-d", rviz_cfg], output="log"),
-            make_obs_monitor(),
+            Node(package="legged_control", executable="policy_node",
+                 name="policy_node",
+                 parameters=[{"model_path": LaunchConfiguration("model_path")}],
+                 output="screen"),
+            make_rviz2(),
         ]
-
-    if mode == "policy":
-        nodes.append(Node(
-            package="legged_control", executable="policy_node",
-            name="policy_node",
-            parameters=[{"model_path": LaunchConfiguration("model_path")}],
-            output="screen",
-        ))
 
     return nodes
 

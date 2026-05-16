@@ -53,7 +53,7 @@ joints:
     gear_ratio: 6.33
     q_min: -3.133
     q_max: 0.663
-    direction:    1
+    direction:    -1
     zero_offset:  1.254
 
   - name: FL_calf
@@ -61,7 +61,7 @@ joints:
     gear_ratio: 12.66
     q_min: -2.5
     q_max: 0.000
-    direction:    -1
+    direction:    1
     zero_offset:  -2.791
 
   - name: RR_hip
@@ -77,7 +77,7 @@ joints:
     gear_ratio: 6.33
     q_min: -3.133
     q_max:  0.663
-    direction:    1
+    direction:    -1
     zero_offset:  1.254
 
   - name: RR_calf
@@ -85,7 +85,7 @@ joints:
     gear_ratio: 12.66
     q_min: -2.5
     q_max: 0.000
-    direction:    -1
+    direction:    1
     zero_offset:  -2.791
 
   - name: RL_hip
