@@ -180,8 +180,8 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "start_paused",
-                default_value="true",
-                description="Start Gazebo paused before releasing physics",
+                default_value="false",
+                description="Start Gazebo paused",
             ),
             DeclareLaunchArgument(
                 "gui",
