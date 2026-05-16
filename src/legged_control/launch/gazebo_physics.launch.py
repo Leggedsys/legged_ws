@@ -126,9 +126,21 @@ def _launch_setup(context, *args, **kwargs):
     ]
 
     if start_paused.lower() == "true":
-        # Manual unpause via Gazebo GUI play button or:
-        #   ros2 service call /unpause_physics std_srvs/srv/Empty '{}'
-        pass
+        actions.append(
+            TimerAction(
+                period=float(unpause_delay),
+                actions=[
+                    ExecuteProcess(
+                        cmd=[
+                            "zsh",
+                            "-lc",
+                            "source /opt/ros/humble/setup.zsh && ros2 service call /unpause_physics std_srvs/srv/Empty '{}'",
+                        ],
+                        output="log",
+                    )
+                ],
+            )
+        )
 
     return actions
 
