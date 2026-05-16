@@ -77,7 +77,7 @@ class StateEstimatorNode(Node):
 
     def _on_imu(self, msg: Imu) -> None:
         o = msg.orientation
-        self._quat = (o.x, o.y, o.z, o.w)
+        self._quat = (-o.x, -o.y, -o.z, o.w)
         av = msg.angular_velocity
         self._ang_vel = (av.x, av.y, av.z)
         self._imu_ready = True
