@@ -35,7 +35,7 @@ joints:
   - name: FR_calf
     motor_id: 2
     gear_ratio: 12.66
-    q_min: -2.8
+    q_min: -2.5
     q_max: 0.000
     direction:    -1
     zero_offset:  -2.791
@@ -59,7 +59,7 @@ joints:
   - name: FL_calf
     motor_id: 5
     gear_ratio: 12.66
-    q_min: -2.8
+    q_min: -2.5
     q_max: 0.000
     direction:    1
     zero_offset:  -2.791

@@ -58,9 +58,6 @@ class PassiveMonitorNode(Node):
         # Load hardware limits (motor frame) and convert to URDF frame
         self._q_urdf_min = np.full(12, -float("inf"))
         self._q_urdf_max = np.full(12, float("inf"))
-        self._direction = np.ones(12)
-        self._zero_offset = np.zeros(12)
-        self._gear_ratio = np.ones(12)
         try:
             with open(os.path.join(share, "config", "robot.yaml")) as f:
                 rcfg = yaml.safe_load(f)
@@ -70,10 +67,6 @@ class PassiveMonitorNode(Node):
                     idx = _YAML_JOINT_NAMES.index(name)
                     direction = float(j.get("direction", 1))
                     zero_offset = float(j.get("zero_offset", 0.0))
-                    gr = float(j.get("gear_ratio", 1.0))
-                    self._direction[idx] = direction
-                    self._zero_offset[idx] = zero_offset
-                    self._gear_ratio[idx] = gr
                     qm_min = float(j.get("q_min", -999))
                     qm_max = float(j.get("q_max", 999))
                     # Convert motor-frame limits to URDF frame
@@ -125,8 +118,8 @@ class PassiveMonitorNode(Node):
         pos_rel = self._joint_pos - self._q_default
 
         lines = [
-            "┌─── PASSIVE MONITOR ───────────────────────────────────────────┐",
-            "│ JOINTS       pos_rel(rad)  motor_q(rad)   vel(rad/s)        │",
+            "┌─── PASSIVE MONITOR ──────────────────────────────────────┐",
+            "│ JOINTS       pos_rel(rad)   vel(rad/s)                   │",
         ]
         for i, name in enumerate(_YAML_JOINT_NAMES):
             flag = " "
@@ -137,16 +130,11 @@ class PassiveMonitorNode(Node):
                 rng = hi - lo
                 margin = 0.05 * rng
                 if pos <= lo + margin:
-                    flag = "*"
+                    flag = "*"  # near low limit
                 elif pos >= hi - margin:
-                    flag = "!"
-            motor_q = (
-                float("nan") if np.isnan(pos)
-                else self._direction[i] * (pos - self._zero_offset[i])
-            )
+                    flag = "!"  # near high limit
             lines.append(
-                f"│{flag} {name:<12}  {pos_rel[i]:+7.3f}       {motor_q:+7.3f}    "
-                f"  {self._joint_vel[i]:+7.3f}            │"
+                f"│{flag} {name:<12}  {pos_rel[i]:+7.3f}       {self._joint_vel[i]:+7.3f}            │"
             )
         lines += [
             "│ IMU                                                      │",
@@ -158,7 +146,7 @@ class PassiveMonitorNode(Node):
             "│ HEIGHT SCAN                                              │",
             f"│  mean={np.nanmean(self._height_scan):+6.3f}  std={np.nanstd(self._height_scan):5.3f}  "
             f"min={np.nanmin(self._height_scan):+6.3f}  max={np.nanmax(self._height_scan):+6.3f}  │",
-            "└──────────────────────────────────────────────────────────────┘",
+            "└──────────────────────────────────────────────────────────┘",
         ]
         text = "\n".join(lines)
         if self._tty:
