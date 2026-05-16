@@ -506,10 +506,6 @@ class PolicyNode(Node):
             return
 
         if self._phase == _PHASE_POLICY:
-            if all(abs(v) <= 1e-4 for v in self._cmd_vel):
-                self._phase = _PHASE_WAIT
-                self._phase_start = now
-                return
             targets = self._run_inference()
             self._publish(targets)
             return
