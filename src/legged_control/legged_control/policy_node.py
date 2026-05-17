@@ -3,7 +3,7 @@
 Runs a TorchScript policy at 50 Hz with the same PASSIVE->STANDUP->WAIT->POLICY->LIE_DOWN
 state machine as gait_node. The POLICY phase replaces IK trot with neural-network inference.
 
-Observation vector (373 dims):
+Observation vector (373 dims) from /observation:
   [0:3]   base_lin_vel     from /state_estimate[0:3]
   [3:6]   base_ang_vel     from /state_estimate[3:6]
   [6:9]   projected_gravity from /state_estimate[6:9]
@@ -15,7 +15,6 @@ Observation vector (373 dims):
 
 Action: 12-dim (policy order) joint position residuals.
   q_target_urdf = q_default_urdf + sign_flip * action * scale
-  q_target_motor = direction * (q_target_urdf - zero_offset)
 """
 
 from __future__ import annotations
@@ -34,10 +33,6 @@ _POLICY_JOINT_NAMES = [
     "RL_hip", "RR_hip", "RL_thigh", "RR_thigh", "RL_calf", "RR_calf",
 ]
 
-_YAML_TO_POLICY = [
-    _YAML_JOINT_NAMES.index(name) for name in _POLICY_JOINT_NAMES
-]
-
 _POLICY_TO_YAML = [
     _POLICY_JOINT_NAMES.index(name) for name in _YAML_JOINT_NAMES
 ]
@@ -46,10 +41,6 @@ _DEFAULT_HIP_SIGN_FLIP_POLICY_IDX = [
     _POLICY_JOINT_NAMES.index("FR_hip"),
     _POLICY_JOINT_NAMES.index("RL_hip"),
 ]
-
-
-def _reorder_yaml_to_policy(yaml_vec: np.ndarray) -> np.ndarray:
-    return yaml_vec[_YAML_TO_POLICY]
 
 
 def _reorder_policy_to_yaml(policy_vec: np.ndarray) -> np.ndarray:
@@ -73,31 +64,6 @@ def _decode_action(
     return np.clip(q_target_urdf, soft_q_min_urdf, soft_q_max_urdf)
 
 
-def _assemble_obs(
-    state_estimate: np.ndarray,
-    cmd_vel: tuple[float, float, float],
-    joint_pos_urdf_yaml: np.ndarray,
-    joint_vel_urdf_yaml: np.ndarray,
-    q_default_urdf_yaml: np.ndarray,
-    last_action_policy: np.ndarray,
-    height_scan: np.ndarray,
-) -> np.ndarray:
-    joint_pos_rel_policy = _reorder_yaml_to_policy(
-        joint_pos_urdf_yaml - q_default_urdf_yaml
-    )
-    joint_vel_policy = _reorder_yaml_to_policy(joint_vel_urdf_yaml)
-
-    obs = np.concatenate([
-        state_estimate[:9],
-        np.array(cmd_vel, dtype=np.float32),
-        joint_pos_rel_policy,
-        joint_vel_policy,
-        last_action_policy,
-        height_scan,
-    ])
-    return obs.astype(np.float32)
-
-
 # ── ROS node ──────────────────────────────────────────────────────────────────
 
 import os
@@ -105,7 +71,6 @@ import time
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Twist
 import rclpy
 import rclpy.parameter
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue, SetParametersResult
@@ -215,9 +180,6 @@ class PolicyNode(Node):
 
         self._joint_pos: dict[str, float] = {}
         self._joint_vel: dict[str, float] = {}
-        self._state_estimate = np.zeros(9, dtype=np.float32)
-        self._height_scan = np.zeros(325, dtype=np.float32)
-        self._cmd_vel = (0.0, 0.0, 0.0)
         self._joint_state_seen = False
 
         self._gain_clients = [
@@ -226,13 +188,14 @@ class PolicyNode(Node):
         ]
 
         self._pub = self.create_publisher(JointState, "/joint_commands", 10)
+        self._pub_raw = self.create_publisher(Float32MultiArray, "/raw_policy_action", 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
-        self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
-        self.create_subscription(Float32MultiArray, "/height_scan", self._on_scan, 10)
-        self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        self.create_subscription(Float32MultiArray, "/observation", self._on_observation, 10)
         self.create_subscription(Bool, "/posture_command", self._on_posture, 10)
         self.add_on_set_parameters_callback(self._on_gains_changed)
         self.create_timer(self._dt, self._tick)
+
+        self._latest_obs: np.ndarray | None = None
 
         self.get_logger().info(
             f"policy_node ready — {loop_hz:.0f} Hz  "
@@ -294,14 +257,8 @@ class PolicyNode(Node):
             self._joint_pos[name] = float(pos)
             self._joint_vel[name] = float(vel)
 
-    def _on_state(self, msg: Float32MultiArray) -> None:
-        self._state_estimate = np.array(msg.data[:9], dtype=np.float32)
-
-    def _on_scan(self, msg: Float32MultiArray) -> None:
-        self._height_scan = np.array(msg.data[:325], dtype=np.float32)
-
-    def _on_cmd_vel(self, msg: Twist) -> None:
-        self._cmd_vel = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
+    def _on_observation(self, msg: Float32MultiArray) -> None:
+        self._latest_obs = np.array(msg.data[:373], dtype=np.float32)
 
     def _on_posture(self, msg: Bool) -> None:
         if self._phase == _PHASE_FAULT:
@@ -386,23 +343,12 @@ class PolicyNode(Node):
         return targets, elapsed >= dur
 
     def _run_inference(self) -> list[float]:
-        pos = self._current_pos()
-        vel = self._current_vel()
-        if pos is None or vel is None or self._policy is None:
+        if self._latest_obs is None or self._policy is None:
             return self._q_default_urdf.tolist()
 
-        pos_arr = np.array(pos, dtype=np.float32)
-        vel_arr = np.array(vel, dtype=np.float32)
-        obs = _assemble_obs(
-            self._state_estimate,
-            self._cmd_vel,
-            pos_arr,
-            vel_arr,
-            self._q_default_urdf,
-            self._last_action,
-            self._height_scan,
-        )
-        bad = _validate_obs(obs, self._height_scan)
+        obs = self._latest_obs.copy()
+        obs[36:48] = self._last_action
+        bad = _validate_obs(obs, obs[48:373])
         if bad:
             self.get_logger().warn(
                 f"obs anomaly: {' | '.join(bad[:6])}"
@@ -419,6 +365,7 @@ class PolicyNode(Node):
             return self._q_default_urdf.tolist()
 
         self._last_action = action.copy()
+        self._pub_raw.publish(Float32MultiArray(data=action.tolist()))
         self.get_logger().info(
             f"[policy] raw_action: {[f'{x:+.4f}' for x in action]}"
         )
@@ -482,17 +429,12 @@ class PolicyNode(Node):
 
         if self._phase == _PHASE_WAIT:
             self._publish(self._q_default_urdf.tolist())
-            if self._joint_state_seen and any(abs(v) > 1e-4 for v in self._cmd_vel):
-                pos = self._current_pos()
-                vel = self._current_vel()
-                if pos is not None and vel is not None:
-                    obs = _assemble_obs(self._state_estimate, self._cmd_vel,
-                                       np.array(pos, dtype=np.float32),
-                                       np.array(vel, dtype=np.float32),
-                                       self._q_default_urdf,
-                                       self._last_action,
-                                       self._height_scan)
-                    bad = _validate_obs(obs, self._height_scan)
+            if self._latest_obs is not None and self._joint_state_seen:
+                cmd_vel = self._latest_obs[9:12]
+                if any(abs(v) > 1e-4 for v in cmd_vel):
+                    obs = self._latest_obs.copy()
+                    obs[36:48] = self._last_action
+                    bad = _validate_obs(obs, obs[48:373])
                     if bad:
                         self.get_logger().error(
                             f"🚨 obs out of range: {', '.join(bad[:8])}"

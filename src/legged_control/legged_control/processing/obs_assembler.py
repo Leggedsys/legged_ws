@@ -1,10 +1,17 @@
 """obs_assembler
 
-Subscribes to the 4 observation-source topics and assembles the full
+Subscribes to 5 observation-source topics and assembles the full
 373-dim observation vector used by the policy.
 
-This is the canonical obs assembly point — policy_node, test tools,
-and any future consumer can read /observation to get the full vector.
+This is the canonical obs assembly point — policy_node subscribes to
+/observation for inference input.
+
+Topics subscribed:
+  /joint_states_aggregated    JointState         12 URDF-frame joints
+  /state_estimate             Float32MultiArray  9 floats (lin_vel, ang_vel, proj_grav)
+  /height_scan                Float32MultiArray  325 floats
+  /cmd_vel                    Twist              velocity commands
+  /raw_policy_action          Float32MultiArray  12 floats (raw policy output)
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ _POLICY_JOINT_NAMES = [
 _YAML_TO_POLICY = [_YAML_JOINT_NAMES.index(n) for n in _POLICY_JOINT_NAMES]
 
 
-def _reorder_yaml_to_policy(yaml_vec: np.ndarray) -> np.ndarray:
+def reorder_yaml_to_policy(yaml_vec: np.ndarray) -> np.ndarray:
     return yaml_vec[_YAML_TO_POLICY]
 
 
@@ -48,8 +55,8 @@ def _assemble(
     last_action: np.ndarray,
     height_scan: np.ndarray,
 ) -> np.ndarray:
-    joint_pos_rel = _reorder_yaml_to_policy(joint_pos_urdf - q_default_urdf)
-    joint_vel = _reorder_yaml_to_policy(joint_vel_urdf)
+    joint_pos_rel = reorder_yaml_to_policy(joint_pos_urdf - q_default_urdf)
+    joint_vel = reorder_yaml_to_policy(joint_vel_urdf)
     return np.concatenate([
         state_estimate[:9],
         np.array(cmd_vel, dtype=np.float32),
@@ -77,7 +84,7 @@ class ObsAssemblerNode(Node):
         self.create_subscription(Float32MultiArray, "/height_scan", self._on_scan, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
-        self.create_subscription(JointState, "/joint_commands", self._on_commands, 10)
+        self.create_subscription(Float32MultiArray, "/raw_policy_action", self._on_raw_action, 10)
 
         self.create_timer(0.02, self._publish)
         self.get_logger().info("obs_assembler ready — /observation (373 floats)")
@@ -109,11 +116,8 @@ class ObsAssemblerNode(Node):
                 self._joint_pos[idx] = float(pos)
                 self._joint_vel[idx] = float(vel)
 
-    def _on_commands(self, msg: JointState) -> None:
-        for name, pos in zip(msg.name, msg.position):
-            if name in _YAML_JOINT_NAMES:
-                idx = _YAML_JOINT_NAMES.index(name)
-                self._last_action[idx] = float(pos)
+    def _on_raw_action(self, msg: Float32MultiArray) -> None:
+        self._last_action = np.array(msg.data[:12], dtype=np.float32)
 
     def _publish(self) -> None:
         obs = _assemble(
