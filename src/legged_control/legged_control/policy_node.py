@@ -367,7 +367,8 @@ class PolicyNode(Node):
         self._last_action = action.copy()
         self._pub_raw.publish(Float32MultiArray(data=action.tolist()))
         self.get_logger().info(
-            f"[policy] raw_action: {[f'{x:+.4f}' for x in action]}"
+            f"[policy] raw_action: {[f'{x:+.4f}' for x in action]}",
+            throttle_duration_sec=1.0,
         )
         q_urdf = _decode_action(
             action,
@@ -380,7 +381,17 @@ class PolicyNode(Node):
         self.get_logger().info(
             f"[policy] q_target(URDF)={[f'{x:+.4f}' for x in q_urdf]}  "
             f"pos_rel(obs first 4)={[f'{x:+.3f}' for x in obs[12:16]]}  "
-            f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}"
+            f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}",
+            throttle_duration_sec=1.0,
+        )
+        hs = obs[48:373]
+        self.get_logger().info(
+            f"[policy] obs: proj_g=({obs[6]:+.3f},{obs[7]:+.3f},{obs[8]:+.3f})  "
+            f"vel=({obs[0]:+.2f},{obs[1]:+.2f},{obs[2]:+.2f})  "
+            f"ang=({obs[3]:+.2f},{obs[4]:+.2f},{obs[5]:+.2f})  "
+            f"last_a=({obs[36]:+.3f},{obs[37]:+.3f},{obs[38]:+.3f},{obs[39]:+.3f})  "
+            f"hs_mean={np.mean(hs):.3f}  hs_min={np.min(hs):.3f}  hs_max={np.max(hs):.3f}",
+            throttle_duration_sec=0.5,
         )
         return q_urdf.tolist()
 
