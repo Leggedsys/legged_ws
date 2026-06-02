@@ -9,6 +9,7 @@ Launch args:
   serial_port_front   [from robot.yaml]
   serial_port_rear    [from robot.yaml]
   model_path    []                  Path to TorchScript .pt policy file
+#   dry_run       [false]             true = log motor cmds to file, motors passive
 """
 
 import os
@@ -24,7 +25,7 @@ from launch_ros.actions import Node
 from legged_control.launch_common import (
     make_state_estimator, make_height_scan, make_teleop,
     make_obs_assembler, make_robot_state_publisher,
-    make_obs_monitor, make_vel_viz, make_rviz2,
+    make_vel_viz, make_rviz2,
 )
 
 _YAML_SENTINEL = "__from_yaml__"
@@ -53,6 +54,7 @@ def _launch_setup(context, *args, **kwargs):
                 "legs":              LaunchConfiguration("legs"),
                 "kp_override":       kp_override,
                 "kd_override":       kd_override,
+                "dry_run":           LaunchConfiguration("dry_run"),
             }.items(),
         ),
     ]
@@ -67,7 +69,7 @@ def _launch_setup(context, *args, **kwargs):
     rsp = make_robot_state_publisher()
     if rsp is not None:
         nodes.append(rsp)
-    nodes += [make_obs_monitor(), make_vel_viz()]
+    nodes += [make_vel_viz()]
 
     if mode == "passive":
         nodes.append(make_rviz2())
@@ -90,5 +92,6 @@ def generate_launch_description():
         DeclareLaunchArgument("serial_port_front", default_value=_YAML_SENTINEL),
         DeclareLaunchArgument("serial_port_rear", default_value=_YAML_SENTINEL),
         DeclareLaunchArgument("model_path", default_value=""),
+        DeclareLaunchArgument("dry_run", default_value="false"),
         OpaqueFunction(function=_launch_setup),
     ])

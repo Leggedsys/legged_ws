@@ -65,7 +65,7 @@ def make_robot_state_publisher():
 def make_obs_monitor():
     return Node(
         package="legged_control", executable="obs_monitor_node",
-        name="obs_monitor_node", output="screen",
+        name="obs_monitor_node", output="log",
     )
 
 

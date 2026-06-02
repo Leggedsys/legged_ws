@@ -1,6 +1,7 @@
 """Minimal Gazebo physics launch for the quadruped simulation URDF."""
 
 import os
+import re
 import tempfile
 
 from ament_index_python.packages import get_package_share_directory
@@ -45,6 +46,15 @@ def _prepare_urdf(urdf_path: str, controller_yaml: str) -> str:
     content = _read_text(urdf_path)
     content = content.replace("__CONTROLLER_YAML__", controller_yaml)
     content = content.replace("package://dog_urdf/", f"file://{_DOG_URDF_SHARE}/")
+    content = re.sub(
+        r'\s*<gazebo reference="base_link">\s*<sensor type="depth".*?</gazebo>',
+        '', content, flags=re.DOTALL)
+    content = re.sub(
+        r'\s*<link name="camera_depth_optical_frame"/>\s*',
+        '', content)
+    content = re.sub(
+        r'\s*<joint name="camera_depth_joint" type="fixed">.*?</joint>',
+        '', content, flags=re.DOTALL)
     fd, tmp_path = tempfile.mkstemp(suffix=".urdf", prefix="dog_urdf_sim_")
     with os.fdopen(fd, "w") as f:
         f.write(content)
@@ -132,9 +142,9 @@ def _launch_setup(context, *args, **kwargs):
                 actions=[
                     ExecuteProcess(
                         cmd=[
-                            "zsh",
-                            "-lc",
-                            "source /opt/ros/humble/setup.zsh && ros2 service call /unpause_physics std_srvs/srv/Empty '{}'",
+                            "bash",
+                            "-c",
+                            "source /opt/ros/humble/setup.bash && ros2 service call /unpause_physics std_srvs/srv/Empty '{}'",
                         ],
                         output="log",
                     )

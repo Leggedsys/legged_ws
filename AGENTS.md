@@ -70,13 +70,36 @@ SIM:   Gazebo → control_bridge → /joint_states_aggregated
 - **Direction/zero_offset only in `real/`.** `joint_aggregator` does motor→URDF. `motor_command_bridge` inverts URDF→motor. `policy_node` works in pure URDF frame.
 - **URDF is optional.** Launch files skip `robot_state_publisher`/`rviz2` if `dog_urdf` package not found. `src/dog_urdf` is a git submodule — `git clone --recursive` to pull it.
 - **Motor IDs** per-joint in `robot.yaml`. Bus node validates `data.correct` + `data.motor_id`.
-- **No test framework, no CI.** Tests run via `python3 -m pytest src/legged_control/tests/test_*.py`.
+
+## Tests
+
+Run individually after sourcing the workspace (the ROS2 `launch-pytest` plugin breaks batch glob collection):
+
+```bash
+source install/setup.bash
+/usr/bin/python3 -m pytest src/legged_control/tests/test_kinematics.py
+/usr/bin/python3 -m pytest src/legged_control/tests/test_motor_bus_node.py
+# ... etc (see src/legged_control/tests/ for all test files)
+```
+
+Or loop: `for f in src/legged_control/tests/test_*.py; do /usr/bin/python3 -m pytest "$f"; done`
+
+**Known: 2 test files are out of sync** with the implementation:
+- `test_robot_launch.py` — imports `_leg_group`/`_parse_legs` from `robot.launch.py`, but they moved to `real.launch.py`
+- `test_policy_node.py` — `_decode_action` signature changed (added `soft_q_max_urdf`), `_reorder_yaml_to_policy` was removed
+- `test_gazebo_control_bridge.py` — skipped by design (`pytest.skip` at module level)
 
 ## Runtime gain tuning
 
 ```bash
+# Global kp/kd (all motors on a bus)
 ros2 param set /motor_bus_front kp 5.0
 ros2 param set /motor_bus_front kd 0.3
+ros2 param set /motor_bus_rear  kp 5.0
+
+# Per-joint override (higher priority than global)
+ros2 param set /motor_bus_front kp_FR_hip 4.0
+ros2 param set /motor_bus_front kd_FR_hip 0.2
 ```
 
 Changes take effect immediately. Update `robot.yaml` when satisfied.
@@ -92,3 +115,5 @@ Changes take effect immediately. Update `robot.yaml` when satisfied.
 | Obs validation gate | policy_node (before WAIT→POLICY) |
 | Spike filter | motor_bus_node (>±1.0 rad/tick rejected) |
 | Motor temp/error | motor_bus_node (data.temp, data.merror) |
+
+See `docs/safety.md` for the full safety architecture and e-stop response flow.

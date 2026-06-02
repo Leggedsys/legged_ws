@@ -8,6 +8,10 @@ q_motor = direction * (q_urdf - zero_offset)
 
 Publishes /joint_commands_motor (motor frame) — motor_bus_node subscribes
 to this via launch remap.
+
+Dry-run mode (ros2 param set /motor_command_bridge dry_run true):
+  Writes both URDF and motor-frame commands to a log file instead of
+  publishing to /joint_commands_motor.  Motors stay passive for safety.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ class MotorCommandBridge(Node):
         super().__init__("motor_command_bridge")
 
         self.declare_parameter("config_path", "")
+        self.declare_parameter("dry_run", False)
+        self.declare_parameter("log_path", "/tmp/motor_command_log.csv")
         cfg = self._load_config()
         self._joint_cfg = {j["name"]: j for j in cfg["joints"]}
         self._names = [j["name"] for j in cfg["joints"]]
@@ -43,9 +49,20 @@ class MotorCommandBridge(Node):
         self.create_subscription(
             JointState, "/joint_commands", self._on_command, 10,
         )
+        self._log_file = None
+        dry = self.get_parameter("dry_run").value
+        if dry:
+            log_path = str(self.get_parameter("log_path").value)
+            self._log_file = open(log_path, "w", buffering=1)
+            self._log_file.write(
+                "t,phase," +
+                ",".join(f"{n}_urdf" for n in self._names) + "," +
+                ",".join(f"{n}_motor" for n in self._names) + "\n"
+            )
         self.get_logger().info(
             "motor_command_bridge ready — "
             f"/joint_commands → /joint_commands_motor, max_speed={self._max_joint_speed} rad/s"
+            + (" [DRY-RUN: logging to file, motors passive]" if dry else "")
         )
 
     def _load_config(self) -> dict:
@@ -63,10 +80,8 @@ class MotorCommandBridge(Node):
         self._last_time = now
         max_step = self._max_joint_speed * dt
 
-        out = JointState()
-        out.header.stamp = self.get_clock().now().to_msg()
-        out.name = list(self._names)
-        out.position = []
+        q_urdf_list: list[float] = []
+        q_motor_list: list[float] = []
         for name in self._names:
             cfg = self._joint_cfg[name]
             direction = float(cfg["direction"])
@@ -82,7 +97,21 @@ class MotorCommandBridge(Node):
             if abs(delta) > max_step:
                 q_motor = prev + max_step * (1.0 if delta > 0 else -1.0)
             self._last_cmd[name] = q_motor
-            out.position.append(q_motor)
+            q_urdf_list.append(q_urdf)
+            q_motor_list.append(q_motor)
+
+        if self._log_file is not None:
+            self._log_file.write(
+                f"{now:.6f},," +
+                ",".join(f"{v:.6f}" for v in q_urdf_list) + "," +
+                ",".join(f"{v:.6f}" for v in q_motor_list) + "\n"
+            )
+            return  # dry-run: skip publishing, motors stay passive
+
+        out = JointState()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.name = list(self._names)
+        out.position = q_motor_list
         self._pub.publish(out)
 
 
@@ -92,6 +121,9 @@ def main() -> None:
     try:
         rclpy.spin(node)
     finally:
+        if node._log_file is not None:
+            node._log_file.close()
+            node.get_logger().info(f"[dry-run] log written to {node.get_parameter('log_path').value}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

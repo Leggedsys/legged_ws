@@ -8,8 +8,8 @@ Observation vector (373 dims) from /observation:
   [3:6]   base_ang_vel     from /state_estimate[3:6]
   [6:9]   projected_gravity from /state_estimate[6:9]
   [9:12]  velocity_commands [vx, vy, omega_z] from /cmd_vel
-  [12:24] joint_pos_rel    q_motor - q_default_motor (yaml order -> policy order)
-  [24:36] joint_vel        dq_motor (yaml order -> policy order)
+  [12:24] joint_pos_rel    q_urdf - q_default_urdf (yaml order -> policy order, hip_sign_flip applied)
+  [24:36] joint_vel        dq_urdf (yaml order -> policy order, hip_sign_flip applied)
   [36:48] last_action      previous raw policy output (policy order)
   [48:373] height_scan     from /height_scan (325 floats)
 
@@ -443,6 +443,12 @@ class PolicyNode(Node):
             if self._latest_obs is not None and self._joint_state_seen:
                 cmd_vel = self._latest_obs[9:12]
                 if any(abs(v) > 1e-4 for v in cmd_vel):
+                    if not self._is_near(self._q_default_urdf.tolist(), _STANDUP_TOL):
+                        self.get_logger().warn(
+                            "[policy] joints not near default pose — staying in WAIT",
+                            throttle_duration_sec=2.0,
+                        )
+                        return
                     obs = self._latest_obs.copy()
                     obs[36:48] = self._last_action
                     bad = _validate_obs(obs, obs[48:373])
@@ -453,9 +459,9 @@ class PolicyNode(Node):
                             throttle_duration_sec=2.0,
                         )
                         return  # stay in WAIT, don't enter POLICY
-                self._phase = _PHASE_POLICY
-                self._phase_start = now
-                self.get_logger().info("[policy] cmd_vel received -> POLICY")
+                    self._phase = _PHASE_POLICY
+                    self._phase_start = now
+                    self.get_logger().info("[policy] cmd_vel received -> POLICY")
             return
 
         if self._phase == _PHASE_POLICY:

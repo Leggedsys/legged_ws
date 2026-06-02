@@ -54,9 +54,14 @@ def _assemble(
     q_default_urdf: np.ndarray,
     last_action: np.ndarray,
     height_scan: np.ndarray,
+    sign_flip_policy_idx: list[int] | None = None,
 ) -> np.ndarray:
     joint_pos_rel = reorder_yaml_to_policy(joint_pos_urdf - q_default_urdf)
     joint_vel = reorder_yaml_to_policy(joint_vel_urdf)
+    if sign_flip_policy_idx:
+        for idx in sign_flip_policy_idx:
+            joint_pos_rel[idx] *= -1.0
+            joint_vel[idx] *= -1.0
     return np.concatenate([
         state_estimate[:9],
         np.array(cmd_vel, dtype=np.float32),
@@ -72,6 +77,7 @@ class ObsAssemblerNode(Node):
         super().__init__("obs_assembler")
 
         self._q_default_urdf = self._load_q_default()
+        self._sign_flip_policy_idx = self._load_sign_flip_policy_idx()
         self._state_estimate = np.zeros(9, dtype=np.float32)
         self._height_scan = np.zeros(325, dtype=np.float32)
         self._cmd_vel = (0.0, 0.0, 0.0)
@@ -99,6 +105,16 @@ class ObsAssemblerNode(Node):
                             dtype=np.float32)
         except Exception:
             return np.zeros(12, dtype=np.float32)
+
+    def _load_sign_flip_policy_idx(self) -> list[int]:
+        share = get_package_share_directory("legged_control")
+        try:
+            with open(os.path.join(share, "config", "policy.yaml")) as f:
+                pcfg = yaml.safe_load(f).get("policy", {})
+            flip_names = pcfg.get("hip_sign_flip", [])
+            return [_POLICY_JOINT_NAMES.index(n) for n in flip_names if n in _POLICY_JOINT_NAMES]
+        except Exception:
+            return []
 
     def _on_state(self, msg: Float32MultiArray) -> None:
         self._state_estimate = np.array(msg.data[:9], dtype=np.float32)
@@ -128,6 +144,7 @@ class ObsAssemblerNode(Node):
             self._q_default_urdf,
             self._last_action,
             self._height_scan,
+            self._sign_flip_policy_idx,
         )
         out = Float32MultiArray()
         out.data = obs.tolist()

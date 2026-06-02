@@ -83,6 +83,18 @@ def _launch_setup(context, *args, **kwargs):
         "rear":  ("motor_bus_rear",  port_map["rear"]),
     }
 
+    # Odin env: preload system libusb to resolve interrupt_event_handler symbol
+    odin_env = {}
+    system_libusb = "/lib/x86_64-linux-gnu/libusb-1.0.so.0"
+    if os.path.exists(system_libusb):
+        odin_env["LD_PRELOAD"] = system_libusb
+
+    odin_share = get_package_share_directory("odin_ros_driver")
+    with open(os.path.join(odin_share, "config", "control_command.yaml")) as f:
+        odin_params = yaml.safe_load(f)
+    calib_path = os.path.join(odin_share, "config", "calib.yaml")
+    odin_params["calib_file_path"] = calib_path
+
     nodes = []
 
     for group, (node_name, port) in groups.items():
@@ -92,21 +104,31 @@ def _launch_setup(context, *args, **kwargs):
         nodes.append(Node(
             package="legged_control", executable="motor_bus_node", name=node_name,
             parameters=[{"serial_port": port,
-                         "joint_names": [j["name"] for j in group_joints],
-                         "kp": kp, "kd": kd, "loop_hz": motor_hz}],
+                          "joint_names": [j["name"] for j in group_joints],
+                          "kp": kp, "kd": kd, "loop_hz": motor_hz}],
             remappings=[("/joint_commands", "/joint_commands_motor")],
             output="log",
         ))
 
+    dry_run = LaunchConfiguration("dry_run").perform(context).lower() == "true"
     nodes += [
         Node(package="legged_control", executable="joint_aggregator",
              name="joint_aggregator", output="screen"),
         Node(package="legged_control", executable="motor_command_bridge",
-             name="motor_command_bridge", output="log"),
+             name="motor_command_bridge", output="log",
+             parameters=[{"dry_run": dry_run}]),
         Node(package="legged_control", executable="urdf_joint_state_bridge",
              name="urdf_joint_state_bridge", output="log"),
         Node(package="odin_ros_driver", executable="host_sdk_sample",
-             name="odin1_node", output="log"),
+             name="odin1_node", output="log",
+             additional_env=odin_env,
+             parameters=[odin_params]),
+        Node(package="odin_ros_driver", executable="pcd2depth_ros2_node",
+             name="pcd2depth_ros2_node", output="log",
+             parameters=[odin_params]),
+        Node(package="odin_ros_driver", executable="cloud_reprojection_ros2_node",
+             name="cloud_reprojection_ros2_node", output="log",
+             parameters=[odin_params]),
         Node(package="imu_filter_madgwick", executable="imu_filter_madgwick_node",
              name="imu_filter_madgwick",
              parameters=[{"use_mag": False, "publish_tf": False,
@@ -137,5 +159,6 @@ def generate_launch_description():
         DeclareLaunchArgument("legs", default_value="all"),
         DeclareLaunchArgument("kp_override", default_value="-1"),
         DeclareLaunchArgument("kd_override", default_value="-1"),
+        DeclareLaunchArgument("dry_run", default_value="false"),
         OpaqueFunction(function=_launch_setup),
     ])
