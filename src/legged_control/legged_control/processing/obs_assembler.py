@@ -35,8 +35,10 @@ _YAML_JOINT_NAMES = [
 ]
 
 _POLICY_JOINT_NAMES = [
-    "FL_hip", "FR_hip", "FL_thigh", "FR_thigh", "FL_calf", "FR_calf",
-    "RL_hip", "RR_hip", "RL_thigh", "RR_thigh", "RL_calf", "RR_calf",
+    "FL_hip", "FL_thigh", "FL_calf",
+    "FR_hip", "FR_thigh", "FR_calf",
+    "RL_hip", "RL_thigh", "RL_calf",
+    "RR_hip", "RR_thigh", "RR_calf",
 ]
 
 _YAML_TO_POLICY = [_YAML_JOINT_NAMES.index(n) for n in _POLICY_JOINT_NAMES]

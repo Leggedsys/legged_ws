@@ -69,6 +69,13 @@ def make_obs_monitor():
     )
 
 
+def make_monitor_node():
+    return Node(
+        package="legged_control", executable="monitor_node",
+        name="monitor_node", output="screen",
+    )
+
+
 def make_vel_viz():
     return Node(
         package="legged_control", executable="vel_viz_node",

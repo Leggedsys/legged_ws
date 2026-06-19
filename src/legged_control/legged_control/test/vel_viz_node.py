@@ -36,6 +36,7 @@ def _arrow_marker(
     m.id = marker_id
     m.type = Marker.ARROW
     m.action = Marker.ADD
+    m.pose.position.z = 0.50
     m.pose.orientation.w = 1.0
 
     speed = math.hypot(vx, vy)

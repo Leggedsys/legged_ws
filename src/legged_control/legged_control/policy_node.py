@@ -29,8 +29,10 @@ _YAML_JOINT_NAMES = [
 ]
 
 _POLICY_JOINT_NAMES = [
-    "FL_hip", "FR_hip", "FL_thigh", "FR_thigh", "FL_calf", "FR_calf",
-    "RL_hip", "RR_hip", "RL_thigh", "RR_thigh", "RL_calf", "RR_calf",
+    "FL_hip", "FL_thigh", "FL_calf",
+    "FR_hip", "FR_thigh", "FR_calf",
+    "RL_hip", "RL_thigh", "RL_calf",
+    "RR_hip", "RR_thigh", "RR_calf",
 ]
 
 _POLICY_TO_YAML = [
@@ -84,14 +86,13 @@ from legged_control.kinematics import _smoothstep
 # ── obs validation (training 2σ ranges) ────────────────────────────────────────
 
 _OBS_CHECKS = {
-    "base_lin_vel":  [("vx", 0, -0.70, 1.47), ("vy", 1, -0.34, 0.38), ("vz", 2, -0.36, 0.47)],
-    "base_ang_vel":  [("wx", 3, -2.25, 2.16), ("wy", 4, -1.61, 1.67), ("wz", 5, -1.27, 1.35)],
-    "proj_grav":     [("gx", 6, -0.04, 0.18), ("gy", 7, -0.17, 0.08), ("gz", 8, -1.06, -0.93)],
+    "base_lin_vel":  [("vx", 0, -1.00, 2.00), ("vy", 1, -0.50, 0.50), ("vz", 2, -0.50, 0.60)],
+    "base_ang_vel":  [("wx", 3, -3.00, 3.00), ("wy", 4, -2.50, 2.50), ("wz", 5, -2.00, 2.00)],
+    "proj_grav":     [("gx", 6, -0.25, 0.35), ("gy", 7, -0.30, 0.25), ("gz", 8, -1.10, -0.55)],
     "vel_cmd":       [("vx", 9, -0.68, 1.59), ("vy", 10, -0.33, 0.33), ("wz", 11, -1.10, 1.09)],
-    "joint_pos":     [("pos", 12 + i, -0.30, 0.30) for i in range(12)],
-    "joint_vel":     [("vel", 24 + i, -6.0, 6.0) for i in range(12)],
-    "last_action":   [("act", 36 + i, -3.0, 3.0) for i in range(12)],
-    "height_mean":   [("hs", 0, 0.19, 0.43)],  # idx unused, check np.nanmean(height_scan)
+    "joint_pos":     [(f"pos_{_POLICY_JOINT_NAMES[i]}", 12 + i, -0.30, 0.30) for i in range(12)],
+    "joint_vel":     [(f"vel_{_POLICY_JOINT_NAMES[i]}", 24 + i, -6.0, 6.0) for i in range(12)],
+    "height_mean":   [("hs", 0, 0.08, 0.43)],
 }
 
 
@@ -119,6 +120,8 @@ _STANDUP_TOL  = 0.05
 _LIEDOWN_TOL  = 0.05
 _VEL_SETTLED  = 0.05
 _LIEDOWN_TIMEOUT = 3.0  # seconds past lie_down_duration before forcing PASSIVE
+_RAW_LIMIT    = 20.0    # raw_action divergence threshold
+_RAW_FAULT_N  = 3       # consecutive frames above limit → FAULT
 
 
 class PolicyNode(Node):
@@ -147,6 +150,9 @@ class PolicyNode(Node):
         self.declare_parameter("kd", kd)
         self.declare_parameter("ramp_duration", float(standup_cfg.get("ramp_duration", 8.0)))
         self.declare_parameter("lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0)))
+        self.declare_parameter("policy_dry_run", False)
+        # policy_dry_run=True: POLICY phase runs inference but publishes q_default (safe)
+        # policy_dry_run=False: POLICY phase publishes decoded action to motors
 
         loop_hz = float(control_cfg.get("gait_hz", 50.0))
         self._dt = 1.0 / loop_hz
@@ -158,11 +164,13 @@ class PolicyNode(Node):
             share = get_package_share_directory("legged_control")
             model_path = os.path.join(share, model_path[len("__package__/"):])
         self._policy = None
+        self._model_path = ""
         if model_path:
             try:
                 import torch
                 self._policy = torch.jit.load(model_path)
                 self._policy.eval()
+                self._model_path = model_path
                 self.get_logger().info(f"[policy] loaded model: {model_path}")
             except Exception as e:
                 self.get_logger().error(f"[policy] failed to load model {model_path}: {e}")
@@ -177,6 +185,7 @@ class PolicyNode(Node):
         self._last_action = np.zeros(12, dtype=np.float32)
         self._passive_broadcast = False
         self._fault_broadcast = False
+        self._raw_high_count = 0
 
         self._joint_pos: dict[str, float] = {}
         self._joint_vel: dict[str, float] = {}
@@ -250,6 +259,17 @@ class PolicyNode(Node):
             q_min.append(float(lo))
             q_max.append(float(hi))
         return np.array(q_min, dtype=np.float32), np.array(q_max, dtype=np.float32)
+
+    def _reset_policy(self) -> None:
+        """Reload model to reset GRU hidden state."""
+        if not self._model_path:
+            return
+        try:
+            import torch
+            self._policy = torch.jit.load(self._model_path)
+            self._policy.eval()
+        except Exception as e:
+            self.get_logger().error(f"[policy] failed to reset model: {e}")
 
     def _on_joints(self, msg: JointState) -> None:
         self._joint_state_seen = True
@@ -347,7 +367,7 @@ class PolicyNode(Node):
             return self._q_default_urdf.tolist()
 
         obs = self._latest_obs.copy()
-        obs[36:48] = self._last_action
+        obs[36:48] = np.clip(self._last_action, -5.0, 5.0)
         bad = _validate_obs(obs, obs[48:373])
         if bad:
             self.get_logger().warn(
@@ -366,8 +386,11 @@ class PolicyNode(Node):
 
         self._last_action = action.copy()
         self._pub_raw.publish(Float32MultiArray(data=action.tolist()))
+        hs = obs[48:373]
         self.get_logger().info(
-            f"[policy] raw_action: {[f'{x:+.4f}' for x in action]}",
+            f"[policy] raw_action[max={np.max(np.abs(action)):+.1f}]  "
+            f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}  "
+            f"hs={np.mean(hs):.3f}",
             throttle_duration_sec=1.0,
         )
         q_urdf = _decode_action(
@@ -377,21 +400,6 @@ class PolicyNode(Node):
             self._sign_flip_policy_idx,
             self._soft_q_min_urdf,
             self._soft_q_max_urdf,
-        )
-        self.get_logger().info(
-            f"[policy] q_target(URDF)={[f'{x:+.4f}' for x in q_urdf]}  "
-            f"pos_rel(obs first 4)={[f'{x:+.3f}' for x in obs[12:16]]}  "
-            f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}",
-            throttle_duration_sec=1.0,
-        )
-        hs = obs[48:373]
-        self.get_logger().info(
-            f"[policy] obs: proj_g=({obs[6]:+.3f},{obs[7]:+.3f},{obs[8]:+.3f})  "
-            f"vel=({obs[0]:+.2f},{obs[1]:+.2f},{obs[2]:+.2f})  "
-            f"ang=({obs[3]:+.2f},{obs[4]:+.2f},{obs[5]:+.2f})  "
-            f"last_a=({obs[36]:+.3f},{obs[37]:+.3f},{obs[38]:+.3f},{obs[39]:+.3f})  "
-            f"hs_mean={np.mean(hs):.3f}  hs_min={np.min(hs):.3f}  hs_max={np.max(hs):.3f}",
-            throttle_duration_sec=0.5,
         )
         return q_urdf.tolist()
 
@@ -458,15 +466,54 @@ class PolicyNode(Node):
                             + (f" ...+{len(bad)-8} more" if len(bad) > 8 else ""),
                             throttle_duration_sec=2.0,
                         )
-                        return  # stay in WAIT, don't enter POLICY
+                        return
                     self._phase = _PHASE_POLICY
                     self._phase_start = now
+                    self._raw_high_count = 0
+                    self._last_action = np.zeros(12, dtype=np.float32)
+                    self._reset_policy()
                     self.get_logger().info("[policy] cmd_vel received -> POLICY")
             return
 
         if self._phase == _PHASE_POLICY:
             targets = self._run_inference()
-            self._publish(targets)
+            obs = self._latest_obs
+            # divergence guard: if raw_action stays above limit, FAULT
+            if np.max(np.abs(self._last_action)) > _RAW_LIMIT:
+                self._raw_high_count += 1
+                if self._raw_high_count >= _RAW_FAULT_N:
+                    self.get_logger().error(
+                        f"[policy] raw_action exceeded {_RAW_LIMIT} for {_RAW_FAULT_N} "
+                        f"frames → FAULT (physical feedback lost?)"
+                    )
+                    self._phase = _PHASE_FAULT
+                    self._phase_start = None
+                    self._raw_high_count = 0
+                    return
+            else:
+                self._raw_high_count = 0
+            if obs is not None:
+                obs_check = obs.copy()
+                obs_check[36:48] = self._last_action
+                bad = _validate_obs(obs_check, obs_check[48:373])
+                if bad:
+                    self.get_logger().error(
+                        f"\U0001f6a8 POLICY obs out of range: {', '.join(bad[:6])}"
+                        + (f" ...+{len(bad)-6} more" if len(bad) > 6 else ""),
+                        throttle_duration_sec=2.0,
+                    )
+                    self._publish(self._q_default_urdf.tolist())
+                    self._last_action = np.zeros(12, dtype=np.float32)
+                    return
+            dry_run = bool(self.get_parameter("policy_dry_run").value)
+            if dry_run:
+                self._publish(self._q_default_urdf.tolist())
+                self.get_logger().info(
+                    "[policy] DRY RUN: holding default pose (policy_dry_run=true)",
+                    throttle_duration_sec=5.0,
+                )
+            else:
+                self._publish(targets)
             return
 
         if self._phase == _PHASE_LIEDOWN:

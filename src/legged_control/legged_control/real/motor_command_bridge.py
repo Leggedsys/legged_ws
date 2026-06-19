@@ -38,8 +38,8 @@ class MotorCommandBridge(Node):
         self._names = [j["name"] for j in cfg["joints"]]
         control = cfg.get("control", {})
         self._max_joint_speed = float(control.get("max_joint_speed", 3.0))
-        # Policy runs at 50 Hz
-        self._max_delta = self._max_joint_speed * 0.02
+        self._gait_hz = float(control.get("gait_hz", 50.0))
+        self._max_delta = self._max_joint_speed / self._gait_hz
         self._last_cmd: dict[str, float] = {n: 0.0 for n in self._names}
         self._last_time: float | None = None
 
@@ -87,10 +87,10 @@ class MotorCommandBridge(Node):
             direction = float(cfg["direction"])
             zero_offset = float(cfg["zero_offset"])
             q_urdf = float(pos_map.get(name, 0.0))
-            q_motor = direction * (q_urdf - zero_offset)
-            q_motor = float(
-                max(float(cfg["q_min"]), min(float(cfg["q_max"]), q_motor))
+            q_urdf_clipped = float(
+                max(float(cfg["q_min"]), min(float(cfg["q_max"]), q_urdf))
             )
+            q_motor = direction * (q_urdf_clipped - zero_offset)
             # Speed limit
             prev = self._last_cmd.get(name, q_motor)
             delta = q_motor - prev

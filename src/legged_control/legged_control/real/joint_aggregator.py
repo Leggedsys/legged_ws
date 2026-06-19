@@ -5,9 +5,8 @@ joint_aggregator
 Subscribes to 12 individual /<ns>/joint_states topics published by motor_bus_node
 and merges them into a single /joint_states_aggregated message.
 
-Published immediately whenever any joint receives a new message.
+Published at a fixed rate via timer (aggregator_hz in robot.yaml, default 200 Hz).
 Joint order matches robot.yaml joints list (FR_hip ... RL_calf, index 0-11).
-All values are in motor frame (no direction/zero_offset conversion).
 
 Effort field is intentionally not forwarded — downstream consumers use only position and velocity.
 """
@@ -57,6 +56,10 @@ class JointAggregatorNode(Node):
 
         self._pub = self.create_publisher(JointState, "/joint_states_aggregated", 10)
 
+        control = cfg.get("control", {})
+        publish_hz = float(control.get("aggregator_hz", 200.0))
+        self._publish_timer = self.create_timer(1.0 / publish_hz, self._publish)
+
         for name in self._names:
             ns = _ns_from_joint_name(name)
             self.create_subscription(
@@ -67,7 +70,8 @@ class JointAggregatorNode(Node):
             )
 
         self.get_logger().info(
-            f"Joint aggregator ready — tracking {len(self._names)} joints"
+            f"Joint aggregator ready — tracking {len(self._names)} joints  "
+            f"publish_hz={publish_hz:.0f}"
         )
 
     def _load_config(self) -> dict:
@@ -82,7 +86,6 @@ class JointAggregatorNode(Node):
                 "velocity": msg.velocity[0] if msg.velocity else 0.0,
                 "stamp": time.monotonic(),
             }
-        self._publish()
 
     def _publish(self) -> None:
         now_mono = time.monotonic()

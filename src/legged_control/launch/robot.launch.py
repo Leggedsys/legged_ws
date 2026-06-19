@@ -25,7 +25,7 @@ from launch_ros.actions import Node
 from legged_control.launch_common import (
     make_state_estimator, make_height_scan, make_teleop,
     make_obs_assembler, make_robot_state_publisher,
-    make_vel_viz, make_rviz2,
+    make_monitor_node, make_vel_viz, make_rviz2,
 )
 
 _YAML_SENTINEL = "__from_yaml__"
@@ -69,7 +69,7 @@ def _launch_setup(context, *args, **kwargs):
     rsp = make_robot_state_publisher()
     if rsp is not None:
         nodes.append(rsp)
-    nodes += [make_vel_viz()]
+    nodes += [make_vel_viz(), make_monitor_node()]
 
     if mode == "passive":
         nodes.append(make_rviz2())

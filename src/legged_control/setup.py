@@ -38,6 +38,7 @@ setup(
     entry_points={
         "console_scripts": [
             "obs_monitor_node      = legged_control.test.obs_monitor_node:main",
+            "monitor_node          = legged_control.test.monitor_node:main",
             "vel_viz_node          = legged_control.test.vel_viz_node:main",
             "motor_bus_node        = legged_control.real.motor_bus_node:main",
             "joint_aggregator      = legged_control.real.joint_aggregator:main",

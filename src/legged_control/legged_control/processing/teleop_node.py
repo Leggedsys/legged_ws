@@ -130,6 +130,9 @@ try:
             if _button_is_rising_edge(self._prev_posture_toggle, posture_toggle_state):
                 self._posture_standing = not self._posture_standing
                 self._posture_command_pub.publish(Bool(data=self._posture_standing))
+                self.get_logger().info(
+                    f"POSTURE: toggle -> standing={self._posture_standing}"
+                )
             self._prev_posture_toggle = posture_toggle_state
 
             estop_active = (

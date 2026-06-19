@@ -41,17 +41,12 @@ _NOMINAL_HEIGHT = 0.30
 
 def _build_height_scan(points_base_link: np.ndarray) -> np.ndarray:
     grid = np.full(_N_CELLS, np.nan, dtype=np.float32)
+    if points_base_link.shape[0] == 0:
+        return np.full(_N_CELLS, _NOMINAL_HEIGHT, dtype=np.float32)
 
-    if len(points_base_link) == 0:
-        return np.zeros(_N_CELLS, dtype=np.float32)
-
-    xs, ys, zs = points_base_link[:, 0], points_base_link[:, 1], points_base_link[:, 2]
-
-    mask = (xs >= _X_MIN) & (xs <= _X_MAX) & (ys >= _Y_MIN) & (ys <= _Y_MAX)
-    xs, ys, zs = xs[mask], ys[mask], zs[mask]
-
-    if len(xs) == 0:
-        return np.zeros(_N_CELLS, dtype=np.float32)
+    xs = points_base_link[:, 0]
+    ys = points_base_link[:, 1]
+    zs = points_base_link[:, 2]
 
     xi = np.clip(np.round((xs - _X_MIN) / _RES).astype(int), 0, _N_X - 1)
     yi = np.clip(np.round((ys - _Y_MIN) / _RES).astype(int), 0, _N_Y - 1)
@@ -63,8 +58,8 @@ def _build_height_scan(points_base_link: np.ndarray) -> np.ndarray:
 
     result = np.where(
         np.isnan(grid),
-        _NOMINAL_HEIGHT,  # no data → assume flat ground at stance height
-        np.where(grid > 0.0, -1.0, np.clip(-grid, -1.0, 1.0)),
+        _NOMINAL_HEIGHT,
+        np.where(grid > 0.0, _NOMINAL_HEIGHT, np.clip(-grid, -1.0, 1.0)),
     )
 
     return result.astype(np.float32)
@@ -88,9 +83,12 @@ class HeightScanNode(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
         self._pub = self.create_publisher(Float32MultiArray, "/height_scan", 10)
-        self._cloud_pub = self.create_publisher(PointCloud2, "/height_scan_cloud", 10)
+        self._pub_cloud = self.create_publisher(PointCloud2, "/height_scan_cloud", 10)
         self.create_subscription(CameraInfo, "/camera/depth/camera_info", self._on_info, 1)
         self.create_subscription(Image, "/camera/depth/image_rect_raw", self._on_depth, 10)
+        # fallback timer: publish flat ground when camera is unavailable
+        self._camera_seen = False
+        self._fallback_timer = self.create_timer(0.5, self._publish_fallback)
         self.get_logger().info("height_scan_node ready — waiting for camera_info")
 
     def _load_nominal(self) -> None:
@@ -112,7 +110,7 @@ class HeightScanNode(Node):
                 f"camera_info received: fx={self._fx:.1f} fy={self._fy:.1f}"
             )
 
-    def _pub_cloud(self, hs: np.ndarray, depth_msg: Image) -> None:
+    def _publish_cloud(self, hs: np.ndarray, depth_msg: Image) -> None:
         points = []
         for yi in range(_N_Y):
             for xi in range(_N_X):
@@ -139,7 +137,7 @@ class HeightScanNode(Node):
         cloud.data = bytes(b"".join(
             struct.pack("fff", x, y, z) for x, y, z in points
         ))
-        self._cloud_pub.publish(cloud)
+        self._pub_cloud.publish(cloud)
 
     def _on_depth(self, msg: Image) -> None:
         if self._fx is None:
@@ -178,7 +176,16 @@ class HeightScanNode(Node):
         out = Float32MultiArray()
         out.data = hs.tolist()
         self._pub.publish(out)
-        self._pub_cloud(hs, msg)
+        self._publish_cloud(hs, msg)
+        self._camera_seen = True
+
+    def _publish_fallback(self) -> None:
+        if self._camera_seen:
+            return
+        hs = np.full(_N_CELLS, _NOMINAL_HEIGHT, dtype=np.float32)
+        out = Float32MultiArray()
+        out.data = hs.tolist()
+        self._pub.publish(out)
 
 
 def main() -> None:

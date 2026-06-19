@@ -1,6 +1,15 @@
 # AGENTS.md
 
-ROS2 workspace for a legged robot. Three packages: `legged_control` (ament_python), `unitree_actuator_sdk` (ament_python + C extension), `odin_ros_driver` (ament_cmake, C++17).
+ROS2 workspace for a legged robot. Four packages: `legged_control` (ament_python), `unitree_actuator_sdk` (ament_python + C extension), `odin_ros_driver` (ament_cmake, C++17), `dog_urdf` (URDF submodule).
+
+## Setup
+
+```bash
+git clone --recursive                                 # dog_urdf is a submodule
+bash scripts/install_deps.sh                          # apt packages + udev rules + dialout group
+sudo usermod -a -G dialout $USER && newgrp dialout    # serial port access
+source /opt/ros/humble/setup.bash
+```
 
 ## Build
 
@@ -32,6 +41,7 @@ legged_control/legged_control/
 │   └── obs_assembler.py          4 topics → /observation (373 floats)
 ├── test/           visualization
 │   ├── obs_monitor_node.py       terminal 2Hz obs display
+│   ├── monitor_node.py           dashboard + per-frame CSV logger (~/.legged_logs/)
 │   └── vel_viz_node.py           velocity arrows MarkerArray
 ├── kinematics.py   pure math: FK, IK, Jacobian, gravity projection
 └── policy_node.py  policy: reads 4 obs topics → /joint_commands (URDF frame)
@@ -52,6 +62,12 @@ SIM:   Gazebo → control_bridge → /joint_states_aggregated
   SIM:   /joint_commands → control_bridge → Gazebo controller
 ```
 
+### Policy node FSM
+
+`PASSIVE` → (posture_command=true) → `STANDUP` → (ramp done) → `WAIT` → (cmd_vel + validation) → `POLICY` → (posture_command=false) → `LIEDOWN` → `PASSIVE`. `FAULT` is a terminal safe state (kp=0.5, kd=0.1).
+
+The state machine is implemented in `policy_node.py` (`_PHASE_*` constants, `_tick()` dispatcher). Transitions only happen inside `_tick()` — posture_command changes are latched until the next timer tick.
+
 ## Launch files
 
 | File | What it starts |
@@ -62,14 +78,36 @@ SIM:   Gazebo → control_bridge → /joint_states_aggregated
 | `gazebo_physics.launch.py` | Simulation with physics |
 | `gazebo_sim.launch.py` | Full sim stack: physics + control_bridge + processing + policy + viz |
 
+Useful launch args:
+- `legs:=FR,FL` — start only specific legs (passive/stand testing)
+- `dry_run:=true` — motor_bus_node runs without serial port (offline testing)
+- `model_path:=/path/to/model.pt` — override policy model
+- `serial_port_front:=/dev/ttyUSB0 serial_port_rear:=/dev/ttyUSB1` — override serial ports
+
 ## Key quirks
 
 - **Two serial ports, two bus nodes.** FR/FL share `/dev/ttyUSB0` (front), RR/RL share `/dev/ttyUSB1` (rear). `motor_bus_node` per port.
 - **Graceful estop.** `/joint_commands` stops → 0.5s hold → 2s kp→0 (kd stays for damping).
 - **Gear ratio.** `motor_bus_node` divides readings, multiplies commands by `gear_ratio`.
 - **Direction/zero_offset only in `real/`.** `joint_aggregator` does motor→URDF. `motor_command_bridge` inverts URDF→motor. `policy_node` works in pure URDF frame.
-- **URDF is optional.** Launch files skip `robot_state_publisher`/`rviz2` if `dog_urdf` package not found. `src/dog_urdf` is a git submodule — `git clone --recursive` to pull it.
+- **URDF is optional.** Launch files skip `robot_state_publisher`/`rviz2` if `dog_urdf` package not found. `src/dog_urdf` is a git submodule — use `git clone --recursive`.
 - **Motor IDs** per-joint in `robot.yaml`. Bus node validates `data.correct` + `data.motor_id`.
+- **Odin driver needs LD_PRELOAD.** Launch files automatically preload `libusb-1.0.so.0` for Odin's `host_sdk_sample`.
+- **Joint ordering is not sequential in robot.yaml.** motor_id order: FR(0,1,2), FL(3,4,5), RR(6,7,11), RL(9,10,8). RR_calf=11, RL_calf=8.
+- **Policy ordering differs from YAML ordering.** YAML order is FR→FL→RR→RL per-leg. Policy order is FL→FR paired (hip, thigh, calf pairs between legs). `_POLICY_TO_YAML` and `_reorder_policy_to_yaml()` handle conversion.
+- **README references deprecated modes.** The README mentions `mode:=stand` and `mode:=position_control` which do not exist in `robot.launch.py` (only `passive` / `policy`). `position_control_sim.launch.py` also does not exist. Do not attempt to use these modes.
+
+## Motors, joints, kinematics
+
+- **URDF joint names**: `FR_hip_joint`, `FR_thigh_joint`, `FR_calf_joint`, etc.
+- **kinematics.py API** (`legged_control/legged_control/kinematics.py`):
+  - `forward_kinematics(leg, joints)` → foot pos in hip frame
+  - `inverse_kinematics(leg, foot_pos, preferred_joints=None)` → angles or None
+  - `leg_kinematic_velocity(leg, q_urdf, dq_urdf)` → foot linear velocity
+  - `projected_gravity_from_quat(qx, qy, qz, qw)` → gravity vector in body frame
+  - `yaw_rotation_matrix(qx, qy, qz, qw)` → 2D yaw rotation matrix
+  - `_smoothstep(x)` — exported smoothing function (also used by policy_node)
+  - Leg constants: `LEFT_LEGS`, `RIGHT_LEGS`, `FRONT_LEGS`, `REAR_LEGS`
 
 ## Tests
 
@@ -88,6 +126,8 @@ Or loop: `for f in src/legged_control/tests/test_*.py; do /usr/bin/python3 -m py
 - `test_robot_launch.py` — imports `_leg_group`/`_parse_legs` from `robot.launch.py`, but they moved to `real.launch.py`
 - `test_policy_node.py` — `_decode_action` signature changed (added `soft_q_max_urdf`), `_reorder_yaml_to_policy` was removed
 - `test_gazebo_control_bridge.py` — skipped by design (`pytest.skip` at module level)
+
+**Working tests** (safe to run): `test_kinematics.py`, `test_motor_bus_node.py`, `test_joint_aggregator.py`, `test_state_estimator.py`, `test_teleop_node.py`, `test_height_scan.py`.
 
 ## Runtime gain tuning
 
