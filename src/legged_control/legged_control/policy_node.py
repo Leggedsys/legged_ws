@@ -3,15 +3,17 @@
 Runs a TorchScript policy at 50 Hz with the same PASSIVE->STANDUP->WAIT->POLICY->LIE_DOWN
 state machine as gait_node. The POLICY phase replaces IK trot with neural-network inference.
 
-Observation vector (373 dims) from /observation:
-  [0:3]   base_lin_vel     from /state_estimate[0:3]
-  [3:6]   base_ang_vel     from /state_estimate[3:6]
-  [6:9]   projected_gravity from /state_estimate[6:9]
-  [9:12]  velocity_commands [vx, vy, omega_z] from /cmd_vel
-  [12:24] joint_pos_rel    q_urdf - q_default_urdf (yaml order -> policy order, hip_sign_flip applied)
-  [24:36] joint_vel        dq_urdf (yaml order -> policy order, hip_sign_flip applied)
-  [36:48] last_action      previous raw policy output (policy order)
-  [48:373] height_scan     from /height_scan (325 floats)
+Observation vector (49 dims) from /observation (blind dog_urdf policy, scaled):
+  [0:3]   base_lin_vel      * 2.0   from /state_estimate[0:3]
+  [3:6]   base_ang_vel      * 0.25  from /state_estimate[3:6]
+  [6:9]   projected_gravity * 1.0   from /state_estimate[6:9]
+  [9:12]  velocity_commands * (2.0, 2.0, 0.25)  [vx, vy, omega_z] from /cmd_vel
+  [12:13] height_command    * 1.0 (raw) from /height_command
+  [13:25] joint_pos_rel     * 1.0   q_urdf - q_default_urdf (yaml -> policy order, hip_sign_flip)
+  [25:37] joint_vel         * 0.05  dq_urdf (yaml -> policy order, hip_sign_flip)
+  [37:49] last_action       previous raw policy output (policy order)
+
+The obs is assembled by obs_assembler (see processing/obs_assembler.py).
 
 Action: 12-dim (policy order) joint position residuals.
   q_target_urdf = q_default_urdf + sign_flip * action * scale
@@ -83,29 +85,35 @@ from std_msgs.msg import Bool, Float32MultiArray
 
 from legged_control.kinematics import _smoothstep
 
-# ── obs validation (training 2σ ranges) ────────────────────────────────────────
+# ── obs validation (sanity bounds on the scaled 49-dim obs) ─────────────────────
+# Ranges are conservative sanity gates, not tight training 2σ bounds. Command and
+# height bounds come from the dog_urdf command ranges (scaled); velocity/joint
+# bounds are loose physical limits. Re-tighten from policy rollout stats if desired.
+
+OBS_DIM = 49
 
 _OBS_CHECKS = {
-    "base_lin_vel":  [("vx", 0, -1.00, 2.00), ("vy", 1, -0.50, 0.50), ("vz", 2, -0.50, 0.60)],
-    "base_ang_vel":  [("wx", 3, -3.00, 3.00), ("wy", 4, -2.50, 2.50), ("wz", 5, -2.00, 2.00)],
-    "proj_grav":     [("gx", 6, -0.25, 0.35), ("gy", 7, -0.30, 0.25), ("gz", 8, -1.10, -0.55)],
-    "vel_cmd":       [("vx", 9, -0.68, 1.59), ("vy", 10, -0.33, 0.33), ("wz", 11, -1.10, 1.09)],
-    "joint_pos":     [(f"pos_{_POLICY_JOINT_NAMES[i]}", 12 + i, -0.30, 0.30) for i in range(12)],
-    "joint_vel":     [(f"vel_{_POLICY_JOINT_NAMES[i]}", 24 + i, -6.0, 6.0) for i in range(12)],
-    "height_mean":   [("hs", 0, 0.08, 0.43)],
+    "base_lin_vel":  [("vx", 0, -4.0, 6.0), ("vy", 1, -3.0, 3.0), ("vz", 2, -3.0, 3.0)],
+    "base_ang_vel":  [("wx", 3, -1.5, 1.5), ("wy", 4, -1.5, 1.5), ("wz", 5, -1.5, 1.5)],
+    "proj_grav":     [("gx", 6, -1.05, 1.05), ("gy", 7, -1.05, 1.05), ("gz", 8, -1.05, 0.20)],
+    "vel_cmd":       [("vx", 9, -2.1, 2.1), ("vy", 10, -1.1, 1.1), ("wz", 11, -0.27, 0.27)],
+    "height_cmd":    [("h", 12, 0.10, 0.35)],
+    "joint_pos":     [(f"pos_{_POLICY_JOINT_NAMES[i]}", 13 + i, -1.5, 1.5) for i in range(12)],
+    "joint_vel":     [(f"vel_{_POLICY_JOINT_NAMES[i]}", 25 + i, -1.0, 1.0) for i in range(12)],
 }
 
 
-def _validate_obs(obs: np.ndarray, height_scan: np.ndarray) -> list[str]:
+def _validate_obs(obs: np.ndarray) -> list[str]:
+    if obs.shape[0] != OBS_DIM:
+        return [f"obs_dim={obs.shape[0]}!={OBS_DIM}"]
     bad = []
-    for group_name, checks in _OBS_CHECKS.items():
+    if not bool(np.all(np.isfinite(obs))):
+        bad.append("non_finite")
+    for _group_name, checks in _OBS_CHECKS.items():
         for label, idx, lo, hi in checks:
-            if group_name == "height_mean":
-                v = float(np.nanmean(height_scan))
-            else:
-                v = float(obs[idx])
+            v = float(obs[idx])
             if not (lo <= v <= hi):
-                bad.append(f"{label}={v:+.3f}[{lo:+.1f},{hi:+.1f}]")
+                bad.append(f"{label}={v:+.3f}[{lo:+.2f},{hi:+.2f}]")
     return bad
 
 
@@ -278,7 +286,7 @@ class PolicyNode(Node):
             self._joint_vel[name] = float(vel)
 
     def _on_observation(self, msg: Float32MultiArray) -> None:
-        self._latest_obs = np.array(msg.data[:373], dtype=np.float32)
+        self._latest_obs = np.array(msg.data[:OBS_DIM], dtype=np.float32)
 
     def _on_posture(self, msg: Bool) -> None:
         if self._phase == _PHASE_FAULT:
@@ -367,8 +375,8 @@ class PolicyNode(Node):
             return self._q_default_urdf.tolist()
 
         obs = self._latest_obs.copy()
-        obs[36:48] = np.clip(self._last_action, -5.0, 5.0)
-        bad = _validate_obs(obs, obs[48:373])
+        obs[37:49] = np.clip(self._last_action, -5.0, 5.0)
+        bad = _validate_obs(obs)
         if bad:
             self.get_logger().warn(
                 f"obs anomaly: {' | '.join(bad[:6])}"
@@ -386,11 +394,10 @@ class PolicyNode(Node):
 
         self._last_action = action.copy()
         self._pub_raw.publish(Float32MultiArray(data=action.tolist()))
-        hs = obs[48:373]
         self.get_logger().info(
             f"[policy] raw_action[max={np.max(np.abs(action)):+.1f}]  "
             f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}  "
-            f"hs={np.mean(hs):.3f}",
+            f"h={obs[12]:.3f}",
             throttle_duration_sec=1.0,
         )
         q_urdf = _decode_action(
@@ -458,8 +465,8 @@ class PolicyNode(Node):
                         )
                         return
                     obs = self._latest_obs.copy()
-                    obs[36:48] = self._last_action
-                    bad = _validate_obs(obs, obs[48:373])
+                    obs[37:49] = self._last_action
+                    bad = _validate_obs(obs)
                     if bad:
                         self.get_logger().error(
                             f"🚨 obs out of range: {', '.join(bad[:8])}"
@@ -494,8 +501,8 @@ class PolicyNode(Node):
                 self._raw_high_count = 0
             if obs is not None:
                 obs_check = obs.copy()
-                obs_check[36:48] = self._last_action
-                bad = _validate_obs(obs_check, obs_check[48:373])
+                obs_check[37:49] = self._last_action
+                bad = _validate_obs(obs_check)
                 if bad:
                     self.get_logger().error(
                         f"\U0001f6a8 POLICY obs out of range: {', '.join(bad[:6])}"

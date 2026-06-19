@@ -1,20 +1,23 @@
-"""policy_node_sim — RL policy for Gazebo simulation.
+"""policy_node_sim — RL policy for Gazebo simulation (49-dim blind dog_urdf policy).
 
-Works entirely in URDF frame. No motor frame conversion, no robot.yaml.
-All joint parameters come from legged_deploy/policies/README.md.
+Works entirely in URDF frame. The Gazebo model is the dog_urdf training URDF, so:
+  * sim joint order == policy joint order (no reordering)
+  * NO hip_sign_flip (that correction only applies to the real-robot URDF)
+Shared joint parameters (default_q, action_scale, soft limits) are loaded from
+config/policy.yaml so sim and real stay in sync. obs scaling matches the real
+obs_assembler.
 
-Observation (373 dims):
-  [0:3]   base_lin_vel      from /state_estimate
-  [3:6]   base_ang_vel      from /state_estimate
-  [6:9]   projected_gravity from /state_estimate
-  [9:12]  velocity_commands [vx, vy, omega_z]
-  [12:24] joint_pos_rel     q_urdf - q_default  (sim order -> policy order)
-  [24:36] joint_vel         dq_urdf             (sim order -> policy order)
-  [36:48] last_action       previous action (policy order)
-  [48:373] height_scan      325 floats, m
+Observation (49 dims, scaled — see processing/obs_assembler.py):
+  [0:3]   base_lin_vel      * 2.0   from /state_estimate
+  [3:6]   base_ang_vel      * 0.25  from /state_estimate
+  [6:9]   projected_gravity * 1.0   from /state_estimate
+  [9:12]  velocity_commands * (2.0, 2.0, 0.25)
+  [12:13] height_command    * 1.0 (raw) from /height_command
+  [13:25] joint_pos_rel     * 1.0   q_sim - q_default (sim == policy order)
+  [25:37] joint_vel         * 0.05  dq_sim
+  [37:49] last_action       previous action (policy order)
 
 Action (12 dims, policy order):
-  FR_hip / RL_hip negated first (Isaac Lab USD axis flip vs Gazebo URDF)
   q_target = q_default + action * scale  (URDF frame, clipped to soft limits)
 """
 
@@ -22,7 +25,16 @@ from __future__ import annotations
 
 import numpy as np
 
-# Sim joint order: matches Gazebo controller + gazebo_control_bridge output
+from legged_control.processing.obs_assembler import (
+    OBS_DIM,
+    _ANG_VEL_SCALE,
+    _CMD_SCALE,
+    _DOF_POS_SCALE,
+    _DOF_VEL_SCALE,
+    _LIN_VEL_SCALE,
+)
+
+# Sim joint order == policy joint order (Gazebo controller + gazebo_control_bridge).
 _SIM_NAMES = [
     "FL_hip",   "FL_thigh", "FL_calf",
     "FR_hip",   "FR_thigh", "FR_calf",
@@ -30,62 +42,64 @@ _SIM_NAMES = [
     "RR_hip",   "RR_thigh", "RR_calf",
 ]
 
-# Policy joint order (legged_deploy README)
-_POLICY_NAMES = [
-    "FL_hip",  "FR_hip",   "FL_thigh", "FR_thigh",
-    "FL_calf", "FR_calf",  "RL_hip",   "RR_hip",
-    "RL_thigh", "RR_thigh", "RL_calf",  "RR_calf",
-]
-
-_SIM_TO_POLICY = [_SIM_NAMES.index(n) for n in _POLICY_NAMES]
-_POLICY_TO_SIM = [_POLICY_NAMES.index(n) for n in _SIM_NAMES]
-
-# Isaac Lab USD export loses hip axis direction; FR_hip and RL_hip are flipped
-# relative to the Gazebo URDF — negate their actions before applying.
-_HIP_FLIP_SIM = [_SIM_NAMES.index("FR_hip"), _SIM_NAMES.index("RL_hip")]
+_DEFAULT_HEIGHT_CMD = 0.22
 
 
 def _jtype(name: str) -> str:
     return name.split("_")[1]  # "hip" / "thigh" / "calf"
 
 
-_Q_DEFAULT  = {"hip": 0.0,   "thigh": 0.7,   "calf": -1.2}
-_SCALE      = {"hip": 0.15,  "thigh": 0.20,  "calf": 0.15}
-_SOFT_MIN   = {"hip": -0.450, "thigh": -1.480, "calf": -2.295}
-_SOFT_MAX   = {"hip":  0.450, "thigh":  0.680, "calf": -0.405}
-
-_Q_DEF = np.array([_Q_DEFAULT[_jtype(n)] for n in _SIM_NAMES], dtype=np.float32)
-_SCL   = np.array([_SCALE[_jtype(n)]     for n in _SIM_NAMES], dtype=np.float32)
-_SMIN  = np.array([_SOFT_MIN[_jtype(n)]  for n in _SIM_NAMES], dtype=np.float32)
-_SMAX  = np.array([_SOFT_MAX[_jtype(n)]  for n in _SIM_NAMES], dtype=np.float32)
-
-
 def _assemble_obs(
     state_est: np.ndarray,
     cmd_vel: tuple[float, float, float],
+    height_cmd: float,
     q_sim: np.ndarray,
     dq_sim: np.ndarray,
+    q_default: np.ndarray,
     last_action: np.ndarray,
-    height_scan: np.ndarray,
+    sign_flip_idx: list[int] | None = None,
 ) -> np.ndarray:
-    q_rel = (q_sim - _Q_DEF)[_SIM_TO_POLICY]
-    dq    = dq_sim[_SIM_TO_POLICY]
+    state_est = np.asarray(state_est, dtype=np.float32)
+    lin_vel = state_est[0:3] * _LIN_VEL_SCALE
+    ang_vel = state_est[3:6] * _ANG_VEL_SCALE
+    proj_grav = state_est[6:9]
+    cmd = np.asarray(cmd_vel, dtype=np.float32) * _CMD_SCALE
+
+    # sim order == policy order, so no reordering is needed.
+    q_rel = (np.asarray(q_sim, dtype=np.float32)
+             - np.asarray(q_default, dtype=np.float32)) * _DOF_POS_SCALE
+    dq = np.asarray(dq_sim, dtype=np.float32) * _DOF_VEL_SCALE
+    if sign_flip_idx:
+        for i in sign_flip_idx:
+            q_rel[i] *= -1.0
+            dq[i] *= -1.0
+
     return np.concatenate([
-        state_est[:9],
-        np.array(cmd_vel, dtype=np.float32),
+        lin_vel,
+        ang_vel,
+        proj_grav,
+        cmd,
+        np.array([height_cmd], dtype=np.float32),
         q_rel,
         dq,
-        last_action,
-        height_scan,
+        np.asarray(last_action, dtype=np.float32),
     ]).astype(np.float32)
 
 
-def _decode_action(action_policy: np.ndarray) -> np.ndarray:
-    action_sim = action_policy[_POLICY_TO_SIM].copy()
-    for i in _HIP_FLIP_SIM:
-        action_sim[i] *= -1.0
-    q_target = _Q_DEF + action_sim * _SCL
-    return np.clip(q_target, _SMIN, _SMAX)
+def _decode_action(
+    action_policy: np.ndarray,
+    q_default: np.ndarray,
+    scale: np.ndarray,
+    sign_flip_idx: list[int],
+    soft_min: np.ndarray,
+    soft_max: np.ndarray,
+) -> np.ndarray:
+    action = np.asarray(action_policy, dtype=np.float32).copy()
+    for i in sign_flip_idx:
+        action[i] *= -1.0
+    # sim order == policy order, so no reordering is needed.
+    q_target = np.asarray(q_default, dtype=np.float32) + action * np.asarray(scale, dtype=np.float32)
+    return np.clip(q_target, soft_min, soft_max)
 
 
 # ── ROS node ──────────────────────────────────────────────────────────────────
@@ -93,12 +107,13 @@ def _decode_action(action_policy: np.ndarray) -> np.ndarray:
 import os
 import time
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32, Float32MultiArray
 
 from legged_control.kinematics import _smoothstep
 
@@ -122,10 +137,21 @@ class PolicyNodeSim(Node):
         self.declare_parameter("ramp_duration", 2.0)
         self.declare_parameter("lie_down_duration", 2.0)
 
+        share = get_package_share_directory("legged_control")
+        pcfg = self._load_policy_cfg(share)
+        self._q_default = self._build_array(pcfg.get("joint_default_q_urdf", {}), 0.0)
+        self._scale = self._build_array(pcfg.get("action_scale", {}), 0.25)
+        self._soft_min, self._soft_max = self._build_soft_limits(pcfg)
+        # Gazebo uses the dog_urdf training URDF directly → no hip sign flip.
+        self._sign_flip_idx: list[int] = []
+
         model_path = str(self.get_parameter("model_path").value or "").strip()
         if not model_path:
-            share = get_package_share_directory("legged_control")
-            model_path = os.path.join(share, "models", "policy.pt")
+            model_path = str(pcfg.get("model_path", "") or "")
+            if model_path.startswith("__package__/"):
+                model_path = os.path.join(share, model_path[len("__package__/"):])
+        if not model_path:
+            model_path = os.path.join(share, "models", "policy_obs49.pt")
 
         self._policy = None
         if os.path.exists(model_path):
@@ -148,8 +174,8 @@ class PolicyNodeSim(Node):
 
         self._joint_pos: dict[str, float] = {}
         self._joint_vel: dict[str, float] = {}
-        self._state_est  = np.zeros(9,   dtype=np.float32)
-        self._height_scan = np.zeros(325, dtype=np.float32)
+        self._state_est  = np.zeros(9, dtype=np.float32)
+        self._height_cmd = _DEFAULT_HEIGHT_CMD
         self._cmd_vel = (0.0, 0.0, 0.0)
         self._joint_state_seen = False
 
@@ -158,16 +184,38 @@ class PolicyNodeSim(Node):
             JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(
             Float32MultiArray, "/state_estimate", self._on_state, 10)
-        self.create_subscription(
-            Float32MultiArray, "/height_scan", self._on_scan, 10)
+        self.create_subscription(Float32, "/height_command", self._on_height, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_subscription(Bool, "/posture_command", self._on_posture, 10)
         self.create_timer(1.0 / 50.0, self._tick)
 
         self.get_logger().info(
             f"policy_node_sim ready  "
-            f"model={'loaded' if self._policy else 'NOT LOADED'}"
+            f"model={'loaded' if self._policy else 'NOT LOADED'}  obs_dim={OBS_DIM}"
         )
+
+    # ── config ─────────────────────────────────────────────────────────────────
+
+    def _load_policy_cfg(self, share: str) -> dict:
+        try:
+            with open(os.path.join(share, "config", "policy.yaml")) as f:
+                return yaml.safe_load(f).get("policy", {})
+        except Exception:
+            return {}
+
+    def _build_array(self, m: dict, default: float) -> np.ndarray:
+        return np.array([float(m.get(n, default)) for n in _SIM_NAMES], dtype=np.float32)
+
+    def _build_soft_limits(self, pcfg: dict) -> tuple[np.ndarray, np.ndarray]:
+        lims = pcfg.get("joint_soft_limits", {})
+        tm = {
+            "hip":   lims.get("hip",   [-0.45, 0.45]),
+            "thigh": lims.get("thigh", [-1.709, 1.729]),
+            "calf":  lims.get("calf",  [-2.674, -0.406]),
+        }
+        q_min = np.array([float(tm[_jtype(n)][0]) for n in _SIM_NAMES], dtype=np.float32)
+        q_max = np.array([float(tm[_jtype(n)][1]) for n in _SIM_NAMES], dtype=np.float32)
+        return q_min, q_max
 
     # ── subscribers ──────────────────────────────────────────────────────────
 
@@ -180,8 +228,8 @@ class PolicyNodeSim(Node):
     def _on_state(self, msg: Float32MultiArray) -> None:
         self._state_est = np.array(msg.data[:9], dtype=np.float32)
 
-    def _on_scan(self, msg: Float32MultiArray) -> None:
-        self._height_scan = np.array(msg.data[:325], dtype=np.float32)
+    def _on_height(self, msg: Float32) -> None:
+        self._height_cmd = float(msg.data)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         self._cmd_vel = (
@@ -199,7 +247,7 @@ class PolicyNodeSim(Node):
                 self._phase = _LIEDOWN
                 self._phase_start = time.monotonic()
                 self._lie_down_start = list(
-                    self._last_published or _Q_DEF.tolist()
+                    self._last_published or self._q_default.tolist()
                 )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -233,28 +281,30 @@ class PolicyNodeSim(Node):
     def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
-        targets = [alpha * float(q) for q in _Q_DEF]
+        targets = [alpha * float(q) for q in self._q_default]
         return targets, elapsed >= ramp
 
     def _liedown_targets(self, elapsed: float) -> tuple[list[float], bool]:
         dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / dur)
-        start = self._lie_down_start or _Q_DEF.tolist()
+        start = self._lie_down_start or self._q_default.tolist()
         return [(1.0 - alpha) * s for s in start], elapsed >= dur
 
     def _run_inference(self) -> list[float]:
         pos = self._current_pos()
         vel = self._current_vel()
         if pos is None or vel is None or self._policy is None:
-            return _Q_DEF.tolist()
+            return self._q_default.tolist()
 
         obs = _assemble_obs(
             self._state_est,
             self._cmd_vel,
+            self._height_cmd,
             np.array(pos, dtype=np.float32),
             np.array(vel, dtype=np.float32),
+            self._q_default,
             self._last_action,
-            self._height_scan,
+            self._sign_flip_idx,
         )
         try:
             import torch
@@ -269,10 +319,13 @@ class PolicyNodeSim(Node):
                 f"[policy_sim] inference error: {e}",
                 throttle_duration_sec=1.0,
             )
-            return _Q_DEF.tolist()
+            return self._q_default.tolist()
 
         self._last_action = action.copy()
-        return _decode_action(action).tolist()
+        return _decode_action(
+            action, self._q_default, self._scale,
+            self._sign_flip_idx, self._soft_min, self._soft_max,
+        ).tolist()
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
@@ -297,7 +350,7 @@ class PolicyNodeSim(Node):
             targets, done = self._standup_targets(elapsed)
             self._publish(targets)
             ramp = float(self.get_parameter("ramp_duration").value)
-            if done and self._is_near(_Q_DEF.tolist(), _STANDUP_TOL) and self._is_settled():
+            if done and self._is_near(self._q_default.tolist(), _STANDUP_TOL) and self._is_settled():
                 self._phase = _WAIT
                 self._phase_start = now
                 self.get_logger().info("[policy_sim] standup complete -> WAIT")
@@ -308,7 +361,7 @@ class PolicyNodeSim(Node):
             return
 
         if self._phase == _WAIT:
-            self._publish(_Q_DEF.tolist())
+            self._publish(self._q_default.tolist())
             if self._joint_state_seen and any(abs(v) > 1e-4 for v in self._cmd_vel):
                 self._phase = _POLICY
                 self._phase_start = now

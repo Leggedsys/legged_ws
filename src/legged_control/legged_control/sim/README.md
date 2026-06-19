@@ -33,9 +33,9 @@
 ```
 Gazebo IMU (URDF 插件) ──→ /odin1/imu → imu_filter → /odin1/imu/filtered ──┐
 Gazebo joints ──→ control_bridge ──→ /joint_states_aggregated ──────────────┤
-Gazebo depth (URDF 插件) ──→ /camera/depth/* ──→ height_scan ──→ /height_scan ──┤
-joy_node ──→ teleop ──→ /cmd_vel ───────────────────────────────────────────┤
+joy_node ──→ teleop ──→ /cmd_vel + /height_command ─────────────────────────┤
                                                                               ├──→ policy_node
+                            (盲策略：49 维观测，无高程扫描)                    │
                                                                               │
                                以上全部是 processing/ 层节点，sim 只做数据源
 ```

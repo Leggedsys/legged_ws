@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import setup, find_packages
 
 package_name = "legged_control"
@@ -20,7 +22,7 @@ setup(
         ),
         (
             "share/" + package_name + "/models",
-            ["models/policy.pt"],
+            glob("models/*.pt"),
         ),
         (
             "share/" + package_name + "/launch",
@@ -47,7 +49,6 @@ setup(
             "urdf_joint_state_bridge = legged_control.real.urdf_joint_state_bridge:main",
             "gazebo_control_bridge = legged_control.sim.gazebo_control_bridge:main",
             "state_estimator_node  = legged_control.processing.state_estimator_node:main",
-            "height_scan_node      = legged_control.processing.height_scan_node:main",
             "obs_assembler         = legged_control.processing.obs_assembler:main",
             "policy_node           = legged_control.policy_node:main",
             "policy_node_sim       = legged_control.sim.policy_node_sim:main",

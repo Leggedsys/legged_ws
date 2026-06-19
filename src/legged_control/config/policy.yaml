@@ -1,48 +1,53 @@
 policy:
   # Absolute path to TorchScript .pt file. Override at launch with:
   #   ros2 launch legged_control robot.launch.py mode:=policy model_path:=/path/to/policy.pt
-  model_path: "__package__/models/policy.pt"
+  # Exported from legged_gym dog_urdf checkpoint (49-dim obs, 4*tanh squashing).
+  model_path: "__package__/models/policy_obs49.pt"
 
   # Default stance pose in URDF frame (training convention), yaml joint order.
-  # These values come from the training config (hip=0.0, thigh=0.7, calf=-1.2).
+  # From dog_urdf_config.default_joint_angles: hip=0.1, front thigh=0.8, rear thigh=1.0,
+  # calf=-1.5. Used as the offset subtracted from joint feedback in the obs.
   # IMPORTANT: verify against hardware in passive mode before first policy run.
   joint_default_q_urdf:
-    FR_hip:    0.0
-    FR_thigh:  0.7
+    FR_hip:    0.1
+    FR_thigh:  0.8
     FR_calf:  -1.5
-    FL_hip:    0.0
-    FL_thigh:  0.7
+    FL_hip:    0.1
+    FL_thigh:  0.8
     FL_calf:  -1.5
-    RR_hip:    0.0
-    RR_thigh:  0.7
+    RR_hip:    0.1
+    RR_thigh:  1.0
     RR_calf:  -1.5
-    RL_hip:    0.0
-    RL_thigh:  0.7
+    RL_hip:    0.1
+    RL_thigh:  1.0
     RL_calf:  -1.5
 
-  # Per-joint action scale, yaml order
+  # Uniform action scale (dog_urdf_config.control.action_scale = 0.25).
+  # Raw policy output is already 4*tanh(...) (range +/-4), so the joint residual
+  # range is +/-1.0 rad around default_q.
   action_scale:
-    FR_hip:   0.15
-    FR_thigh: 0.20
-    FR_calf:  0.15
-    FL_hip:   0.15
-    FL_thigh: 0.20
-    FL_calf:  0.15
-    RR_hip:   0.15
-    RR_thigh: 0.20
-    RR_calf:  0.15
-    RL_hip:   0.15
-    RL_thigh: 0.20
-    RL_calf:  0.15
+    FR_hip:   0.25
+    FR_thigh: 0.25
+    FR_calf:  0.25
+    FL_hip:   0.25
+    FL_thigh: 0.25
+    FL_calf:  0.25
+    RR_hip:   0.25
+    RR_thigh: 0.25
+    RR_calf:  0.25
+    RL_hip:   0.25
+    RL_thigh: 0.25
+    RL_calf:  0.25
 
-  # Joints where the training URDF sign differs from deployment URDF.
-  # These are negated before action decode.
+  # Joints where the training URDF sign differs from the deployment URDF.
+  # Negated in both obs assembly and action decode.
+  # IMPORTANT: re-verify on hardware — wrong flip makes the hip drive the wrong way.
   hip_sign_flip: [FR_hip, RR_hip]
 
   # Soft joint limits in URDF frame used to clip policy output (POLICY phase only).
-  # Derived from training hard limits with 0.9× range, symmetric around midpoint.
-  # Standup/liedown uses robot.yaml q_min/q_max (hardware limits) instead.
+  # 0.9x of the dog_urdf hard limits (hip [-0.5,0.5], thigh [-1.90,1.92], calf [-2.80,-0.28]),
+  # symmetric about each joint midpoint.
   joint_soft_limits:
     hip:   [-0.450,  0.450]
-    thigh: [-1.480,  1.400]
-    calf:  [-2.295, -0.405]
+    thigh: [-1.709,  1.729]
+    calf:  [-2.674, -0.406]

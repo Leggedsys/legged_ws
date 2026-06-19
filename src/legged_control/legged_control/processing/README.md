@@ -20,31 +20,19 @@
 | 订阅 | `odin1/imu/filtered` | `sensor_msgs/Imu` |
 | 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState` (URDF frame) |
 
-### height_scan_node
-
-**职责：** 将深度图投射到 `base_link` 平面，生成 325 格高度扫描。
-
-网格：x ∈ [0.10, 1.30] m，y ∈ [−0.30, +0.30] m，步长 0.05 m。格值 = −z_terrain（地面低于 base_link 为正）。
-
-依赖 TF：`base_link → camera_link`（已由 URDF 固定关节定义）。
-
-| | Topic | 类型 |
-|---|---|---|
-| 发布 | `/height_scan` | `std_msgs/Float32MultiArray` (325 floats) |
-| 发布 | `/height_scan_cloud` | `sensor_msgs/PointCloud2` (RViz) |
-| 订阅 | `/camera/depth/image_rect_raw` | `sensor_msgs/Image` |
-| 订阅 | `/camera/depth/camera_info` | `sensor_msgs/CameraInfo` |
+> **注意：** 当前为盲策略（49 维观测，无高程扫描）。原 `height_scan_node` 已移除；若将来训练感知策略需要重新引入。
 
 ### teleop_node
 
-**职责：** 手柄 (`/joy`) → 速度指令 (`/cmd_vel`) + 姿态指令 (`/posture_command`)。
+**职责：** 手柄 (`/joy`) → 速度指令 (`/cmd_vel`) + 姿态指令 (`/posture_command`) + 目标高度 (`/height_command`)。
 
-轴映射、死区、反转均由 `robot.yaml` 的 `teleop` 段配置。
+轴映射、死区、反转均由 `robot.yaml` 的 `teleop` 段配置。LT/RT 触发积分成目标站立高度（0.15–0.28 m）。
 
 | | Topic | 类型 |
 |---|---|---|
 | 发布 | `/cmd_vel` | `geometry_msgs/Twist` |
 | 发布 | `/posture_command` | `std_msgs/Bool` |
+| 发布 | `/height_command` | `std_msgs/Float32` |
 | 订阅 | `/joy` | `sensor_msgs/Joy` |
 
 ---
@@ -56,8 +44,7 @@
 ─────────────────────────────────────────────────────────────────────────
 /joint_states_aggregated  →  state_estimator_node   →  /state_estimate (policy)
 odin1/imu/filtered        →  state_estimator_node
-/camera/depth/*           →  height_scan_node       →  /height_scan (policy)
-/joy                      →  teleop_node            →  /cmd_vel (policy)
+/joy                      →  teleop_node            →  /cmd_vel + /height_command (policy)
 ```
 
 ## 数据源来源

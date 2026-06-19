@@ -23,7 +23,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from legged_control.launch_common import (
-    make_state_estimator, make_height_scan, make_teleop,
+    make_state_estimator, make_teleop,
     make_obs_assembler, make_robot_state_publisher,
     make_monitor_node, make_vel_viz, make_rviz2,
 )
@@ -61,7 +61,7 @@ def _launch_setup(context, *args, **kwargs):
 
     # ── processing + obs ─────────────────────────────────────────────────
     nodes += [
-        make_state_estimator(), make_height_scan(), make_teleop(),
+        make_state_estimator(), make_teleop(),
         make_obs_assembler(),
     ]
 

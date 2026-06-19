@@ -1,17 +1,20 @@
 """obs_assembler
 
-Subscribes to 5 observation-source topics and assembles the full
-373-dim observation vector used by the policy.
+Assembles the 49-dim observation vector consumed by the dog_urdf blind policy
+(legged_gym compute_observations with include_lin_vel=True, num_commands=5).
 
-This is the canonical obs assembly point — policy_node subscribes to
-/observation for inference input.
+obs layout (with obs_scales applied, matching training):
+  [0:3]   base_lin_vel        * 2.0    from /state_estimate[0:3]
+  [3:6]   base_ang_vel        * 0.25   from /state_estimate[3:6]
+  [6:9]   projected_gravity   * 1.0    from /state_estimate[6:9]
+  [9:12]  cmd (vx, vy, yaw)   * (2.0, 2.0, 0.25)   from /cmd_vel
+  [12:13] height command      * 1.0 (raw)          from /height_command
+  [13:25] (q - q_default)     * 1.0    /joint_states_aggregated (yaml -> policy order)
+  [25:37] dof_vel             * 0.05   /joint_states_aggregated (yaml -> policy order)
+  [37:49] last_action         raw      /raw_policy_action (policy order)
 
-Topics subscribed:
-  /joint_states_aggregated    JointState         12 URDF-frame joints
-  /state_estimate             Float32MultiArray  9 floats (lin_vel, ang_vel, proj_grav)
-  /height_scan                Float32MultiArray  325 floats
-  /cmd_vel                    Twist              velocity commands
-  /raw_policy_action          Float32MultiArray  12 floats (raw policy output)
+This is the canonical obs assembly point — policy_node subscribes to /observation
+for inference input.
 """
 
 from __future__ import annotations
@@ -25,7 +28,20 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray
+
+OBS_DIM = 49
+
+# obs_scales from legged_gym normalization.obs_scales (dog_urdf training config)
+_LIN_VEL_SCALE = 2.0
+_ANG_VEL_SCALE = 0.25
+_DOF_POS_SCALE = 1.0
+_DOF_VEL_SCALE = 0.05
+# commands_scale = [lin_vel, lin_vel, ang_vel]; height command is appended unscaled
+_CMD_SCALE = np.array([_LIN_VEL_SCALE, _LIN_VEL_SCALE, _ANG_VEL_SCALE], dtype=np.float32)
+
+# Default height command when none has been received yet (mid stance, metres).
+_DEFAULT_HEIGHT_CMD = 0.22
 
 _YAML_JOINT_NAMES = [
     "FR_hip", "FR_thigh", "FR_calf",
@@ -34,6 +50,8 @@ _YAML_JOINT_NAMES = [
     "RL_hip", "RL_thigh", "RL_calf",
 ]
 
+# dog_urdf DOF order (URDF joint declaration order = isaacgym DOF order).
+# IMPORTANT: verify against hardware before first policy run.
 _POLICY_JOINT_NAMES = [
     "FL_hip", "FL_thigh", "FL_calf",
     "FR_hip", "FR_thigh", "FR_calf",
@@ -45,32 +63,43 @@ _YAML_TO_POLICY = [_YAML_JOINT_NAMES.index(n) for n in _POLICY_JOINT_NAMES]
 
 
 def reorder_yaml_to_policy(yaml_vec: np.ndarray) -> np.ndarray:
-    return yaml_vec[_YAML_TO_POLICY]
+    return np.asarray(yaml_vec, dtype=np.float32)[_YAML_TO_POLICY]
 
 
 def _assemble(
     state_estimate: np.ndarray,
     cmd_vel: tuple[float, float, float],
+    height_cmd: float,
     joint_pos_urdf: np.ndarray,
     joint_vel_urdf: np.ndarray,
     q_default_urdf: np.ndarray,
     last_action: np.ndarray,
-    height_scan: np.ndarray,
     sign_flip_policy_idx: list[int] | None = None,
 ) -> np.ndarray:
-    joint_pos_rel = reorder_yaml_to_policy(joint_pos_urdf - q_default_urdf)
-    joint_vel = reorder_yaml_to_policy(joint_vel_urdf)
+    state_estimate = np.asarray(state_estimate, dtype=np.float32)
+    lin_vel = state_estimate[0:3] * _LIN_VEL_SCALE
+    ang_vel = state_estimate[3:6] * _ANG_VEL_SCALE
+    proj_grav = state_estimate[6:9]
+    cmd = np.asarray(cmd_vel, dtype=np.float32) * _CMD_SCALE
+
+    joint_pos_rel = reorder_yaml_to_policy(
+        np.asarray(joint_pos_urdf, dtype=np.float32) - np.asarray(q_default_urdf, dtype=np.float32)
+    ) * _DOF_POS_SCALE
+    joint_vel = reorder_yaml_to_policy(joint_vel_urdf) * _DOF_VEL_SCALE
     if sign_flip_policy_idx:
         for idx in sign_flip_policy_idx:
             joint_pos_rel[idx] *= -1.0
             joint_vel[idx] *= -1.0
+
     return np.concatenate([
-        state_estimate[:9],
-        np.array(cmd_vel, dtype=np.float32),
+        lin_vel,
+        ang_vel,
+        proj_grav,
+        cmd,
+        np.array([height_cmd], dtype=np.float32),
         joint_pos_rel,
         joint_vel,
-        last_action,
-        height_scan,
+        np.asarray(last_action, dtype=np.float32),
     ]).astype(np.float32)
 
 
@@ -81,7 +110,7 @@ class ObsAssemblerNode(Node):
         self._q_default_urdf = self._load_q_default()
         self._sign_flip_policy_idx = self._load_sign_flip_policy_idx()
         self._state_estimate = np.zeros(9, dtype=np.float32)
-        self._height_scan = np.zeros(325, dtype=np.float32)
+        self._height_cmd = _DEFAULT_HEIGHT_CMD
         self._cmd_vel = (0.0, 0.0, 0.0)
         self._joint_pos = np.zeros(12, dtype=np.float32)
         self._joint_vel = np.zeros(12, dtype=np.float32)
@@ -89,13 +118,13 @@ class ObsAssemblerNode(Node):
 
         self._pub = self.create_publisher(Float32MultiArray, "/observation", 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
-        self.create_subscription(Float32MultiArray, "/height_scan", self._on_scan, 10)
+        self.create_subscription(Float32, "/height_command", self._on_height, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/raw_policy_action", self._on_raw_action, 10)
 
         self.create_timer(0.02, self._publish)
-        self.get_logger().info("obs_assembler ready — /observation (373 floats)")
+        self.get_logger().info(f"obs_assembler ready — /observation ({OBS_DIM} floats)")
 
     def _load_q_default(self) -> np.ndarray:
         share = get_package_share_directory("legged_control")
@@ -121,8 +150,8 @@ class ObsAssemblerNode(Node):
     def _on_state(self, msg: Float32MultiArray) -> None:
         self._state_estimate = np.array(msg.data[:9], dtype=np.float32)
 
-    def _on_scan(self, msg: Float32MultiArray) -> None:
-        self._height_scan = np.array(msg.data[:325], dtype=np.float32)
+    def _on_height(self, msg: Float32) -> None:
+        self._height_cmd = float(msg.data)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         self._cmd_vel = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
@@ -141,11 +170,11 @@ class ObsAssemblerNode(Node):
         obs = _assemble(
             self._state_estimate,
             self._cmd_vel,
+            self._height_cmd,
             self._joint_pos,
             self._joint_vel,
             self._q_default_urdf,
             self._last_action,
-            self._height_scan,
             self._sign_flip_policy_idx,
         )
         out = Float32MultiArray()

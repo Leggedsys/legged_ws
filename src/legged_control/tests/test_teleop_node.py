@@ -7,9 +7,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from legged_control.processing.teleop_node import (
     _apply_deadzone,
     _button_is_rising_edge,
+    _integrate_height,
     _normalize_trigger_axis,
     _scale_axis,
 )
+
+
+class TestIntegrateHeight:
+    def test_positive_rate_raises_height(self):
+        assert _integrate_height(0.20, 0.03, 1.0, 0.15, 0.28) == pytest.approx(0.23)
+
+    def test_negative_rate_lowers_height(self):
+        assert _integrate_height(0.20, -0.03, 1.0, 0.15, 0.28) == pytest.approx(0.17)
+
+    def test_clamped_to_max(self):
+        assert _integrate_height(0.27, 0.10, 1.0, 0.15, 0.28) == pytest.approx(0.28)
+
+    def test_clamped_to_min(self):
+        assert _integrate_height(0.16, -0.10, 1.0, 0.15, 0.28) == pytest.approx(0.15)
+
+    def test_zero_rate_holds(self):
+        assert _integrate_height(0.22, 0.0, 0.5, 0.15, 0.28) == pytest.approx(0.22)
 
 
 class TestApplyDeadzone:

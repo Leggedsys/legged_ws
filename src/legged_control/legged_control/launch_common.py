@@ -22,13 +22,6 @@ def make_state_estimator(config_path: str = ""):
     )
 
 
-def make_height_scan():
-    return Node(
-        package="legged_control", executable="height_scan_node",
-        name="height_scan_node", output="log",
-    )
-
-
 def make_teleop():
     return Node(
         package="legged_control", executable="teleop_node",

@@ -61,13 +61,23 @@ def _button_is_rising_edge(previous: int, current: int) -> bool:
     return previous == 0 and current == 1
 
 
+def _integrate_height(current: float, rate: float, dt: float,
+                      lo: float, hi: float) -> float:
+    """Integrate a height rate (m/s) into an absolute target height, clamped.
+
+    Used to turn the LT/RT trigger rate into the absolute stance-height command
+    the policy expects on /height_command.
+    """
+    return max(lo, min(hi, current + rate * dt))
+
+
 # ROS2-dependent node class (only define if ROS2 is available)
 try:
     import rclpy
     from rclpy.node import Node
     from sensor_msgs.msg import Joy
     from geometry_msgs.msg import Twist
-    from std_msgs.msg import Bool
+    from std_msgs.msg import Bool, Float32
     from ament_index_python.packages import get_package_share_directory
 
     class TeleopNode(Node):
@@ -97,6 +107,10 @@ try:
             self._axis_lt = int(cfg.get("axis_lt", 2))
             self._axis_rt = int(cfg.get("axis_rt", 5))
             self._max_dz = float(cfg.get("max_dz", 0.03))
+            self._height_min = float(cfg.get("height_min", 0.15))
+            self._height_max = float(cfg.get("height_max", 0.28))
+            self._height_target = float(cfg.get("height_init", 0.22))
+            self._last_joy_time: float | None = None
             self._prev_posture_toggle = 0
             self._posture_standing = False
             self._lt_released_raw: float | None = None
@@ -105,6 +119,7 @@ try:
 
             self._pub = self.create_publisher(Twist, "/cmd_vel", 10)
             self._posture_command_pub = self.create_publisher(Bool, "/posture_command", 10)
+            self._height_pub = self.create_publisher(Float32, "/height_command", 10)
             self.create_subscription(Joy, "/joy", self._on_joy, 10)
             self.get_logger().info(
                 f"teleop_node ready  "
@@ -121,6 +136,11 @@ try:
         def _on_joy(self, msg: Joy) -> None:
             twist = Twist()
             buttons = msg.buttons
+
+            now = self.get_clock().now().nanoseconds * 1e-9
+            dt = 0.0 if self._last_joy_time is None else max(0.0, min(0.1, now - self._last_joy_time))
+            self._last_joy_time = now
+            height_rate = 0.0
 
             posture_toggle_state = (
                 buttons[self._btn_posture_toggle]
@@ -179,6 +199,7 @@ try:
                     False,
                 )
                 twist.linear.z = rt - lt
+                height_rate = rt - lt
 
             else:
                 # E-stop active — publish zero twist and trigger lie-down once
@@ -186,6 +207,14 @@ try:
                     self._estop_lying_down = True
                     self._posture_command_pub.publish(Bool(data=False))
                     self.get_logger().warn("E-STOP: posture_command=false → lie-down")
+
+            # Integrate trigger rate into the absolute stance-height command the
+            # policy consumes (held during e-stop since height_rate stays 0).
+            self._height_target = _integrate_height(
+                self._height_target, height_rate, dt,
+                self._height_min, self._height_max,
+            )
+            self._height_pub.publish(Float32(data=float(self._height_target)))
 
             self._pub.publish(twist)
 

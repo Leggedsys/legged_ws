@@ -16,13 +16,13 @@
 | 关节速度 | `/joint_states_aggregated` |
 | 机身线速度 / 角速度 / 重力投影 | `/state_estimate` |
 | 速度指令 | `/cmd_vel` |
-| 高程图统计 (mean/std/min/max) | `/height_scan` |
+| 目标高度 | `/height_command` |
 
 | | Topic | 类型 |
 |---|---|---|
 | 订阅 | `/joint_states_aggregated` | `sensor_msgs/JointState` |
 | 订阅 | `/state_estimate` | `std_msgs/Float32MultiArray` (9 floats) |
-| 订阅 | `/height_scan` | `std_msgs/Float32MultiArray` (325 floats) |
+| 订阅 | `/height_command` | `std_msgs/Float32` |
 | 订阅 | `/cmd_vel` | `geometry_msgs/Twist` |
 
 ### vel_viz_node
@@ -45,7 +45,6 @@
 | 面板 | 话题 | 说明 |
 |------|------|------|
 | RobotModel | `/robot_description` | URDF 模型 |
-| HeightScan | `/height_scan_cloud` | 高程扫描绿点云 |
 | VelocityArrows | `/vel_viz` | 速度箭头 |
 | OdinCloudRender | `/odin1/cloud_render` | Odin RGB 着色点云 |
 | OdinCloudRaw | `/odin1/cloud_raw` | Odin 强度点云 |

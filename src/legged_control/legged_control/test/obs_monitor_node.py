@@ -3,7 +3,7 @@
 Subscribes:
   /joint_states_aggregated  (sensor_msgs/JointState)
   /state_estimate           (std_msgs/Float32MultiArray, 9 floats)
-  /height_scan              (std_msgs/Float32MultiArray, 325 floats)
+  /height_command           (std_msgs/Float32, target stance height)
   /cmd_vel                  (geometry_msgs/Twist)
 
 Displays the full RL observation space in the terminal at 2 Hz.
@@ -21,7 +21,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32, Float32MultiArray
 
 _YAML_JOINT_NAMES = [
     "FR_hip", "FR_thigh", "FR_calf",
@@ -52,7 +52,7 @@ class PassiveMonitorNode(Node):
         self._joint_pos = np.full(12, float("nan"))
         self._joint_vel = np.full(12, float("nan"))
         self._state_estimate = np.zeros(9)
-        self._height_scan = np.zeros(325)
+        self._height_cmd = 0.0
         self._cmd_vel = (0.0, 0.0, 0.0)
 
         # Load hardware limits (motor frame) and convert to URDF frame
@@ -81,7 +81,7 @@ class PassiveMonitorNode(Node):
 
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
-        self.create_subscription(Float32MultiArray, "/height_scan", self._on_scan, 10)
+        self.create_subscription(Float32, "/height_command", self._on_height, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
 
         try:
@@ -104,8 +104,8 @@ class PassiveMonitorNode(Node):
     def _on_state(self, msg: Float32MultiArray) -> None:
         self._state_estimate = np.array(msg.data[:9])
 
-    def _on_scan(self, msg: Float32MultiArray) -> None:
-        self._height_scan = np.array(msg.data[:325])
+    def _on_height(self, msg: Float32) -> None:
+        self._height_cmd = float(msg.data)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         self._cmd_vel = (msg.linear.x, msg.linear.y, msg.angular.z)
@@ -143,9 +143,8 @@ class PassiveMonitorNode(Node):
             f"│  proj_grav  gx={pg[0]:+6.3f}  gy={pg[1]:+6.3f}  gz={pg[2]:+6.3f}     │",
             "│ COMMAND                                                  │",
             f"│  vx={vx:+6.3f}  vy={vy:+6.3f}  wz={wz:+6.3f}                   │",
-            "│ HEIGHT SCAN                                              │",
-            f"│  mean={np.nanmean(self._height_scan):+6.3f}  std={np.nanstd(self._height_scan):5.3f}  "
-            f"min={np.nanmin(self._height_scan):+6.3f}  max={np.nanmax(self._height_scan):+6.3f}  │",
+            "│ HEIGHT CMD                                               │",
+            f"│  target={self._height_cmd:+6.3f} m                                  │",
             "└──────────────────────────────────────────────────────────┘",
         ]
         text = "\n".join(lines)
