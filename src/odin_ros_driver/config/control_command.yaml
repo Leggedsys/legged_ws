@@ -73,7 +73,7 @@ register_keys:
   showpath: 1             # 0: off; 1: on
   showcamerapose: 0       # 0: off; 1: on
   
-  custom_map_mode: 2      # 0: Odometry mode 1: SLAM mode 2: Relocalization mode
+  custom_map_mode: 0      # 0: Odometry mode 1: SLAM mode 2: Relocalization mode
   custom_init_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
   relocalization_map_abs_path: "/home/shijue/legged_ws/src/odin_ros_driver/map/map_20260322_204555.bin" # must be set for Relocalization mode or will fail
 

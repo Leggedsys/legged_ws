@@ -283,11 +283,20 @@ elseif(ROS_VERSION STREQUAL "ROS2")
         tf2_geometry_msgs
     )
     
-    add_library(pointcloud_depth_converter_ros2 src/pointcloud_depth_converter.cpp)
-    target_link_libraries(pointcloud_depth_converter_ros2
-        ${OpenCV_LIBS}
-        ${PCL_LIBRARIES}
-    )
+     add_library(pointcloud_depth_converter_ros2 src/pointcloud_depth_converter.cpp)
+     target_link_libraries(pointcloud_depth_converter_ros2
+         ${OpenCV_LIBS}
+         ${PCL_LIBRARIES}
+     )
+     ament_target_dependencies(pointcloud_depth_converter_ros2
+         rclcpp
+         sensor_msgs
+         std_msgs
+         cv_bridge
+         image_transport
+         pcl_conversions
+         message_filters
+     )
     
     add_library(depth_image_ros2_node_lib src/depth_image_ros2_node.cpp)
     target_link_libraries(depth_image_ros2_node_lib

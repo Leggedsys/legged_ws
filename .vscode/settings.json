@@ -1,0 +1,16 @@
+{
+    "ros.distro": "humble",
+    "python.autoComplete.extraPaths": [
+        "/home/grayerd/Desktop/Projects/rc/legged_ws/install/unitree_actuator_sdk/lib/python3.10/site-packages",
+        "/home/grayerd/Desktop/Projects/rc/legged_ws/install/legged_control/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/grayerd/Desktop/Projects/rc/legged_ws/install/unitree_actuator_sdk/lib/python3.10/site-packages",
+        "/home/grayerd/Desktop/Projects/rc/legged_ws/install/legged_control/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ],
+    "ROS2.distro": "humble"
+}

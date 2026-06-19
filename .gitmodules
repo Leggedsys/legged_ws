@@ -1,0 +1,3 @@
+[submodule "src/dog_urdf"]
+	path = src/dog_urdf
+	url = git@github.com:Leggedsys/dog_urdf.git
