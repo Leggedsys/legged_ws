@@ -14,10 +14,11 @@
 - **难点**：Unitree 电机 kp/kd 单位 ≠ Isaac stiffness，且涉及 6.33 减速比；不能直接填 20。
 - **行动**：先确认电机 kp 单位与 sim stiffness 的换算关系，再定值。代码目前完全没有这层换算。
 
-### [ ] 2. 状态估计的机身线速度坐标系错误
-- **位置**：`legged_control/processing/state_estimator_node.py:111-119`
-- **问题**：训练 `base_lin_vel` 是机身系；VIO `_odom_lin_vel` 是世界系，`R_body = R_yaw.T` 算了却没乘 → 发布的是世界系速度。腿运动学 fallback 返回机身系 → 两路坐标系还不一致。航向一变 obs[0:3] 即错。
-- **行动**：把 VIO 速度用 `R_body` 旋到机身系；统一两条路径坐标系；加单测。（纯代码 bug，可直接修）
+### [x] 2. VIO 线速度坐标系 — 查证后判定无需 R_body（结论：机身系）
+- **依据**：驱动 `host_sdk_sample.h:1100 publishOdometry` 设 `frame_id="odom"`、`child_frame_id="odin1_base_link"`，`twist.linear` 取自 SDK `linear_velocity`。按 ROS REP-105 / `nav_msgs/Odometry` 约定，**twist 表达在 child_frame（odin1_base_link 机身系）**。话题名 `odin1/odometry` 与订阅一致（非 bug）。
+- **结合**：用户已实测 Odin 系与机身**同向** → 速度已在机器人机身系，**无需 R_body**；原代码（没乘）即正确，腿运动学 fallback 也是机身系，两路一致。
+- **已修复**：删除未用的 `R_yaw/R_body` 及其 import，更正 `_odom_lin_vel` 注释为 body frame，并说明依据。
+- **保留确认**：厂商无文档白纸黑字写 twist 的系；最终以 yaw 实验坐实（原地转 yaw + 固定世界方向平移，看 twist 跟不跟机头）。轴向另需确认为 FLU（x前/y左/z上）以对齐训练。
 
 ---
 
@@ -55,18 +56,18 @@
 
 ## ⚪ 小（清理）
 
-- [x] 9. 死代码：`motor_command_bridge._max_delta` 已删。`state_estimator.R_body` **暂留**——它和 #2（线速度坐标系）绑定，等 #2 测定后一并处理（要么用它、要么删）。
+- [x] 9. 死代码：`motor_command_bridge._max_delta` 已删；`state_estimator` 的 `R_yaw/R_body` 及其 import 已随 #2 一并删除。
 - [x] 10. **更正：并非死代码。** `motor_bus_node.py:93-94` 确实用 `kp_calf/kd_calf` 作为 calf 关节的分组增益回退。无需改动。真正需要关注的是“统一 vs 分关节增益”，归入 #1（增益）一并定。
 - [x] 11. **判定为有意为之，不合并。** 真机 `_decode_action` 需要 policy→yaml 重排，仿真不需要（sim 序==policy 序）；两者本质不同，强行合并只会引入耦合。保留两份，已在各自文件注明。
 
 ---
 
 ## 进度小结（2026-06-20）
-- 已修复并通过测试（96 passed / 1 skipped）：**#4 #5 #6 #7 #8 #9(部分) #10 #11**。
+- 已处理：**#2 #4 #5 #6 #7 #8 #9 #10 #11**。
+  - #2 判定无需 R_body（依据驱动源码 + ROS 约定 + 同向实测），待 yaw 实验最终坐实。
 - 待硬件确认后处理：**#1（PD 增益换算）**、**#3（正负号/偏置双重修正合并）**。
-- 待 #2 测定（twist 是否世界系）后处理：**#2** 及随附的 `R_body` 去留（#9 剩余部分）。
 
 ## 处理顺序建议
-1. **#2**：按方法 1/2 实测 Odin twist 坐标系 → 决定加/删 R_body。
-2. **#1**：确认 Unitree 电机 kp 单位与 sim stiffness 换算 → 定增益值。
-3. **#3**：把 robot.yaml 标定到训练 URDF 系，消除与 hip_sign_flip 的双重修正。
+1. **#1**：确认 Unitree 电机 kp 单位与 sim stiffness 换算 → 定增益值。
+2. **#3**：把 robot.yaml 标定到训练 URDF 系，消除与 hip_sign_flip 的双重修正。
+3. **#2 收尾**：做一次 yaw 实验坐实 twist 为机身系；并确认轴向为 FLU。

@@ -33,7 +33,6 @@ from std_msgs.msg import Float32MultiArray
 from legged_control.kinematics import (
     leg_kinematic_velocity,
     projected_gravity_from_quat,
-    yaw_rotation_matrix,
 )
 
 _LEG_ORDER = ("FL", "FR", "RL", "RR")
@@ -81,8 +80,11 @@ class StateEstimatorNode(Node):
         self._imu_ready = False
         self._proj_grav = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
-        # VIO odometry
-        self._odom_lin_vel = np.zeros(3)       # world frame m/s
+        # VIO odometry. /odin1/odometry twist is expressed in child_frame
+        # (odin1_base_link), i.e. already the body frame — see driver
+        # publishOdometry (frame_id=odom, child_frame_id=odin1_base_link) and
+        # ROS REP-105. No world->body rotation is applied here.
+        self._odom_lin_vel = np.zeros(3)       # body frame m/s (odin1_base_link)
         self._odom_stamp: float | None = None  # monotonic timestamp
 
         self._pub = self.create_publisher(Float32MultiArray, "/state_estimate", 10)
@@ -122,11 +124,10 @@ class StateEstimatorNode(Node):
         self._odom_stamp = time.monotonic()
 
     def _estimate_velocity(self) -> np.ndarray:
-        R_yaw = yaw_rotation_matrix(*self._quat)
-        R_body = R_yaw.T  # world → yaw-aligned body frame
         now = time.monotonic()
 
-        # Primary: VIO odometry (camera + IMU, accurate body velocity)
+        # Primary: VIO odometry, already in body frame (odin1_base_link, aligned
+        # with the robot body) — used as-is, no rotation needed.
         if self._odom_stamp is not None and (now - self._odom_stamp) < _ODOM_TIMEOUT:
             self._lin_vel = 0.6 * self._odom_lin_vel + 0.4 * self._lin_vel
             return self._lin_vel
