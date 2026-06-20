@@ -37,9 +37,7 @@ class MotorCommandBridge(Node):
         self._joint_cfg = {j["name"]: j for j in cfg["joints"]}
         self._names = [j["name"] for j in cfg["joints"]]
         control = cfg.get("control", {})
-        self._max_joint_speed = float(control.get("max_joint_speed", 3.0))
-        self._gait_hz = float(control.get("gait_hz", 50.0))
-        self._max_delta = self._max_joint_speed / self._gait_hz
+        self._max_joint_speed = float(control.get("max_joint_speed", 12.0))
         self._last_cmd: dict[str, float] = {n: 0.0 for n in self._names}
         self._last_time: float | None = None
 

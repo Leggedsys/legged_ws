@@ -6,10 +6,12 @@ Subscribes:
   /joint_states_aggregated  (sensor_msgs/JointState)   — URDF-frame joint states
 
 Publishes:
-  /state_estimate (std_msgs/Float32MultiArray, 9 floats)
+  /state_estimate (std_msgs/Float32MultiArray, 10 floats)
     data[0:3] = base_lin_vel in yaw frame (m/s)
     data[3:6] = base_ang_vel in body frame (rad/s)
     data[6:9] = projected_gravity in body frame (unit vector)
+    data[9]   = health flag (1.0 = usable, 0.0 = IMU not ready)
+                obs_assembler reads only data[:9]; policy_node gates on data[9].
 
 Velocity: prefers VIO odometry (stable, no foot-slip assumption).
 Falls back to leg kinematics if odometry is unavailable.
@@ -36,6 +38,17 @@ from legged_control.kinematics import (
 
 _LEG_ORDER = ("FL", "FR", "RL", "RR")
 _ODOM_TIMEOUT = 0.15  # seconds before VIO considered stale
+
+
+def _accept_gravity(raw: np.ndarray) -> bool:
+    """Accept a projected-gravity sample iff it is a valid unit vector.
+
+    Only the magnitude is checked — the direction is trusted at any tilt so the
+    estimate keeps tracking through large pitch/roll (a directional gate would
+    freeze the estimate when the robot leans far over).
+    """
+    n = float(np.linalg.norm(raw))
+    return 0.9 < n < 1.1
 
 
 def _leg_q_urdf(
@@ -135,18 +148,18 @@ class StateEstimatorNode(Node):
     def _publish(self) -> None:
         if not self._imu_ready:
             self.get_logger().info(
-                "state_estimator: IMU not ready — publishing g=[0,0,-1]",
+                "state_estimator: IMU not ready — publishing g=[0,0,-1], health=0",
                 throttle_duration_sec=5.0,
             )
             msg = Float32MultiArray()
-            msg.data = [0.0] * 6 + [0.0, 0.0, -1.0]
+            # data[9] = health flag (0.0 = not usable); consumers gate on it.
+            msg.data = [0.0] * 6 + [0.0, 0.0, -1.0] + [0.0]
             self._pub.publish(msg)
             return
         lin_vel = self._estimate_velocity()
         ang_vel = np.array(self._ang_vel)
         raw = projected_gravity_from_quat(*self._quat)
-        n = float(np.linalg.norm(raw))
-        if 0.9 < n < 1.1 and raw[2] < -0.1:
+        if _accept_gravity(raw):
             self._proj_grav = 0.9 * self._proj_grav + 0.1 * raw
         else:
             self._proj_grav /= max(float(np.linalg.norm(self._proj_grav)), 1e-6)
@@ -156,6 +169,7 @@ class StateEstimatorNode(Node):
             float(lin_vel[0]), float(lin_vel[1]), float(lin_vel[2]),
             float(ang_vel[0]), float(ang_vel[1]), float(ang_vel[2]),
             float(self._proj_grav[0]), float(self._proj_grav[1]), float(self._proj_grav[2]),
+            1.0,  # data[9] = health flag (1.0 = usable)
         ]
         self._pub.publish(msg)
 

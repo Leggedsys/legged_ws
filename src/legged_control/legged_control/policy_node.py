@@ -68,6 +68,25 @@ def _decode_action(
     return np.clip(q_target_urdf, soft_q_min_urdf, soft_q_max_urdf)
 
 
+def _is_fresh(age: float | None, max_age: float) -> bool:
+    """True if a signal received `age` seconds ago is still usable."""
+    return age is not None and age <= max_age
+
+
+def _inputs_usable(
+    obs_age: float | None,
+    est_age: float | None,
+    est_health: float,
+    max_age: float,
+) -> bool:
+    """Policy may run only with fresh obs and a fresh, healthy state estimate."""
+    return (
+        _is_fresh(obs_age, max_age)
+        and _is_fresh(est_age, max_age)
+        and est_health >= 0.5
+    )
+
+
 # ── ROS node ──────────────────────────────────────────────────────────────────
 
 import os
@@ -130,6 +149,7 @@ _VEL_SETTLED  = 0.05
 _LIEDOWN_TIMEOUT = 3.0  # seconds past lie_down_duration before forcing PASSIVE
 _RAW_LIMIT    = 20.0    # raw_action divergence threshold
 _RAW_FAULT_N  = 3       # consecutive frames above limit → FAULT
+_INPUT_MAX_AGE = 0.1    # s — obs / state_estimate older than this is unusable
 
 
 class PolicyNode(Node):
@@ -208,11 +228,15 @@ class PolicyNode(Node):
         self._pub_raw = self.create_publisher(Float32MultiArray, "/raw_policy_action", 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/observation", self._on_observation, 10)
+        self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state_estimate, 10)
         self.create_subscription(Bool, "/posture_command", self._on_posture, 10)
         self.add_on_set_parameters_callback(self._on_gains_changed)
         self.create_timer(self._dt, self._tick)
 
         self._latest_obs: np.ndarray | None = None
+        self._obs_stamp: float | None = None
+        self._est_stamp: float | None = None
+        self._est_health: float = 0.0
 
         self.get_logger().info(
             f"policy_node ready — {loop_hz:.0f} Hz  "
@@ -287,6 +311,18 @@ class PolicyNode(Node):
 
     def _on_observation(self, msg: Float32MultiArray) -> None:
         self._latest_obs = np.array(msg.data[:OBS_DIM], dtype=np.float32)
+        self._obs_stamp = time.monotonic()
+
+    def _on_state_estimate(self, msg: Float32MultiArray) -> None:
+        # data[9] (if present) = state-estimator health flag (1.0 ok / 0.0 not ready)
+        self._est_stamp = time.monotonic()
+        self._est_health = float(msg.data[9]) if len(msg.data) > 9 else 1.0
+
+    def _inputs_ok(self) -> bool:
+        now = time.monotonic()
+        obs_age = None if self._obs_stamp is None else now - self._obs_stamp
+        est_age = None if self._est_stamp is None else now - self._est_stamp
+        return _inputs_usable(obs_age, est_age, self._est_health, _INPUT_MAX_AGE)
 
     def _on_posture(self, msg: Bool) -> None:
         if self._phase == _PHASE_FAULT:
@@ -300,7 +336,11 @@ class PolicyNode(Node):
                 self._phase_start = time.monotonic()
                 self._lie_down_start = list(self._last_published or self._q_default_urdf.tolist())
 
-    def _broadcast_gains(self, kp: float, kd: float) -> None:
+    def _broadcast_gains(self, kp: float, kd: float) -> bool:
+        """Send kp/kd to both motor_bus nodes. Returns True only if every gain
+        service was ready and the request was issued (so callers can retry)."""
+        if not all(c.service_is_ready() for c in self._gain_clients):
+            return False
         req = SetParameters.Request()
         req.parameters = [
             Parameter(name="kp", value=ParameterValue(
@@ -309,8 +349,8 @@ class PolicyNode(Node):
                 type=ParameterType.PARAMETER_DOUBLE, double_value=float(kd))),
         ]
         for client in self._gain_clients:
-            if client.service_is_ready():
-                client.call_async(req)
+            client.call_async(req)
+        return True
 
     def _on_gains_changed(self, params: list) -> SetParametersResult:
         new_kp = next((p.value for p in params if p.name == "kp"), None)
@@ -415,10 +455,17 @@ class PolicyNode(Node):
 
         if self._phase == _PHASE_PASSIVE:
             if self._stand_requested:
-                self._broadcast_gains(
+                # Only enter STANDUP once the gains are actually delivered, else
+                # the motors would stay passive and never stand up.
+                if not self._broadcast_gains(
                     float(self.get_parameter("kp").value),
                     float(self.get_parameter("kd").value),
-                )
+                ):
+                    self.get_logger().warn(
+                        "[policy] waiting for motor_bus param services before STANDUP",
+                        throttle_duration_sec=2.0,
+                    )
+                    return
                 self._phase = _PHASE_STANDUP
                 self._phase_start = now
                 snapshot = list(self._current_pos() or self._q_default_urdf.tolist())
@@ -431,9 +478,16 @@ class PolicyNode(Node):
                 self._passive_broadcast = False
                 self.get_logger().info("[policy] posture=true -> STANDUP")
             else:
+                # Keep retrying the passive (kp=kd=0) broadcast until it lands,
+                # so the motors never sit at launch-time stiffness.
                 if not self._passive_broadcast:
-                    self._broadcast_gains(0.0, 0.0)
-                    self._passive_broadcast = True
+                    if self._broadcast_gains(0.0, 0.0):
+                        self._passive_broadcast = True
+                    else:
+                        self.get_logger().warn(
+                            "[policy] waiting for motor_bus param services to go passive",
+                            throttle_duration_sec=2.0,
+                        )
             return
 
         if self._phase_start is None:
@@ -464,6 +518,13 @@ class PolicyNode(Node):
                             throttle_duration_sec=2.0,
                         )
                         return
+                    if not self._inputs_ok():
+                        self.get_logger().warn(
+                            "[policy] obs/state_estimate stale or IMU unhealthy "
+                            "— staying in WAIT",
+                            throttle_duration_sec=2.0,
+                        )
+                        return
                     obs = self._latest_obs.copy()
                     obs[37:49] = self._last_action
                     bad = _validate_obs(obs)
@@ -483,6 +544,16 @@ class PolicyNode(Node):
             return
 
         if self._phase == _PHASE_POLICY:
+            if not self._inputs_ok():
+                # Lost fresh obs / state estimate (e.g. IMU or a node dropped) —
+                # hold the default pose instead of acting on stale/garbage input.
+                self.get_logger().error(
+                    "[policy] inputs stale/unhealthy during POLICY — holding default pose",
+                    throttle_duration_sec=1.0,
+                )
+                self._publish(self._q_default_urdf.tolist())
+                self._last_action = np.zeros(12, dtype=np.float32)
+                return
             targets = self._run_inference()
             obs = self._latest_obs
             # divergence guard: if raw_action stays above limit, FAULT

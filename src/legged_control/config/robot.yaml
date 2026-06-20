@@ -124,7 +124,9 @@ control:
   kp_calf: 1
   kd_calf: 0.15
   gait_hz: 50.0   # policy control frequency
-  max_joint_speed: 3.0    # rad/s (URDF frame) — per-joint cmd delta limit
+  max_joint_speed: 12.0   # rad/s (URDF frame) — safety cap on per-joint cmd delta.
+                          # Set near hardware limit (dog_urdf joint vel 12-14 rad/s)
+                          # so it only catches glitches, not normal trot swing.
   aggregator_hz: 200.0   # joint_aggregator publish rate (was: per-motor ≈12 kHz)
   estimator_hz: 200.0    # state_estimator publish rate (was: per-IMU ≈400 Hz)
 

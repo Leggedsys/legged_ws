@@ -6,6 +6,20 @@ from legged_control.kinematics import (
     yaw_rotation_matrix,
     leg_kinematic_velocity,
 )
+from legged_control.processing.state_estimator_node import _accept_gravity
+
+
+class TestAcceptGravity:
+    def test_accepts_unit_vector_pointing_down(self):
+        assert _accept_gravity(np.array([0.0, 0.0, -1.0]))
+
+    def test_accepts_unit_vector_when_heavily_tilted(self):
+        # previously rejected by the gz < -0.1 gate; must now be accepted
+        assert _accept_gravity(np.array([0.998, 0.0, 0.05]))
+
+    def test_rejects_non_unit_magnitude(self):
+        assert not _accept_gravity(np.array([0.0, 0.0, -0.5]))
+        assert not _accept_gravity(np.array([0.0, 0.0, 0.0]))
 
 
 def test_projected_gravity_identity():
