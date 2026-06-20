@@ -24,10 +24,10 @@
 
 ## 🟠 高（正确性 / 安全）
 
-### [~] 3. 关节正负号/偏置在两处处理，易重复或漏改
-- **位置**：`robot.yaml` 的 `direction`/`zero_offset` + `policy.yaml` 的 `hip_sign_flip: [FR_hip, RR_hip]`
-- **问题**：两套机制叠加，易“正反抵消”或“少翻一次”。需逐关节实测。
-- **建议**：把 robot.yaml 标定到让 `/joint_states_aggregated` 直接是训练 URDF 系，`hip_sign_flip` 永久留空，消除双重修正。
+### [x] 3. 关节正负号/偏置在两处处理，易重复或漏改
+- **位置**：`robot.yaml` 的 `direction`/`zero_offset` + `policy.yaml` 的 `hip_sign_flip`
+- **已修复**：`hip_sign_flip` 置空（`[]`），统一由 robot.yaml `direction`/`zero_offset` 把电机系映射到训练 URDF 系，消除双重修正。删除 policy_node 中未使用的 `_DEFAULT_HIP_SIGN_FLIP_POLICY_IDX`（避免误以为有默认翻转）。读取机制保留（`.get("hip_sign_flip", [])`），将来若实测某髋方向相反，仅改 yaml 即可。
+- **前提/待确认**：这依赖 robot.yaml 的 `direction`/`zero_offset` 已正确映射到训练 URDF 系——上真机前在 passive 模式逐关节核对方向与零位。
 
 ### [x] 4. 电机限速 3.0 rad/s 可能掐住正常步态
 - **位置**：`config/robot.yaml` `max_joint_speed`；`legged_control/real/motor_command_bridge.py`
@@ -63,11 +63,10 @@
 ---
 
 ## 进度小结（2026-06-20）
-- 已处理：**#2 #4 #5 #6 #7 #8 #9 #10 #11**。
-  - #2 判定无需 R_body（依据驱动源码 + ROS 约定 + 同向实测），待 yaw 实验最终坐实。
-- 待硬件确认后处理：**#1（PD 增益换算）**、**#3（正负号/偏置双重修正合并）**。
+- 已处理：**#2 #3 #4 #5 #6 #7 #8 #9 #10 #11**。
+- 待硬件确认后处理：**#1（PD 增益换算）** —— 唯一剩余实质项。
+- 上真机前的核对清单（passive 模式）：关节顺序、各关节方向/零位（#3 前提）、yaw 实验坐实 twist 为机身系且轴向 FLU（#2 收尾）。
 
 ## 处理顺序建议
 1. **#1**：确认 Unitree 电机 kp 单位与 sim stiffness 换算 → 定增益值。
-2. **#3**：把 robot.yaml 标定到训练 URDF 系，消除与 hip_sign_flip 的双重修正。
-3. **#2 收尾**：做一次 yaw 实验坐实 twist 为机身系；并确认轴向为 FLU。
+2. 真机 passive 核对：方向/零位（#3）、yaw + FLU（#2）。

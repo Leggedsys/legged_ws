@@ -40,9 +40,9 @@ policy:
     RL_calf:  0.25
 
   # Joints where the training URDF sign differs from the deployment URDF.
-  # Negated in both obs assembly and action decode.
-  # IMPORTANT: re-verify on hardware — wrong flip makes the hip drive the wrong way.
-  hip_sign_flip: [FR_hip, RR_hip]
+  # Empty: robot.yaml direction/zero_offset already maps the motor frame to the
+  # training URDF frame, so no extra hip flip is applied. (Verify in passive mode.)
+  hip_sign_flip: []
 
   # Soft joint limits in URDF frame used to clip policy output (POLICY phase only).
   # 0.9x of the dog_urdf hard limits (hip [-0.5,0.5], thigh [-1.90,1.92], calf [-2.80,-0.28]),

@@ -41,11 +41,6 @@ _POLICY_TO_YAML = [
     _POLICY_JOINT_NAMES.index(name) for name in _YAML_JOINT_NAMES
 ]
 
-_DEFAULT_HIP_SIGN_FLIP_POLICY_IDX = [
-    _POLICY_JOINT_NAMES.index("FR_hip"),
-    _POLICY_JOINT_NAMES.index("RL_hip"),
-]
-
 
 def _reorder_policy_to_yaml(policy_vec: np.ndarray) -> np.ndarray:
     return policy_vec[_POLICY_TO_YAML]
