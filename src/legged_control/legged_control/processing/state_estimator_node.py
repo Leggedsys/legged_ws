@@ -7,7 +7,7 @@ Subscribes:
 
 Publishes:
   /state_estimate (std_msgs/Float32MultiArray, 10 floats)
-    data[0:3] = base_lin_vel in yaw frame (m/s)
+    data[0:3] = base_lin_vel in body frame (m/s)
     data[3:6] = base_ang_vel in body frame (rad/s)
     data[6:9] = projected_gravity in body frame (unit vector)
     data[9]   = health flag (1.0 = usable, 0.0 = IMU not ready)
@@ -162,10 +162,9 @@ class StateEstimatorNode(Node):
         lin_vel = self._estimate_velocity()
         ang_vel = np.array(self._ang_vel)
         raw = projected_gravity_from_quat(*self._quat)
-        if _accept_gravity(raw):
-            self._proj_grav = 0.9 * self._proj_grav + 0.1 * raw
-        else:
-            self._proj_grav /= max(float(np.linalg.norm(self._proj_grav)), 1e-6)
+        if raw[2] > 0.0:
+            raw = -raw
+        self._proj_grav = raw
 
         msg = Float32MultiArray()
         msg.data = [

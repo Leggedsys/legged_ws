@@ -41,7 +41,7 @@ _DOF_VEL_SCALE = 0.05
 _CMD_SCALE = np.array([_LIN_VEL_SCALE, _LIN_VEL_SCALE, _ANG_VEL_SCALE], dtype=np.float32)
 
 # Default height command when none has been received yet (mid stance, metres).
-_DEFAULT_HEIGHT_CMD = 0.22
+_DEFAULT_HEIGHT_CMD = 0.30
 
 _YAML_JOINT_NAMES = [
     "FR_hip", "FR_thigh", "FR_calf",
@@ -91,7 +91,7 @@ def _assemble(
             joint_pos_rel[idx] *= -1.0
             joint_vel[idx] *= -1.0
 
-    return np.concatenate([
+    return np.clip(np.concatenate([
         lin_vel,
         ang_vel,
         proj_grav,
@@ -100,7 +100,7 @@ def _assemble(
         joint_pos_rel,
         joint_vel,
         np.asarray(last_action, dtype=np.float32),
-    ]).astype(np.float32)
+    ]), -100.0, 100.0).astype(np.float32)
 
 
 class ObsAssemblerNode(Node):

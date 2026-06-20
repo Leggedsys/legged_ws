@@ -138,7 +138,7 @@ _PHASE_POLICY  = "POLICY"
 _PHASE_LIEDOWN = "LIEDOWN"
 _PHASE_FAULT   = "FAULT"
 
-_STANDUP_TOL  = 0.05
+_STANDUP_TOL  = 0.15
 _LIEDOWN_TOL  = 0.05
 _VEL_SETTLED  = 0.05
 _LIEDOWN_TIMEOUT = 3.0  # seconds past lie_down_duration before forcing PASSIVE

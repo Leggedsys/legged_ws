@@ -87,7 +87,7 @@ joints:
     motor_id: 11
     gear_ratio: 12.66
     q_min: -2.65
-    q_max:  -0.270
+    q_max:  -0.5
     direction:    1
     zero_offset:  -2.7
 
@@ -111,7 +111,7 @@ joints:
     motor_id: 8
     gear_ratio: 12.66
     q_min: -2.65
-    q_max: -0.27
+    q_max: -0.5
     direction:    -1
     zero_offset:  -2.7
 
@@ -119,10 +119,10 @@ control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
-  kp: 1
-  kd: 0.15
-  kp_calf: 1
-  kd_calf: 0.15
+  kp: 1.5
+  kd: 0.2
+  kp_calf: 1.5
+  kd_calf: 0.2
   gait_hz: 50.0   # policy control frequency
   max_joint_speed: 12.0   # rad/s (URDF frame) — safety cap on per-joint cmd delta.
                           # Set near hardware limit (dog_urdf joint vel 12-14 rad/s)
@@ -131,7 +131,7 @@ control:
   estimator_hz: 200.0    # state_estimator publish rate (was: per-IMU ≈400 Hz)
 
 teleop:
-  max_vx:  0.30  # m/s  forward/backward
+  max_vx:  0.60  # m/s  forward/backward
   max_vy:  0.05  # m/s  lateral
   max_yaw: 0.5   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
