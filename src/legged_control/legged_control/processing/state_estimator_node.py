@@ -33,6 +33,7 @@ from std_msgs.msg import Float32MultiArray
 from legged_control.kinematics import (
     leg_kinematic_velocity,
     projected_gravity_from_quat,
+    quat_rotate_inverse,
 )
 
 _LEG_ORDER = ("FL", "FR", "RL", "RR")
@@ -80,11 +81,11 @@ class StateEstimatorNode(Node):
         self._imu_ready = False
         self._proj_grav = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
-        # VIO odometry. /odin1/odometry twist is expressed in child_frame
-        # (odin1_base_link), i.e. already the body frame — see driver
-        # publishOdometry (frame_id=odom, child_frame_id=odin1_base_link) and
-        # ROS REP-105. No world->body rotation is applied here.
-        self._odom_lin_vel = np.zeros(3)       # body frame m/s (odin1_base_link)
+        # VIO odometry. Despite child_frame_id=odin1_base_link, the Odin twist is
+        # empirically in the WORLD (odom) frame (verified on hardware via the
+        # vel_viz arrow: it stayed world-fixed as the robot yawed). It is rotated
+        # into the body frame in _estimate_velocity to match training.
+        self._odom_lin_vel = np.zeros(3)       # world frame m/s (odom)
         self._odom_stamp: float | None = None  # monotonic timestamp
 
         self._pub = self.create_publisher(Float32MultiArray, "/state_estimate", 10)
@@ -126,10 +127,11 @@ class StateEstimatorNode(Node):
     def _estimate_velocity(self) -> np.ndarray:
         now = time.monotonic()
 
-        # Primary: VIO odometry, already in body frame (odin1_base_link, aligned
-        # with the robot body) — used as-is, no rotation needed.
+        # Primary: VIO odometry. Rotate the world-frame velocity into the body
+        # frame (quat_rotate_inverse, matching training's base_lin_vel).
         if self._odom_stamp is not None and (now - self._odom_stamp) < _ODOM_TIMEOUT:
-            self._lin_vel = 0.6 * self._odom_lin_vel + 0.4 * self._lin_vel
+            v_body = quat_rotate_inverse(*self._quat, *self._odom_lin_vel)
+            self._lin_vel = 0.6 * v_body + 0.4 * self._lin_vel
             return self._lin_vel
 
         # Fallback: leg kinematics (Odin disconnected)

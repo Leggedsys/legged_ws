@@ -14,11 +14,10 @@
 - **难点**：Unitree 电机 kp/kd 单位 ≠ Isaac stiffness，且涉及 6.33 减速比；不能直接填 20。
 - **行动**：先确认电机 kp 单位与 sim stiffness 的换算关系，再定值。代码目前完全没有这层换算。
 
-### [x] 2. VIO 线速度坐标系 — 查证后判定无需 R_body（结论：机身系）
-- **依据**：驱动 `host_sdk_sample.h:1100 publishOdometry` 设 `frame_id="odom"`、`child_frame_id="odin1_base_link"`，`twist.linear` 取自 SDK `linear_velocity`。按 ROS REP-105 / `nav_msgs/Odometry` 约定，**twist 表达在 child_frame（odin1_base_link 机身系）**。话题名 `odin1/odometry` 与订阅一致（非 bug）。
-- **结合**：用户已实测 Odin 系与机身**同向** → 速度已在机器人机身系，**无需 R_body**；原代码（没乘）即正确，腿运动学 fallback 也是机身系，两路一致。
-- **已修复**：删除未用的 `R_yaw/R_body` 及其 import，更正 `_odom_lin_vel` 注释为 body frame，并说明依据。
-- **保留确认**：厂商无文档白纸黑字写 twist 的系；最终以 yaw 实验坐实（原地转 yaw + 固定世界方向平移，看 twist 跟不跟机头）。轴向另需确认为 FLU（x前/y左/z上）以对齐训练。
+### [x] 2. VIO 线速度坐标系 — 真机实测为世界系，已加旋转
+- **经过**：先前据驱动 `child_frame_id=odin1_base_link` + ROS REP-105 推断 twist 是机身系，曾判定无需旋转。**2026-06-20 真机实测推翻该推断**：在狗上跑 `test.launch.py`，RViz 速度箭头（`/vel_viz` 取 `/state_estimate[0:2]`）在机器人原地转 yaw 时**保持世界方向不动** → 速度确为**世界（odom）系**。（即 Odin SDK 虽放在 twist 里，实际未转到 child_frame。）
+- **已修复**：新增并测试 `kinematics.quat_rotate_inverse`（R.T@v，与训练 `base_lin_vel` 同约定）；`state_estimator._estimate_velocity` 用它把 VIO 世界系速度旋到机身系（用整姿态四元数，含 roll/pitch，匹配训练）。腿运动学 fallback 本就是机身系，两路一致。注释更正为 world frame + 说明。
+- **待确认**：轴向仍需确认为 FLU（x前/y左/z上）以对齐训练；可再看一眼旋转后箭头是否跟机头。
 
 ---
 
@@ -64,8 +63,9 @@
 
 ## 进度小结（2026-06-20）
 - 已处理：**#2 #3 #4 #5 #6 #7 #8 #9 #10 #11**。
+  - #2：真机实测 twist 为世界系，已用 `quat_rotate_inverse` 旋到机身系（早先“无需 R_body”的推断已被实测推翻并修正）。
 - 待硬件确认后处理：**#1（PD 增益换算）** —— 唯一剩余实质项。
-- 上真机前的核对清单（passive 模式）：关节顺序、各关节方向/零位（#3 前提）、yaw 实验坐实 twist 为机身系且轴向 FLU（#2 收尾）。
+- 上真机前的核对清单（passive 模式）：关节顺序、各关节方向/零位（#3 前提）、轴向 FLU（#2 收尾，旋转后再看一眼箭头是否跟机头）。
 
 ## 处理顺序建议
 1. **#1**：确认 Unitree 电机 kp 单位与 sim stiffness 换算 → 定增益值。

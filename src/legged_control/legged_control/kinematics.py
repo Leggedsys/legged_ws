@@ -150,7 +150,16 @@ def leg_kinematic_velocity(
     return -J @ dq
 
 
-def projected_gravity_from_quat(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+def quat_rotate_inverse(
+    qx: float, qy: float, qz: float, qw: float,
+    vx: float, vy: float, vz: float,
+) -> np.ndarray:
+    """Rotate a world-frame vector into the body frame.
+
+    The quaternion is the body orientation in the world frame (body->world), so
+    this applies R.T @ v_world, matching legged_gym's quat_rotate_inverse used to
+    form base_lin_vel / projected_gravity at training time.
+    """
     n = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
     x, y, z, w = qx/n, qy/n, qz/n, qw/n
     R = np.array([
@@ -158,8 +167,11 @@ def projected_gravity_from_quat(qx: float, qy: float, qz: float, qw: float) -> n
         [2*(x*y + w*z),        1 - 2*(x*x + z*z), 2*(y*z - w*x)],
         [2*(x*z - w*y),        2*(y*z + w*x),     1 - 2*(x*x + y*y)],
     ])
-    g_world = np.array([0.0, 0.0, -1.0])
-    return R.T @ g_world
+    return R.T @ np.array([vx, vy, vz])
+
+
+def projected_gravity_from_quat(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    return quat_rotate_inverse(qx, qy, qz, qw, 0.0, 0.0, -1.0)
 
 
 def yaw_rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
