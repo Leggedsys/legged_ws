@@ -39,8 +39,9 @@ _DOF_VEL_SCALE = 0.05
 # commands_scale = [lin_vel, lin_vel, ang_vel]; height command is appended unscaled
 _CMD_SCALE = np.array([_LIN_VEL_SCALE, _LIN_VEL_SCALE, _ANG_VEL_SCALE], dtype=np.float32)
 
-# Default height command when none has been received yet (mid stance, metres).
-_DEFAULT_HEIGHT_CMD = 0.30
+# Default height command before any /height_command arrives. Must stay inside the
+# trained range [0.15, 0.28] (mid stance), else the policy sees an OOD height.
+_DEFAULT_HEIGHT_CMD = 0.25
 
 _YAML_JOINT_NAMES = [
     "FR_hip", "FR_thigh", "FR_calf",

@@ -235,6 +235,7 @@ class PolicyNode(Node):
 
         self._latest_obs: np.ndarray | None = None
         self._obs_history = np.zeros(POLICY_INPUT_DIM, dtype=np.float32)  # 3×46 frame stack
+        self._last_stacked_stamp: float | None = None
         self._obs_stamp: float | None = None
         self._est_stamp: float | None = None
         self._est_health: float = 0.0
@@ -425,9 +426,16 @@ class PolicyNode(Node):
                 + (f" ...+{len(bad)-6}" if len(bad) > 6 else ""),
                 throttle_duration_sec=3.0,
             )
-        # frame stacking: shift history left one frame, append newest at the end
-        self._obs_history[:-SINGLE_OBS_DIM] = self._obs_history[SINGLE_OBS_DIM:]
-        self._obs_history[-SINGLE_OBS_DIM:] = single
+        # frame stacking: advance the stack only when a genuinely new single frame
+        # arrived (obs_assembler runs on its own timer; gating avoids pushing a
+        # duplicate or skipping a frame in the 3-frame history).
+        if self._obs_stamp != self._last_stacked_stamp:
+            self._obs_history[:-SINGLE_OBS_DIM] = self._obs_history[SINGLE_OBS_DIM:]
+            self._obs_history[-SINGLE_OBS_DIM:] = single
+            self._last_stacked_stamp = self._obs_stamp
+        else:
+            # no new frame this tick — refresh only the newest frame's last_action
+            self._obs_history[-SINGLE_OBS_DIM:] = single
         try:
             import torch
             with torch.inference_mode():
@@ -544,8 +552,10 @@ class PolicyNode(Node):
                     self._phase_start = now
                     self._raw_high_count = 0
                     self._last_action = np.zeros(12, dtype=np.float32)
-                    self._obs_history[:] = 0.0  # reset frame stack on POLICY entry
-                    self._reset_policy()
+                    # Reset the frame stack on POLICY entry (this IS the policy
+                    # reset for the stacked MLP — no model reload needed).
+                    self._obs_history[:] = 0.0
+                    self._last_stacked_stamp = None
                     self.get_logger().info("[policy] cmd_vel received -> POLICY")
             return
 

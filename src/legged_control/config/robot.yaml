@@ -39,7 +39,7 @@ joints:
     motor_id: 2
     gear_ratio: 12.66
     q_min: -2.65
-    q_max:  -0.270
+    q_max:  -0.5    # symmetric with rear calves (was -0.27); see control: calf-limit note
     direction:    1
     zero_offset:  -2.7
 
@@ -63,7 +63,7 @@ joints:
     motor_id: 5
     gear_ratio: 12.66
     q_min: -2.65
-    q_max:  -0.270
+    q_max:  -0.5    # symmetric with rear calves (was -0.27); see control: calf-limit note
     direction:    -1
     zero_offset:  -2.7
 
@@ -116,6 +116,11 @@ joints:
     zero_offset:  -2.7
 
 control:
+  # 关节限位有两道：policy_node 按 policy.yaml 软限位裁剪策略输出，motor_command_bridge
+  # 再按本文件每关节 q_min/q_max 兜底裁剪。最终生效是两者交集。
+  # 约定：本文件 q_min/q_max = 硬件安全上限（最后一道），应 >= policy.yaml 软限位；
+  # 策略实际活动范围由 policy.yaml 软限位决定，且四条腿对称（与训练一致）。
+  # calf 上限四腿统一 -0.5（之前前 -0.27 / 后 -0.5 不对称会让步态偏）。
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0

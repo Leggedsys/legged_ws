@@ -1,8 +1,8 @@
 """state_estimator_node
 
 Subscribes:
-  odin1/imu/filtered        (sensor_msgs/Imu)         — orientation + angular_velocity
-  /odin1/odometry           (nav_msgs/Odometry)       — VIO linear velocity
+  odin1/imu/filtered        (sensor_msgs/Imu)         — angular_velocity (+ orientation fallback)
+  /odin1/odometry           (nav_msgs/Odometry)       — VIO linear velocity + orientation (gravity)
   /joint_states_aggregated  (sensor_msgs/JointState)   — URDF-frame joint states
 
 Publishes:
@@ -86,6 +86,7 @@ class StateEstimatorNode(Node):
         # vel_viz arrow: it stayed world-fixed as the robot yawed). It is rotated
         # into the body frame in _estimate_velocity to match training.
         self._odom_lin_vel = np.zeros(3)       # world frame m/s (odom)
+        self._odom_quat = (0.0, 0.0, 0.0, 1.0)  # body orientation in odom (x,y,z,w)
         self._odom_stamp: float | None = None  # monotonic timestamp
 
         self._pub = self.create_publisher(Float32MultiArray, "/state_estimate", 10)
@@ -122,15 +123,22 @@ class StateEstimatorNode(Node):
     def _on_odom(self, msg: Odometry) -> None:
         t = msg.twist.twist
         self._odom_lin_vel = np.array([t.linear.x, t.linear.y, t.linear.z])
+        o = msg.pose.pose.orientation
+        self._odom_quat = (o.x, o.y, o.z, o.w)
         self._odom_stamp = time.monotonic()
+
+    def _odom_fresh(self) -> bool:
+        return (self._odom_stamp is not None
+                and (time.monotonic() - self._odom_stamp) < _ODOM_TIMEOUT)
 
     def _estimate_velocity(self) -> np.ndarray:
         now = time.monotonic()
 
         # Primary: VIO odometry. Rotate the world-frame velocity into the body
-        # frame (quat_rotate_inverse, matching training's base_lin_vel).
-        if self._odom_stamp is not None and (now - self._odom_stamp) < _ODOM_TIMEOUT:
-            v_body = quat_rotate_inverse(*self._quat, *self._odom_lin_vel)
+        # frame using the ODOM's own orientation (self-consistent; the IMU filter
+        # yaw may differ from the SLAM odom yaw). Matches training's base_lin_vel.
+        if self._odom_fresh():
+            v_body = quat_rotate_inverse(*self._odom_quat, *self._odom_lin_vel)
             self._lin_vel = 0.6 * v_body + 0.4 * self._lin_vel
             return self._lin_vel
 
@@ -161,10 +169,13 @@ class StateEstimatorNode(Node):
             return
         lin_vel = self._estimate_velocity()
         ang_vel = np.array(self._ang_vel)
-        raw = projected_gravity_from_quat(*self._quat)
-        if raw[2] > 0.0:
-            raw = -raw
-        self._proj_grav = raw
+        # Projected gravity from the odometry quaternion (guide convention),
+        # falling back to the IMU orientation if odom is stale. No sign-flip:
+        # projected_gravity_from_quat already yields gz≈-1 when level. If gz comes
+        # out positive on hardware it signals a real quaternion-convention issue to
+        # fix at the source, not to mask here.  VERIFY on robot: gz≈-1 when level.
+        grav_quat = self._odom_quat if self._odom_fresh() else self._quat
+        self._proj_grav = projected_gravity_from_quat(*grav_quat)
 
         msg = Float32MultiArray()
         msg.data = [

@@ -121,6 +121,9 @@ try:
             self._posture_command_pub = self.create_publisher(Bool, "/posture_command", 10)
             self._height_pub = self.create_publisher(Float32, "/height_command", 10)
             self.create_subscription(Joy, "/joy", self._on_joy, 10)
+            # Publish the height target on a timer too, so a fresh /height_command
+            # keeps flowing even when the gamepad is idle (joy_node may go silent).
+            self.create_timer(0.05, self._publish_height)
             self.get_logger().info(
                 f"teleop_node ready  "
                 f"(max_vx={self._max_vx}, max_vy={self._max_vy}, "
@@ -219,6 +222,10 @@ try:
             self._height_pub.publish(Float32(data=float(self._height_target)))
 
             self._pub.publish(twist)
+
+        def _publish_height(self) -> None:
+            # Periodic re-publish so /height_command stays fresh when /joy is idle.
+            self._height_pub.publish(Float32(data=float(self._height_target)))
 
 except ImportError:
     # ROS2 not available; pure functions still work for testing
