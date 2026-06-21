@@ -119,6 +119,13 @@ control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
+  # PD 增益是 SDK/转子侧（motor_bus 里 cmd.q 乘了 gear_ratio），
+  # 所以关节刚度 K_joint = kp × gear_ratio²。甲方目标：关节 kp=20、kd=0.5。
+  # 理论 kp = 20/gr²：hip/thigh(gr 6.33)→0.50 / kd 0.0125；calf(gr 12.66)→0.125 / kd 0.0031。
+  # 下面是手调值（约 3× 理论），实测能用，量过之前先保留。
+  # TODO(台架)：单关节挂已知重量、量角度偏差 Δθ，算 K_joint = τ/Δθ 确认 ≈20。
+  #   关键：calf 的 gr² 是 hip/thigh 的 4 倍，所以 calf 的 kp/kd 最终应 ≈ hip/thigh 的 1/4
+  #   （现在两者相等 —— 待验证并拆分）。
   kp: 1.5
   kd: 0.2
   kp_calf: 1.5
