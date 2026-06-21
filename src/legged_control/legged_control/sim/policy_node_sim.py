@@ -1,21 +1,20 @@
-"""policy_node_sim — RL policy for Gazebo simulation (49-dim blind dog_urdf policy).
+"""policy_node_sim — B+C RL policy for Gazebo simulation (46-dim frame-stacked).
 
 Works entirely in URDF frame. The Gazebo model is the dog_urdf training URDF, so:
   * sim joint order == policy joint order (no reordering)
   * NO hip_sign_flip (that correction only applies to the real-robot URDF)
 Shared joint parameters (default_q, action_scale, soft limits) are loaded from
-config/policy.yaml so sim and real stay in sync. obs scaling matches the real
-obs_assembler.
+config/policy.yaml so sim and real stay in sync. obs scaling/layout matches the
+real obs_assembler (46-dim single frame, no base_lin_vel), stacked 3 frames -> 138.
 
-Observation (49 dims, scaled — see processing/obs_assembler.py):
-  [0:3]   base_lin_vel      * 2.0   from /state_estimate
-  [3:6]   base_ang_vel      * 0.25  from /state_estimate
-  [6:9]   projected_gravity * 1.0   from /state_estimate
-  [9:12]  velocity_commands * (2.0, 2.0, 0.25)
-  [12:13] height_command    * 1.0 (raw) from /height_command
-  [13:25] joint_pos_rel     * 1.0   q_sim - q_default (sim == policy order)
-  [25:37] joint_vel         * 0.05  dq_sim
-  [37:49] last_action       previous action (policy order)
+Single frame (46 dims, scaled — see processing/obs_assembler.py):
+  [0:3]   base_ang_vel      * 0.25  from /state_estimate[3:6]
+  [3:6]   projected_gravity * 1.0   from /state_estimate[6:9]
+  [6:9]   velocity_commands * (2.0, 2.0, 0.25)
+  [9]     height_command    * 1.0 (raw) from /height_command
+  [10:22] joint_pos_rel     * 1.0   q_sim - q_default (sim == policy order)
+  [22:34] joint_vel         * 0.05  dq_sim
+  [34:46] last_action       previous action (policy order)
 
 Action (12 dims, policy order):
   q_target = q_default + action * scale  (URDF frame, clipped to soft limits)
@@ -26,13 +25,15 @@ from __future__ import annotations
 import numpy as np
 
 from legged_control.processing.obs_assembler import (
-    OBS_DIM,
+    SINGLE_OBS_DIM,
     _ANG_VEL_SCALE,
     _CMD_SCALE,
     _DOF_POS_SCALE,
     _DOF_VEL_SCALE,
-    _LIN_VEL_SCALE,
 )
+
+STACK_FRAMES = 3
+POLICY_INPUT_DIM = SINGLE_OBS_DIM * STACK_FRAMES  # 138
 
 # Sim joint order == policy joint order (Gazebo controller + gazebo_control_bridge).
 _SIM_NAMES = [
@@ -60,7 +61,7 @@ def _assemble_obs(
     sign_flip_idx: list[int] | None = None,
 ) -> np.ndarray:
     state_est = np.asarray(state_est, dtype=np.float32)
-    lin_vel = state_est[0:3] * _LIN_VEL_SCALE
+    # state_est[0:3] is base_lin_vel — intentionally NOT used (B+C actor obs).
     ang_vel = state_est[3:6] * _ANG_VEL_SCALE
     proj_grav = state_est[6:9]
     cmd = np.asarray(cmd_vel, dtype=np.float32) * _CMD_SCALE
@@ -74,8 +75,7 @@ def _assemble_obs(
             q_rel[i] *= -1.0
             dq[i] *= -1.0
 
-    return np.concatenate([
-        lin_vel,
+    return np.clip(np.concatenate([
         ang_vel,
         proj_grav,
         cmd,
@@ -83,7 +83,7 @@ def _assemble_obs(
         q_rel,
         dq,
         np.asarray(last_action, dtype=np.float32),
-    ]).astype(np.float32)
+    ]), -100.0, 100.0).astype(np.float32)
 
 
 def _decode_action(
@@ -151,7 +151,7 @@ class PolicyNodeSim(Node):
             if model_path.startswith("__package__/"):
                 model_path = os.path.join(share, model_path[len("__package__/"):])
         if not model_path:
-            model_path = os.path.join(share, "models", "policy_obs49.pt")
+            model_path = os.path.join(share, "models", "08_bc_mujoco_recovered_policy.pt")
 
         self._policy = None
         if os.path.exists(model_path):
@@ -171,6 +171,7 @@ class PolicyNodeSim(Node):
         self._lie_down_start: list[float] | None = None
         self._last_published: list[float] | None = None
         self._last_action = np.zeros(12, dtype=np.float32)
+        self._obs_history = np.zeros(POLICY_INPUT_DIM, dtype=np.float32)  # 3×46 frame stack
 
         self._joint_pos: dict[str, float] = {}
         self._joint_vel: dict[str, float] = {}
@@ -191,7 +192,7 @@ class PolicyNodeSim(Node):
 
         self.get_logger().info(
             f"policy_node_sim ready  "
-            f"model={'loaded' if self._policy else 'NOT LOADED'}  obs_dim={OBS_DIM}"
+            f"model={'loaded' if self._policy else 'NOT LOADED'}  obs_dim={POLICY_INPUT_DIM}"
         )
 
     # ── config ─────────────────────────────────────────────────────────────────
@@ -296,7 +297,7 @@ class PolicyNodeSim(Node):
         if pos is None or vel is None or self._policy is None:
             return self._q_default.tolist()
 
-        obs = _assemble_obs(
+        single = _assemble_obs(
             self._state_est,
             self._cmd_vel,
             self._height_cmd,
@@ -306,11 +307,14 @@ class PolicyNodeSim(Node):
             self._last_action,
             self._sign_flip_idx,
         )
+        # frame stacking: shift left one frame, append newest at the end
+        self._obs_history[:-SINGLE_OBS_DIM] = self._obs_history[SINGLE_OBS_DIM:]
+        self._obs_history[-SINGLE_OBS_DIM:] = single
         try:
             import torch
             with torch.inference_mode():
                 action = (
-                    self._policy(torch.from_numpy(obs).unsqueeze(0))
+                    self._policy(torch.from_numpy(self._obs_history).unsqueeze(0))
                     .squeeze(0)
                     .numpy()
                 )
@@ -365,6 +369,7 @@ class PolicyNodeSim(Node):
             if self._joint_state_seen and any(abs(v) > 1e-4 for v in self._cmd_vel):
                 self._phase = _POLICY
                 self._phase_start = now
+                self._obs_history[:] = 0.0  # reset frame stack on POLICY entry
                 self.get_logger().info("[policy_sim] cmd_vel -> POLICY")
             return
 

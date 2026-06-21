@@ -90,31 +90,31 @@ def test_output_clamped_to_soft_limits():
     assert np.all(q <= 0.4 + 1e-6) and np.all(q >= -0.4 - 1e-6)
 
 
-# ── obs validation (49-dim) ───────────────────────────────────────────────────
+# ── obs validation (46-dim single frame) ──────────────────────────────────────
 
 def _nominal_obs():
-    """A benign, in-range 49-dim obs built via the real assembler."""
+    """A benign, in-range 46-dim single frame built via the real assembler."""
     state = np.array([0, 0, 0, 0, 0, 0, 0.0, 0.0, -1.0], dtype=np.float32)
     return _assemble(
-        state, (0.0, 0.0, 0.0), 0.22,
+        state, (0.0, 0.0, 0.0), 0.25,
         np.zeros(12, dtype=np.float32), np.zeros(12, dtype=np.float32),
         np.zeros(12, dtype=np.float32), np.zeros(12, dtype=np.float32),
     )
 
 
-def test_validate_obs_takes_single_49dim_arg_and_passes_nominal():
+def test_validate_obs_takes_single_46dim_arg_and_passes_nominal():
     obs = _nominal_obs()
-    assert obs.shape == (49,)
+    assert obs.shape == (46,)
     assert _validate_obs(obs) == []
 
 
 def test_validate_obs_flags_out_of_range_velocity_command():
     obs = _nominal_obs()
-    obs[9] = 50.0  # absurd scaled vx command
+    obs[6] = 50.0  # absurd scaled vx command (cmd block is [6:9] now)
     assert _validate_obs(obs) != []
 
 
 def test_validate_obs_flags_nan():
     obs = _nominal_obs()
-    obs[3] = np.nan
+    obs[0] = np.nan  # ang_vel block
     assert _validate_obs(obs) != []

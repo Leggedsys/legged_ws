@@ -1,8 +1,8 @@
 policy:
   # Absolute path to TorchScript .pt file. Override at launch with:
   #   ros2 launch legged_control robot.launch.py mode:=policy model_path:=/path/to/policy.pt
-  # Exported from legged_gym dog_urdf checkpoint (49-dim obs, 4*tanh squashing).
-  model_path: "__package__/models/04_mujoco_dr_latency_policy.pt"
+  # B+C policy: 138-dim input (46-dim single frame × 3 frame stack), 4*tanh squashing.
+  model_path: "__package__/models/08_bc_mujoco_recovered_policy.pt"
 
   # Default stance pose in URDF frame (training convention), yaml joint order.
   # From dog_urdf_config.default_joint_angles: hip=0.1, front thigh=0.8, rear thigh=1.0,

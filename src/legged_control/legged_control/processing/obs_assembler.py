@@ -1,20 +1,19 @@
 """obs_assembler
 
-Assembles the 49-dim observation vector consumed by the dog_urdf blind policy
-(legged_gym compute_observations with include_lin_vel=True, num_commands=5).
+Assembles the 46-dim SINGLE-FRAME observation for the B+C policy (no base
+linear velocity; the actor is asymmetric, lin_vel was a privileged critic input
+at training time). See docs/deployment_guide.md §2.
 
-obs layout (with obs_scales applied, matching training):
-  [0:3]   base_lin_vel        * 2.0    from /state_estimate[0:3]
-  [3:6]   base_ang_vel        * 0.25   from /state_estimate[3:6]
-  [6:9]   projected_gravity   * 1.0    from /state_estimate[6:9]
-  [9:12]  cmd (vx, vy, yaw)   * (2.0, 2.0, 0.25)   from /cmd_vel
-  [12:13] height command      * 1.0 (raw)          from /height_command
-  [13:25] (q - q_default)     * 1.0    /joint_states_aggregated (yaml -> policy order)
-  [25:37] dof_vel             * 0.05   /joint_states_aggregated (yaml -> policy order)
-  [37:49] last_action         raw      /raw_policy_action (policy order)
+single-frame layout (obs_scales applied, matching training):
+  [0:3]   base_ang_vel        * 0.25   from /state_estimate[3:6]
+  [3:6]   projected_gravity   * 1.0    from /state_estimate[6:9]
+  [6:9]   cmd (vx, vy, yaw)   * (2.0, 2.0, 0.25)   from /cmd_vel
+  [9]     height command      * 1.0 (raw)          from /height_command
+  [10:22] (q - q_default)     * 1.0    /joint_states_aggregated (yaml -> policy order)
+  [22:34] dof_vel             * 0.05   /joint_states_aggregated (yaml -> policy order)
+  [34:46] last_action         raw      /raw_policy_action (policy order)
 
-This is the canonical obs assembly point — policy_node subscribes to /observation
-for inference input.
+Published on /observation. policy_node stacks 3 frames -> 138 before inference.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Float32MultiArray
 
-OBS_DIM = 49
+SINGLE_OBS_DIM = 46
 
 # obs_scales from legged_gym normalization.obs_scales (dog_urdf training config)
 _LIN_VEL_SCALE = 2.0
@@ -77,7 +76,8 @@ def _assemble(
     sign_flip_policy_idx: list[int] | None = None,
 ) -> np.ndarray:
     state_estimate = np.asarray(state_estimate, dtype=np.float32)
-    lin_vel = state_estimate[0:3] * _LIN_VEL_SCALE
+    # state_estimate[0:3] is base_lin_vel — intentionally NOT used (B+C actor obs
+    # excludes it; lin_vel was a privileged critic input at training time).
     ang_vel = state_estimate[3:6] * _ANG_VEL_SCALE
     proj_grav = state_estimate[6:9]
     cmd = np.asarray(cmd_vel, dtype=np.float32) * _CMD_SCALE
@@ -92,7 +92,6 @@ def _assemble(
             joint_vel[idx] *= -1.0
 
     return np.clip(np.concatenate([
-        lin_vel,
         ang_vel,
         proj_grav,
         cmd,
@@ -124,7 +123,8 @@ class ObsAssemblerNode(Node):
         self.create_subscription(Float32MultiArray, "/raw_policy_action", self._on_raw_action, 10)
 
         self.create_timer(0.02, self._publish)
-        self.get_logger().info(f"obs_assembler ready — /observation ({OBS_DIM} floats)")
+        self.get_logger().info(
+            f"obs_assembler ready — /observation ({SINGLE_OBS_DIM} floats, single frame)")
 
     def _load_q_default(self) -> np.ndarray:
         share = get_package_share_directory("legged_control")

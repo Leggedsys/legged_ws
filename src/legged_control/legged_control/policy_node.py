@@ -3,17 +3,19 @@
 Runs a TorchScript policy at 50 Hz with the same PASSIVE->STANDUP->WAIT->POLICY->LIE_DOWN
 state machine as gait_node. The POLICY phase replaces IK trot with neural-network inference.
 
-Observation vector (49 dims) from /observation (blind dog_urdf policy, scaled):
-  [0:3]   base_lin_vel      * 2.0   from /state_estimate[0:3]
-  [3:6]   base_ang_vel      * 0.25  from /state_estimate[3:6]
-  [6:9]   projected_gravity * 1.0   from /state_estimate[6:9]
-  [9:12]  velocity_commands * (2.0, 2.0, 0.25)  [vx, vy, omega_z] from /cmd_vel
-  [12:13] height_command    * 1.0 (raw) from /height_command
-  [13:25] joint_pos_rel     * 1.0   q_urdf - q_default_urdf (yaml -> policy order, hip_sign_flip)
-  [25:37] joint_vel         * 0.05  dq_urdf (yaml -> policy order, hip_sign_flip)
-  [37:49] last_action       previous raw policy output (policy order)
+B+C policy: actor input is a 3-frame stack of a 46-dim single frame (138 dims).
+Single frame (no base_lin_vel; see processing/obs_assembler.py and
+docs/deployment_guide.md):
+  [0:3]   base_ang_vel      * 0.25  from /state_estimate[3:6]
+  [3:6]   projected_gravity * 1.0   from /state_estimate[6:9]
+  [6:9]   velocity_commands * (2.0, 2.0, 0.25)  [vx, vy, omega_z] from /cmd_vel
+  [9]     height_command    * 1.0 (raw) from /height_command
+  [10:22] joint_pos_rel     * 1.0   q_urdf - q_default_urdf (yaml -> policy order)
+  [22:34] joint_vel         * 0.05  dq_urdf (yaml -> policy order)
+  [34:46] last_action       previous raw policy output (policy order)
 
-The obs is assembled by obs_assembler (see processing/obs_assembler.py).
+Frame stack (built here each policy step): obs_history = [oldest|mid|newest],
+shifted left and the newest 46-dim frame appended; zeroed on POLICY entry.
 
 Action: 12-dim (policy order) joint position residuals.
   q_target_urdf = q_default_urdf + sign_flip * action * scale
@@ -99,27 +101,30 @@ from std_msgs.msg import Bool, Float32MultiArray
 
 from legged_control.kinematics import _smoothstep
 
-# ── obs validation (sanity bounds on the scaled 49-dim obs) ─────────────────────
+# ── obs validation (sanity bounds on the scaled 46-dim single frame) ─────────────
 # Ranges are conservative sanity gates, not tight training 2σ bounds. Command and
 # height bounds come from the dog_urdf command ranges (scaled); velocity/joint
 # bounds are loose physical limits. Re-tighten from policy rollout stats if desired.
 
-OBS_DIM = 49
+from legged_control.processing.obs_assembler import SINGLE_OBS_DIM
+
+STACK_FRAMES = 3
+POLICY_INPUT_DIM = SINGLE_OBS_DIM * STACK_FRAMES  # 138
 
 _OBS_CHECKS = {
-    "base_lin_vel":  [("vx", 0, -4.0, 6.0), ("vy", 1, -3.0, 3.0), ("vz", 2, -3.0, 3.0)],
-    "base_ang_vel":  [("wx", 3, -1.5, 1.5), ("wy", 4, -1.5, 1.5), ("wz", 5, -1.5, 1.5)],
-    "proj_grav":     [("gx", 6, -1.05, 1.05), ("gy", 7, -1.05, 1.05), ("gz", 8, -1.05, 0.20)],
-    "vel_cmd":       [("vx", 9, -2.1, 2.1), ("vy", 10, -1.1, 1.1), ("wz", 11, -0.27, 0.27)],
-    "height_cmd":    [("h", 12, 0.10, 0.35)],
-    "joint_pos":     [(f"pos_{_POLICY_JOINT_NAMES[i]}", 13 + i, -1.5, 1.5) for i in range(12)],
-    "joint_vel":     [(f"vel_{_POLICY_JOINT_NAMES[i]}", 25 + i, -1.0, 1.0) for i in range(12)],
+    "base_ang_vel":  [("wx", 0, -1.5, 1.5), ("wy", 1, -1.5, 1.5), ("wz", 2, -1.5, 1.5)],
+    "proj_grav":     [("gx", 3, -1.05, 1.05), ("gy", 4, -1.05, 1.05), ("gz", 5, -1.05, 0.20)],
+    "vel_cmd":       [("vx", 6, -3.1, 3.1), ("vy", 7, -1.1, 1.1), ("wz", 8, -0.27, 0.27)],
+    "height_cmd":    [("h", 9, 0.10, 0.35)],
+    "joint_pos":     [(f"pos_{_POLICY_JOINT_NAMES[i]}", 10 + i, -1.5, 1.5) for i in range(12)],
+    "joint_vel":     [(f"vel_{_POLICY_JOINT_NAMES[i]}", 22 + i, -1.0, 1.0) for i in range(12)],
 }
 
 
 def _validate_obs(obs: np.ndarray) -> list[str]:
-    if obs.shape[0] != OBS_DIM:
-        return [f"obs_dim={obs.shape[0]}!={OBS_DIM}"]
+    """Validate a SINGLE 46-dim frame (not the stacked 138 vector)."""
+    if obs.shape[0] != SINGLE_OBS_DIM:
+        return [f"obs_dim={obs.shape[0]}!={SINGLE_OBS_DIM}"]
     bad = []
     if not bool(np.all(np.isfinite(obs))):
         bad.append("non_finite")
@@ -229,6 +234,7 @@ class PolicyNode(Node):
         self.create_timer(self._dt, self._tick)
 
         self._latest_obs: np.ndarray | None = None
+        self._obs_history = np.zeros(POLICY_INPUT_DIM, dtype=np.float32)  # 3×46 frame stack
         self._obs_stamp: float | None = None
         self._est_stamp: float | None = None
         self._est_health: float = 0.0
@@ -305,7 +311,7 @@ class PolicyNode(Node):
             self._joint_vel[name] = float(vel)
 
     def _on_observation(self, msg: Float32MultiArray) -> None:
-        self._latest_obs = np.array(msg.data[:OBS_DIM], dtype=np.float32)
+        self._latest_obs = np.array(msg.data[:SINGLE_OBS_DIM], dtype=np.float32)
         self._obs_stamp = time.monotonic()
 
     def _on_state_estimate(self, msg: Float32MultiArray) -> None:
@@ -409,19 +415,23 @@ class PolicyNode(Node):
         if self._latest_obs is None or self._policy is None:
             return self._q_default_urdf.tolist()
 
-        obs = self._latest_obs.copy()
-        obs[37:49] = np.clip(self._last_action, -5.0, 5.0)
-        bad = _validate_obs(obs)
+        single = self._latest_obs.copy()
+        # authoritative last_action (our previous output) in the newest frame
+        single[34:46] = np.clip(self._last_action, -5.0, 5.0)
+        bad = _validate_obs(single)
         if bad:
             self.get_logger().warn(
                 f"obs anomaly: {' | '.join(bad[:6])}"
                 + (f" ...+{len(bad)-6}" if len(bad) > 6 else ""),
                 throttle_duration_sec=3.0,
             )
+        # frame stacking: shift history left one frame, append newest at the end
+        self._obs_history[:-SINGLE_OBS_DIM] = self._obs_history[SINGLE_OBS_DIM:]
+        self._obs_history[-SINGLE_OBS_DIM:] = single
         try:
             import torch
             with torch.inference_mode():
-                obs_t = torch.from_numpy(obs).unsqueeze(0)
+                obs_t = torch.from_numpy(self._obs_history).unsqueeze(0)
                 action = self._policy(obs_t).squeeze(0).numpy()
         except Exception as e:
             self.get_logger().error(f"[policy] inference error: {e}", throttle_duration_sec=1.0)
@@ -431,8 +441,8 @@ class PolicyNode(Node):
         self._pub_raw.publish(Float32MultiArray(data=action.tolist()))
         self.get_logger().info(
             f"[policy] raw_action[max={np.max(np.abs(action)):+.1f}]  "
-            f"cmd_vel={[f'{x:+.2f}' for x in obs[9:12]]}  "
-            f"h={obs[12]:.3f}",
+            f"cmd_vel={[f'{x:+.2f}' for x in single[6:9]]}  "
+            f"h={single[9]:.3f}",
             throttle_duration_sec=1.0,
         )
         q_urdf = _decode_action(
@@ -505,7 +515,7 @@ class PolicyNode(Node):
         if self._phase == _PHASE_WAIT:
             self._publish(self._q_default_urdf.tolist())
             if self._latest_obs is not None and self._joint_state_seen:
-                cmd_vel = self._latest_obs[9:12]
+                cmd_vel = self._latest_obs[6:9]
                 if any(abs(v) > 1e-4 for v in cmd_vel):
                     if not self._is_near(self._q_default_urdf.tolist(), _STANDUP_TOL):
                         self.get_logger().warn(
@@ -521,7 +531,7 @@ class PolicyNode(Node):
                         )
                         return
                     obs = self._latest_obs.copy()
-                    obs[37:49] = self._last_action
+                    obs[34:46] = self._last_action
                     bad = _validate_obs(obs)
                     if bad:
                         self.get_logger().error(
@@ -534,6 +544,7 @@ class PolicyNode(Node):
                     self._phase_start = now
                     self._raw_high_count = 0
                     self._last_action = np.zeros(12, dtype=np.float32)
+                    self._obs_history[:] = 0.0  # reset frame stack on POLICY entry
                     self._reset_policy()
                     self.get_logger().info("[policy] cmd_vel received -> POLICY")
             return
@@ -567,7 +578,7 @@ class PolicyNode(Node):
                 self._raw_high_count = 0
             if obs is not None:
                 obs_check = obs.copy()
-                obs_check[37:49] = self._last_action
+                obs_check[34:46] = self._last_action
                 bad = _validate_obs(obs_check)
                 if bad:
                     self.get_logger().error(

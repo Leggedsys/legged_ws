@@ -1,4 +1,4 @@
-"""Tests for the Gazebo sim policy node's 49-dim obs assembly and action decode.
+"""Tests for the Gazebo sim policy node's 46-dim obs assembly and action decode.
 
 Sim works in policy/sim order (no reorder, no hip sign flip). The obs layout and
 scaling must match the real obs_assembler — verified by a cross-check.
@@ -23,23 +23,23 @@ def _inputs():
     q_sim = np.arange(12, dtype=np.float32)
     dq_sim = np.arange(12, dtype=np.float32) + 100.0
     q_default = np.zeros(12, dtype=np.float32)
-    last_action = np.arange(12, dtype=np.float32) + 200.0
+    last_action = np.linspace(-3.0, 3.0, 12, dtype=np.float32)
     return state, cmd, height, q_sim, dq_sim, q_default, last_action
 
 
-def test_sim_obs_is_49_dim():
+def test_sim_obs_is_46_dim():
     obs = _assemble_obs(*_inputs())
-    assert obs.shape == (49,)
+    assert obs.shape == (46,)
     assert obs.dtype == np.float32
 
 
 def test_sim_obs_scaling_and_height():
     s, c, h, qs, dqs, qd, la = _inputs()
     obs = _assemble_obs(s, c, h, qs, dqs, qd, la)
-    np.testing.assert_allclose(obs[0:3], s[0:3] * 2.0, rtol=1e-6)
-    np.testing.assert_allclose(obs[9:12], [0.5 * 2.0, -0.3 * 2.0, 0.8 * 0.25], rtol=1e-6)
-    assert obs[12] == np.float32(0.25)
-    np.testing.assert_allclose(obs[25:37], dqs * 0.05, rtol=1e-6)
+    np.testing.assert_allclose(obs[0:3], s[3:6] * 0.25, rtol=1e-6)  # ang_vel first, no lin_vel
+    np.testing.assert_allclose(obs[6:9], [0.5 * 2.0, -0.3 * 2.0, 0.8 * 0.25], rtol=1e-6)
+    assert obs[9] == np.float32(0.25)
+    np.testing.assert_allclose(obs[22:34], dqs * 0.05, rtol=1e-6)
 
 
 def test_sim_matches_real_assembler():
