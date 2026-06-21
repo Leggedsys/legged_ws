@@ -290,11 +290,7 @@ class MotorBusNode(Node):
                 )
 
             pos = float(data.q) / gr - offset
-            # Reject single-frame spikes: clamp to ±1.0 rad change per tick
-            if abs(pos - self._last_pos[name]) < 1.0:
-                self._last_pos[name] = pos
-            else:
-                pos = self._last_pos[name]
+            self._last_pos[name] = pos
 
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()

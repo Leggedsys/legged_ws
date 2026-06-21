@@ -76,7 +76,6 @@ class MotorCommandBridge(Node):
         now = time.monotonic()
         dt = now - self._last_time if self._last_time else 0.02
         self._last_time = now
-        max_step = self._max_joint_speed * dt
 
         q_urdf_list: list[float] = []
         q_motor_list: list[float] = []
@@ -89,11 +88,6 @@ class MotorCommandBridge(Node):
                 max(float(cfg["q_min"]), min(float(cfg["q_max"]), q_urdf))
             )
             q_motor = direction * (q_urdf_clipped - zero_offset)
-            # Speed limit
-            prev = self._last_cmd.get(name, q_motor)
-            delta = q_motor - prev
-            if abs(delta) > max_step:
-                q_motor = prev + max_step * (1.0 if delta > 0 else -1.0)
             self._last_cmd[name] = q_motor
             q_urdf_list.append(q_urdf)
             q_motor_list.append(q_motor)

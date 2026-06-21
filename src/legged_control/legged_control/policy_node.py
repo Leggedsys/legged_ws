@@ -53,8 +53,6 @@ def _decode_action(
     q_default_urdf_yaml: np.ndarray,
     action_scale_yaml: np.ndarray,
     sign_flip_policy_idx: list[int],
-    soft_q_min_urdf: np.ndarray,
-    soft_q_max_urdf: np.ndarray,
 ) -> np.ndarray:
     action = action_policy.copy()
     for idx in sign_flip_policy_idx:
@@ -62,7 +60,7 @@ def _decode_action(
 
     action_yaml = _reorder_policy_to_yaml(action)
     q_target_urdf = q_default_urdf_yaml + action_yaml * action_scale_yaml
-    return np.clip(q_target_urdf, soft_q_min_urdf, soft_q_max_urdf)
+    return q_target_urdf
 
 
 def _is_fresh(age: float | None, max_age: float) -> bool:
@@ -168,7 +166,6 @@ class PolicyNode(Node):
         self._q_default_urdf = self._build_q_default_urdf(policy_cfg)
         self._action_scale = self._build_action_scale(policy_cfg)
         self._sign_flip_policy_idx = self._build_sign_flip(policy_cfg)
-        self._soft_q_min_urdf, self._soft_q_max_urdf = self._build_soft_limits(policy_cfg)
 
         control_cfg = cfg["control"]
         standup_cfg = cfg.get("standup", {})
@@ -277,22 +274,6 @@ class PolicyNode(Node):
             if name in _POLICY_JOINT_NAMES:
                 result.append(_POLICY_JOINT_NAMES.index(name))
         return result
-
-    def _build_soft_limits(
-        self, pcfg: dict
-    ) -> tuple[np.ndarray, np.ndarray]:
-        lims = pcfg.get("joint_soft_limits", {})
-        hip   = lims.get("hip",   [-0.45,  0.45])
-        thigh = lims.get("thigh", [-1.48,  0.68])
-        calf  = lims.get("calf",  [-2.295, -0.405])
-        type_map = {"hip": hip, "thigh": thigh, "calf": calf}
-        q_min, q_max = [], []
-        for name in _YAML_JOINT_NAMES:
-            jtype = name.split("_")[1]  # "hip" / "thigh" / "calf"
-            lo, hi = type_map[jtype]
-            q_min.append(float(lo))
-            q_max.append(float(hi))
-        return np.array(q_min, dtype=np.float32), np.array(q_max, dtype=np.float32)
 
     def _reset_policy(self) -> None:
         """Reload model to reset GRU hidden state."""
@@ -458,8 +439,6 @@ class PolicyNode(Node):
             self._q_default_urdf,
             self._action_scale,
             self._sign_flip_policy_idx,
-            self._soft_q_min_urdf,
-            self._soft_q_max_urdf,
         )
         return q_urdf.tolist()
 

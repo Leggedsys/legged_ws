@@ -118,8 +118,8 @@ class PassiveMonitorNode(Node):
         pos_rel = self._joint_pos - self._q_default
 
         lines = [
-            "┌─── PASSIVE MONITOR ──────────────────────────────────────┐",
-            "│ JOINTS       pos_rel(rad)   vel(rad/s)                   │",
+            "┌─── PASSIVE MONITOR ──────────────────────────────────────────────┐",
+            "│ JOINTS       q_urdf(rad)   q_min / q_max         pos_rel(rad)  │",
         ]
         for i, name in enumerate(_YAML_JOINT_NAMES):
             flag = " "
@@ -134,7 +134,7 @@ class PassiveMonitorNode(Node):
                 elif pos >= hi - margin:
                     flag = "!"  # near high limit
             lines.append(
-                f"│{flag} {name:<12}  {pos_rel[i]:+7.3f}       {self._joint_vel[i]:+7.3f}            │"
+                f"│{flag} {name:<12}  {pos:+8.4f}    [{lo:+5.2f}, {hi:+5.2f}]    {pos_rel[i]:+8.4f}      │"
             )
         lines += [
             "│ IMU                                                      │",
