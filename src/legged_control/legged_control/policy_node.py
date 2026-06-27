@@ -148,6 +148,8 @@ _LIEDOWN_TIMEOUT = 3.0  # seconds past lie_down_duration before forcing PASSIVE
 _RAW_LIMIT    = 20.0    # raw_action divergence threshold
 _RAW_FAULT_N  = 3       # consecutive frames above limit → FAULT
 _INPUT_MAX_AGE = 0.1    # s — obs / state_estimate older than this is unusable
+_ZERO_CMD_EPS  = 1e-3   # |cmd_vel| component below this counts as "no command"
+_ZERO_CMD_STOP_S = 0.3  # sustained zero cmd_vel before holding default pose (stop)
 
 
 class PolicyNode(Node):
@@ -211,6 +213,8 @@ class PolicyNode(Node):
         self._passive_broadcast = False
         self._fault_broadcast = False
         self._raw_high_count = 0
+        self._last_cmd_move_time: float = 0.0
+        self._cmd_stopped = False
 
         self._joint_pos: dict[str, float] = {}
         self._joint_vel: dict[str, float] = {}
@@ -399,7 +403,7 @@ class PolicyNode(Node):
 
         single = self._latest_obs.copy()
         # authoritative last_action (our previous output) in the newest frame
-        single[34:46] = np.clip(self._last_action, -5.0, 5.0)
+        single[34:46] = self._last_action
         bad = _validate_obs(single)
         if bad:
             self.get_logger().warn(
@@ -517,24 +521,18 @@ class PolicyNode(Node):
                             throttle_duration_sec=2.0,
                         )
                         return
-                    obs = self._latest_obs.copy()
-                    obs[34:46] = self._last_action
-                    bad = _validate_obs(obs)
-                    if bad:
-                        self.get_logger().error(
-                            f"🚨 obs out of range: {', '.join(bad[:8])}"
-                            + (f" ...+{len(bad)-8} more" if len(bad) > 8 else ""),
-                            throttle_duration_sec=2.0,
-                        )
-                        return
                     self._phase = _PHASE_POLICY
                     self._phase_start = now
                     self._raw_high_count = 0
                     self._last_action = np.zeros(12, dtype=np.float32)
-                    # Reset the frame stack on POLICY entry (this IS the policy
-                    # reset for the stacked MLP — no model reload needed).
+                    self._last_cmd_move_time = now
+                    self._cmd_stopped = False
+                    # Reset on POLICY entry: zero the frame stack AND reset the
+                    # recurrent (GRU) hidden state so the new run starts clean and
+                    # does not carry walking context from a previous session.
                     self._obs_history[:] = 0.0
                     self._last_stacked_stamp = None
+                    self._reset_policy()
                     self.get_logger().info("[policy] cmd_vel received -> POLICY")
             return
 
@@ -549,8 +547,25 @@ class PolicyNode(Node):
                 self._publish(self._q_default_urdf.tolist())
                 self._last_action = np.zeros(12, dtype=np.float32)
                 return
+            # Zero-command stop: the GRU retains walking context, so when the stick
+            # returns to neutral the policy would keep moving. Once cmd_vel has been
+            # ~zero for _ZERO_CMD_STOP_S, hold the default pose and reset the hidden
+            # state (once) so the robot actually stops and resumes clean on next cmd.
+            cmd_vel = self._latest_obs[6:9] if self._latest_obs is not None else (0.0, 0.0, 0.0)
+            if any(abs(float(v)) > _ZERO_CMD_EPS for v in cmd_vel):
+                self._last_cmd_move_time = now
+                self._cmd_stopped = False
+            elif now - self._last_cmd_move_time > _ZERO_CMD_STOP_S:
+                if not self._cmd_stopped:
+                    self._cmd_stopped = True
+                    self._obs_history[:] = 0.0
+                    self._last_stacked_stamp = None
+                    self._last_action = np.zeros(12, dtype=np.float32)
+                    self._reset_policy()
+                    self.get_logger().info("[policy] cmd_vel ~0 → holding default pose (stop)")
+                self._publish(self._q_default_urdf.tolist())
+                return
             targets = self._run_inference()
-            obs = self._latest_obs
             # divergence guard: if raw_action stays above limit, FAULT
             if np.max(np.abs(self._last_action)) > _RAW_LIMIT:
                 self._raw_high_count += 1
@@ -565,19 +580,6 @@ class PolicyNode(Node):
                     return
             else:
                 self._raw_high_count = 0
-            if obs is not None:
-                obs_check = obs.copy()
-                obs_check[34:46] = self._last_action
-                bad = _validate_obs(obs_check)
-                if bad:
-                    self.get_logger().error(
-                        f"\U0001f6a8 POLICY obs out of range: {', '.join(bad[:6])}"
-                        + (f" ...+{len(bad)-6} more" if len(bad) > 6 else ""),
-                        throttle_duration_sec=2.0,
-                    )
-                    self._publish(self._q_default_urdf.tolist())
-                    self._last_action = np.zeros(12, dtype=np.float32)
-                    return
             dry_run = bool(self.get_parameter("policy_dry_run").value)
             if dry_run:
                 self._publish(self._q_default_urdf.tolist())
