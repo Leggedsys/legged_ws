@@ -74,11 +74,13 @@ class MotorCommandBridge(Node):
     def _on_command(self, msg: JointState) -> None:
         pos_map = dict(zip(msg.name, msg.position))
         now = time.monotonic()
-        dt = now - self._last_time if self._last_time else 0.02
+        has_prev = self._last_time is not None
+        dt = (now - self._last_time) if has_prev else 0.02
         self._last_time = now
 
         q_urdf_list: list[float] = []
         q_motor_list: list[float] = []
+        dq_motor_list: list[float] = []
         for name in self._names:
             cfg = self._joint_cfg[name]
             direction = float(cfg["direction"])
@@ -88,9 +90,17 @@ class MotorCommandBridge(Node):
                 max(float(cfg["q_min"]), min(float(cfg["q_max"]), q_urdf))
             )
             q_motor = direction * (q_urdf_clipped - zero_offset)
+            # velocity feedforward: differentiate consecutive position commands.
+            # clamp to max_joint_speed to catch glitches (e.g. first frame, dropout).
+            if has_prev:
+                dq = (q_motor - self._last_cmd[name]) / dt
+                dq = max(-self._max_joint_speed, min(self._max_joint_speed, dq))
+            else:
+                dq = 0.0
             self._last_cmd[name] = q_motor
             q_urdf_list.append(q_urdf)
             q_motor_list.append(q_motor)
+            dq_motor_list.append(dq)
 
         if self._log_file is not None:
             self._log_file.write(
@@ -104,6 +114,7 @@ class MotorCommandBridge(Node):
         out.header.stamp = self.get_clock().now().to_msg()
         out.name = list(self._names)
         out.position = q_motor_list
+        out.velocity = dq_motor_list
         self._pub.publish(out)
 
 
