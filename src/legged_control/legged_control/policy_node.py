@@ -99,6 +99,14 @@ from std_msgs.msg import Bool, Float32MultiArray
 
 from legged_control.kinematics import _smoothstep
 
+
+def _make_log_dir() -> str:
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    d = os.path.expanduser(f"~/.legged_logs/policy_timing_{ts}")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 # ── obs validation (sanity bounds on the scaled 46-dim single frame) ─────────────
 # Ranges are conservative sanity gates, not tight training 2σ bounds. Command and
 # height bounds come from the dog_urdf command ranges (scaled); velocity/joint
@@ -147,7 +155,7 @@ _VEL_SETTLED  = 0.05
 _LIEDOWN_TIMEOUT = 3.0  # seconds past lie_down_duration before forcing PASSIVE
 _RAW_LIMIT    = 20.0    # raw_action divergence threshold
 _RAW_FAULT_N  = 3       # consecutive frames above limit → FAULT
-_INPUT_MAX_AGE = 0.1    # s — obs / state_estimate older than this is unusable
+_INPUT_MAX_AGE = 0.02   # s — skip inference if obs/estimate older than 1 policy frame
 _ZERO_CMD_EPS  = 1e-3   # |cmd_vel| component below this counts as "no command"
 _ZERO_CMD_STOP_S = 0.3  # sustained zero cmd_vel before holding default pose (stop)
 
@@ -219,6 +227,7 @@ class PolicyNode(Node):
         self._joint_pos: dict[str, float] = {}
         self._joint_vel: dict[str, float] = {}
         self._joint_state_seen = False
+        self._joint_states_stamp: float = 0.0
 
         self._gain_clients = [
             self.create_client(SetParameters, "/motor_bus_front/set_parameters"),
@@ -232,14 +241,27 @@ class PolicyNode(Node):
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state_estimate, 10)
         self.create_subscription(Bool, "/posture_command", self._on_posture, 10)
         self.add_on_set_parameters_callback(self._on_gains_changed)
-        self.create_timer(self._dt, self._tick)
+        self.create_timer(0.005, self._tick)  # 200 Hz — polls obs_ready with ≤5ms lag
 
         self._latest_obs: np.ndarray | None = None
         self._obs_history = np.zeros(POLICY_INPUT_DIM, dtype=np.float32)  # 3×46 frame stack
         self._last_stacked_stamp: float | None = None
         self._obs_stamp: float | None = None
+        self._obs_ready: bool = False  # True when a new /observation arrived since last tick
         self._est_stamp: float | None = None
         self._est_health: float = 0.0
+
+        self._timing_ts = _make_log_dir()
+        self._timing_csv = open(os.path.join(self._timing_ts, "policy_timing.csv"), "w", buffering=1)
+        self._timing_csv.write(
+            "t_wall,t_mono,phase,model_called,obs_age_ms,est_age_ms,act_age_ms,tick_ms,inference_ms,"
+            + ",".join(f"cmd_{n}" for n in self._joint_names_yaml) + ","
+            + ",".join(f"act_{n}" for n in self._joint_names_yaml) + "\n"
+        )
+        self._timing_tick: float = 0.0  # set in _tick
+        self._timing_inf_start: float = 0.0  # set in _run_inference
+        self._timing_inf_done: float = 0.0
+        self._t0: float = 0.0  # tick entry time for timing
 
         self.get_logger().info(
             f"policy_node ready — {loop_hz:.0f} Hz  "
@@ -295,10 +317,12 @@ class PolicyNode(Node):
         for name, pos, vel in zip(msg.name, msg.position, msg.velocity):
             self._joint_pos[name] = float(pos)
             self._joint_vel[name] = float(vel)
+        self._joint_states_stamp = time.monotonic()
 
     def _on_observation(self, msg: Float32MultiArray) -> None:
         self._latest_obs = np.array(msg.data[:SINGLE_OBS_DIM], dtype=np.float32)
         self._obs_stamp = time.monotonic()
+        self._obs_ready = True
 
     def _on_state_estimate(self, msg: Float32MultiArray) -> None:
         # data[9] (if present) = state-estimator health flag (1.0 ok / 0.0 not ready)
@@ -380,6 +404,38 @@ class PolicyNode(Node):
         msg.position = positions
         self._pub.publish(msg)
 
+        t1 = time.monotonic()
+        if self._t0 > 0:
+            tick_ms = (t1 - self._t0) * 1000.0
+            inf_ms = (
+                (self._timing_inf_done - self._timing_inf_start) * 1000.0
+                if self._timing_inf_start > 0
+                else 0.0
+            )
+            obs_age = (
+                (t1 - self._obs_stamp) * 1000.0
+                if self._obs_stamp is not None
+                else -1.0
+            )
+            est_age = (
+                (t1 - self._est_stamp) * 1000.0
+                if self._est_stamp is not None
+                else -1.0
+            )
+            act_age = (t1 - self._joint_states_stamp) * 1000.0 if self._joint_states_stamp > 0 else -1.0
+            cmd_str = ",".join(f"{v:.6f}" for v in positions)
+            act_str = ",".join(
+                f"{self._joint_pos.get(n, 0.0):.6f}" for n in self._joint_names_yaml
+            )
+            self._timing_csv.write(
+                f"{time.time():.3f},{t1:.6f},{self._phase},{inf_ms > 0},"
+                f"{obs_age:.3f},{est_age:.3f},{act_age:.3f},{tick_ms:.3f},{inf_ms:.3f},"
+                f"{cmd_str},{act_str}\n"
+            )
+            self._t0 = 0.0
+            self._timing_inf_start = 0.0
+            self._timing_inf_done = 0.0
+
     def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
@@ -422,10 +478,12 @@ class PolicyNode(Node):
             # no new frame this tick — refresh only the newest frame's last_action
             self._obs_history[-SINGLE_OBS_DIM:] = single
         try:
+            self._timing_inf_start = time.monotonic()
             import torch
             with torch.inference_mode():
                 obs_t = torch.from_numpy(self._obs_history).unsqueeze(0)
                 action = self._policy(obs_t).squeeze(0).numpy()
+            self._timing_inf_done = time.monotonic()
         except Exception as e:
             self.get_logger().error(f"[policy] inference error: {e}", throttle_duration_sec=1.0)
             return self._q_default_urdf.tolist()
@@ -446,8 +504,56 @@ class PolicyNode(Node):
         )
         return q_urdf.tolist()
 
+    def _handle_policy(self, now: float) -> None:
+        if not self._inputs_ok():
+            self.get_logger().error(
+                "[policy] inputs stale/unhealthy during POLICY — holding default pose",
+                throttle_duration_sec=1.0,
+            )
+            self._publish(self._q_default_urdf.tolist())
+            self._last_action = np.zeros(12, dtype=np.float32)
+            return
+        cmd_vel = self._latest_obs[6:9] if self._latest_obs is not None else (0.0, 0.0, 0.0)
+        if any(abs(float(v)) > _ZERO_CMD_EPS for v in cmd_vel):
+            self._last_cmd_move_time = now
+            self._cmd_stopped = False
+        elif now - self._last_cmd_move_time > _ZERO_CMD_STOP_S:
+            if not self._cmd_stopped:
+                self._cmd_stopped = True
+                self._obs_history[:] = 0.0
+                self._last_stacked_stamp = None
+                self._last_action = np.zeros(12, dtype=np.float32)
+                self._reset_policy()
+                self.get_logger().info("[policy] cmd_vel ~0 → holding default pose (stop)")
+            self._publish(self._q_default_urdf.tolist())
+            return
+        targets = self._run_inference()
+        if np.max(np.abs(self._last_action)) > _RAW_LIMIT:
+            self._raw_high_count += 1
+            if self._raw_high_count >= _RAW_FAULT_N:
+                self.get_logger().error(
+                    f"[policy] raw_action exceeded {_RAW_LIMIT} for {_RAW_FAULT_N} "
+                    f"frames → FAULT (physical feedback lost?)"
+                )
+                self._phase = _PHASE_FAULT
+                self._phase_start = None
+                self._raw_high_count = 0
+                return
+        else:
+            self._raw_high_count = 0
+        dry_run = bool(self.get_parameter("policy_dry_run").value)
+        if dry_run:
+            self._publish(self._q_default_urdf.tolist())
+            self.get_logger().info(
+                "[policy] DRY RUN: holding default pose (policy_dry_run=true)",
+                throttle_duration_sec=5.0,
+            )
+        else:
+            self._publish(targets)
+
     def _tick(self) -> None:
-        now = time.monotonic()
+        self._t0 = time.monotonic()
+        now = self._t0
 
         if self._phase == _PHASE_PASSIVE:
             if self._stand_requested:
@@ -485,6 +591,10 @@ class PolicyNode(Node):
                             throttle_duration_sec=2.0,
                         )
             return
+
+        if self._phase in (_PHASE_POLICY, _PHASE_WAIT) and not self._obs_ready:
+            return
+        self._obs_ready = False
 
         if self._phase_start is None:
             self._phase_start = now
@@ -537,58 +647,7 @@ class PolicyNode(Node):
             return
 
         if self._phase == _PHASE_POLICY:
-            if not self._inputs_ok():
-                # Lost fresh obs / state estimate (e.g. IMU or a node dropped) —
-                # hold the default pose instead of acting on stale/garbage input.
-                self.get_logger().error(
-                    "[policy] inputs stale/unhealthy during POLICY — holding default pose",
-                    throttle_duration_sec=1.0,
-                )
-                self._publish(self._q_default_urdf.tolist())
-                self._last_action = np.zeros(12, dtype=np.float32)
-                return
-            # Zero-command stop: the GRU retains walking context, so when the stick
-            # returns to neutral the policy would keep moving. Once cmd_vel has been
-            # ~zero for _ZERO_CMD_STOP_S, hold the default pose and reset the hidden
-            # state (once) so the robot actually stops and resumes clean on next cmd.
-            cmd_vel = self._latest_obs[6:9] if self._latest_obs is not None else (0.0, 0.0, 0.0)
-            if any(abs(float(v)) > _ZERO_CMD_EPS for v in cmd_vel):
-                self._last_cmd_move_time = now
-                self._cmd_stopped = False
-            elif now - self._last_cmd_move_time > _ZERO_CMD_STOP_S:
-                if not self._cmd_stopped:
-                    self._cmd_stopped = True
-                    self._obs_history[:] = 0.0
-                    self._last_stacked_stamp = None
-                    self._last_action = np.zeros(12, dtype=np.float32)
-                    self._reset_policy()
-                    self.get_logger().info("[policy] cmd_vel ~0 → holding default pose (stop)")
-                self._publish(self._q_default_urdf.tolist())
-                return
-            targets = self._run_inference()
-            # divergence guard: if raw_action stays above limit, FAULT
-            if np.max(np.abs(self._last_action)) > _RAW_LIMIT:
-                self._raw_high_count += 1
-                if self._raw_high_count >= _RAW_FAULT_N:
-                    self.get_logger().error(
-                        f"[policy] raw_action exceeded {_RAW_LIMIT} for {_RAW_FAULT_N} "
-                        f"frames → FAULT (physical feedback lost?)"
-                    )
-                    self._phase = _PHASE_FAULT
-                    self._phase_start = None
-                    self._raw_high_count = 0
-                    return
-            else:
-                self._raw_high_count = 0
-            dry_run = bool(self.get_parameter("policy_dry_run").value)
-            if dry_run:
-                self._publish(self._q_default_urdf.tolist())
-                self.get_logger().info(
-                    "[policy] DRY RUN: holding default pose (policy_dry_run=true)",
-                    throttle_duration_sec=5.0,
-                )
-            else:
-                self._publish(targets)
+            self._handle_policy(now)
             return
 
         if self._phase == _PHASE_LIEDOWN:

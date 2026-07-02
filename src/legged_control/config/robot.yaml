@@ -131,10 +131,10 @@ control:
   # TODO(台架)：单关节挂已知重量、量角度偏差 Δθ，算 K_joint = τ/Δθ 确认 ≈20。
   #   关键：calf 的 gr² 是 hip/thigh 的 4 倍，所以 calf 的 kp/kd 应 ≈ hip/thigh 的 1/4。
   #   现状：kp 已按 1/4 拆分（1.5 / 0.375）；kd 仍为 0.4×（0.05 / 0.02），待继续调。
-  kp: 1.5
-  kd: 0.07
-  kp_calf: 0.375
-  kd_calf: 0.03
+  kp: 0.5
+  kd: 0.0125
+  kp_calf: 0.125
+  kd_calf: 0.0031
   gait_hz: 50.0   # policy control frequency
   max_joint_speed: 12.0   # rad/s (URDF frame) — safety cap on per-joint cmd delta.
                           # Set near hardware limit (dog_urdf joint vel 12-14 rad/s)
