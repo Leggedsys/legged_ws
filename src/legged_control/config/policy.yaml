@@ -43,13 +43,3 @@ policy:
   # Empty: robot.yaml direction/zero_offset already maps the motor frame to the
   # training URDF frame, so no extra hip flip is applied. (Verify in passive mode.)
   hip_sign_flip: []
-
-  # Soft joint limits in URDF frame used to clip policy output (POLICY phase only).
-  # 0.9x of the dog_urdf hard limits (hip [-0.5,0.5], thigh [-1.90,1.92], calf [-2.80,-0.28]),
-  # symmetric about each joint midpoint.
-  # 策略输出软限位（URDF 系，四腿对称）。须 ⊆ robot.yaml 的硬件 q_min/q_max。
-  # calf 上限取 -0.5 与 robot.yaml 一致（两道裁剪不打架）。
-  joint_soft_limits:
-    hip:   [-0.395,  0.450]
-    thigh: [-1.709,  1.400]
-    calf:  [-2.650, -0.500]

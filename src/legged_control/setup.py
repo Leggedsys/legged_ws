@@ -56,7 +56,6 @@ setup(
             "state_estimator_node  = legged_control.processing.state_estimator_node:main",
             "obs_assembler         = legged_control.processing.obs_assembler:main",
             "policy_node           = legged_control.policy_node:main",
-            "policy_node_sim       = legged_control.sim.policy_node_sim:main",
         ],
     },
 )

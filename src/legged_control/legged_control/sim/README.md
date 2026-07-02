@@ -22,10 +22,6 @@
 | 订阅 | `/joint_commands` | `sensor_msgs/JointState` (URDF frame, YAML 顺序) |
 | 订阅 | `/joint_states` | `sensor_msgs/JointState` (Gazebo 原始，`_joint` 后缀) |
 
-### policy_node_sim（暂保留）
-
-仿真版策略节点，简化版（无状态机，直接 URDF 帧）。预计在 `policy_node.py` 能直接在仿真运行后移除。
-
 ---
 
 ## 数据流

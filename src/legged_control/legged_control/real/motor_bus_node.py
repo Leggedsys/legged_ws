@@ -92,6 +92,26 @@ class MotorBusNode(Node):
         control_cfg = cfg.get("control", {})
         calf_kp = float(control_cfg["kp_calf"]) if "kp_calf" in control_cfg else global_kp
         calf_kd = float(control_cfg["kd_calf"]) if "kd_calf" in control_cfg else global_kd
+
+        # Outer PID, wrapped around the motor's own PD ("PD1": cmd.kp/cmd.kd
+        # above). Output is a torque feedforward (cmd.tau) added on top of
+        # PD1's own torque — PD1 itself is untouched. All outer gains default
+        # to 0.0 (fully inert) so this is a no-op until tuned via
+        # `ros2 param set /motor_bus_front outer_ki 0.5` etc., same workflow
+        # as kp/kd. max_tau_ff is an UNVERIFIED placeholder — confirm against
+        # the actual GO-M8010-6 joint torque rating before raising outer_kp/
+        # outer_ki/outer_kd off zero.
+        self.declare_parameter("outer_kp", float(control_cfg.get("outer_kp", 0.0)))
+        self.declare_parameter("outer_ki", float(control_cfg.get("outer_ki", 0.0)))
+        self.declare_parameter("outer_kd", float(control_cfg.get("outer_kd", 0.0)))
+        self.declare_parameter("max_tau_ff", float(control_cfg.get("max_tau_ff", 3.0)))
+        outer_kp = float(self.get_parameter("outer_kp").value)
+        outer_ki = float(self.get_parameter("outer_ki").value)
+        outer_kd = float(self.get_parameter("outer_kd").value)
+        outer_kp_calf = float(control_cfg.get("outer_kp_calf", outer_kp))
+        outer_ki_calf = float(control_cfg.get("outer_ki_calf", outer_ki))
+        outer_kd_calf = float(control_cfg.get("outer_kd_calf", outer_kd))
+
         # Declare per-joint kp/kd parameters (runtime-tunable via ros2 param set).
         # Priority: per-joint kp/kd in joint config > group (kp_calf) > global.
         for j in joints:
@@ -101,6 +121,13 @@ class MotorBusNode(Node):
             group_kd = calf_kd if is_calf else global_kd
             self.declare_parameter(f"kp_{name}", float(j["kp"]) if "kp" in j else group_kp)
             self.declare_parameter(f"kd_{name}", float(j["kd"]) if "kd" in j else group_kd)
+            self.declare_parameter(f"outer_kp_{name}", outer_kp_calf if is_calf else outer_kp)
+            self.declare_parameter(f"outer_ki_{name}", outer_ki_calf if is_calf else outer_ki)
+            self.declare_parameter(f"outer_kd_{name}", outer_kd_calf if is_calf else outer_kd)
+
+        self._integral = {name: 0.0 for name in self._names}
+        self._last_vel = {name: 0.0 for name in self._names}
+        self._dt = 1.0 / float(self.get_parameter("loop_hz").value)
 
         self._motor_ids = {j["name"]: int(j["motor_id"]) for j in joints}
 
@@ -270,7 +297,23 @@ class MotorBusNode(Node):
             cmd.kd = ratio_kd * float(self.get_parameter(f"kd_{name}").value)
             cmd.q = (self._targets[name] + offset) * gr
             cmd.dq = 0.0
-            cmd.tau = 0.0
+            # Outer PID torque feedforward, wrapped around PD1 (cmd.kp/cmd.kd
+            # above). `ratio` (PD1's estop-fade factor) scales this too, so
+            # the feedforward fades out in lockstep with PD1 on command loss.
+            error = self._targets[name] - self._last_pos[name]
+            outer_kp = ratio * float(self.get_parameter(f"outer_kp_{name}").value)
+            outer_ki = ratio * float(self.get_parameter(f"outer_ki_{name}").value)
+            outer_kd = ratio * float(self.get_parameter(f"outer_kd_{name}").value)
+            max_tau_ff = float(self.get_parameter("max_tau_ff").value)
+            if outer_ki > 0.0:
+                max_integral = max_tau_ff / outer_ki
+                self._integral[name] = max(
+                    -max_integral, min(max_integral, self._integral[name] + error * self._dt)
+                )
+            else:
+                self._integral[name] = 0.0  # disabled or estopped — no windup carryover
+            tau_ff = outer_kp * error + outer_ki * self._integral[name] + outer_kd * (-self._last_vel[name])
+            cmd.tau = max(-max_tau_ff, min(max_tau_ff, tau_ff))
             self._serial.sendRecv(cmd, data)
 
             if not data.correct or int(data.motor_id) != self._motor_ids[name]:

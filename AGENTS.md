@@ -32,8 +32,7 @@ legged_control/legged_control/
 │   ├── motor_command_bridge.py   /joint_commands (URDF) → motor frame → /joint_commands_motor
 │   └── urdf_joint_state_bridge.py → /joint_states (TF tree)
 ├── sim/            simulation data sources
-│   ├── gazebo_control_bridge.py  Gazebo joints → /joint_states_aggregated (URDF, YAML order)
-│   └── policy_node_sim.py        (deprecated, being removed)
+│   └── gazebo_control_bridge.py  Gazebo joints → /joint_states_aggregated (URDF, YAML order)
 ├── processing/     shared obs computation (real + sim)
 │   ├── state_estimator_node.py   IMU + VIO odom → /state_estimate
 │   ├── height_scan_node.py       depth → /height_scan (325 floats)
@@ -149,11 +148,9 @@ Changes take effect immediately. Update `robot.yaml` when satisfied.
 | Protection | Where |
 |-----------|-------|
 | E-stop (B button) | teleop_node → posture_command=false + zero Twist |
-| Joint speed limit | motor_command_bridge (max_joint_speed in robot.yaml) |
-| Hardware angle clip | motor_command_bridge (q_min/q_max in robot.yaml) |
-| Soft angle limits | policy_node (policy.yaml soft limits) |
+| Hardware angle clip (only angle clip layer) | motor_command_bridge (q_min/q_max in robot.yaml) |
 | Obs validation gate | policy_node (before WAIT→POLICY) |
-| Spike filter | motor_bus_node (>±1.0 rad/tick rejected) |
+| raw_action divergence → FAULT trip | policy_node |
 | Motor temp/error | motor_bus_node (data.temp, data.merror) |
 
 See `docs/safety.md` for the full safety architecture and e-stop response flow.
