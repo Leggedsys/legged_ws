@@ -334,6 +334,7 @@ class MotorBusNode(Node):
 
             pos = float(data.q) / gr - offset
             self._last_pos[name] = pos
+            self._last_vel[name] = float(data.dq) / gr
 
             msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
