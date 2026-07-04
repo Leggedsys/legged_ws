@@ -158,16 +158,16 @@ teleop:
   max_dz:  0.03  # m/s height rate limit
 
 mpc:
-  # Physical parameters for SRBD-MPC, derived from dog_urdf/urdf/dog_urdf.urdf.
-  # mass: sum of all link masses.
-  mass:    10.92
-  # Diagonal body-frame inertia (kg⋅m²): sum of all link inertias (parallel-axis
-  # terms from leg CoM offsets are small vs base_link contribution, omitted here).
-  # base_link alone: Ixx=0.00874 Iyy=0.00892 Izz=0.00903
-  # all links summed: Ixx=0.01472 Iyy=0.01711 Izz=0.01274
-  Ixx:    0.0147
-  Iyy:    0.0171
-  Izz:    0.0127
+  # Physical parameters for SRBD-MPC.
+  # mass: measured — each leg 1.5 kg × 4 + base 8.55 kg = 14.55 kg.
+  # (URDF under-reports base mass; URDF total was 10.92 kg.)
+  mass:    14.55
+  # Diagonal body-frame inertia (kg⋅m²): URDF summed values scaled by
+  # actual/URDF mass ratio (14.55/10.92 ≈ 1.33). Rough estimate only —
+  # replace with system-ID result if oscillation is observed.
+  Ixx:    0.0196
+  Iyy:    0.0228
+  Izz:    0.0169
   horizon: 10   # MPC prediction steps
 
 standup:
