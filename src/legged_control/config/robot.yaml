@@ -158,14 +158,16 @@ teleop:
   max_dz:  0.03  # m/s height rate limit
 
 mpc:
-  # Physical parameters for SRBD-MPC.
-  # mass: total robot mass (kg). Measure or check URDF.
-  mass:    12.0
-  # Diagonal body-frame inertia (kg⋅m²). Approximate values for Go1-class robots.
-  # TODO: replace with values from URDF inertia tags or system ID.
-  Ixx:    0.017
-  Iyy:    0.056
-  Izz:    0.064
+  # Physical parameters for SRBD-MPC, derived from dog_urdf/urdf/dog_urdf.urdf.
+  # mass: sum of all link masses.
+  mass:    10.92
+  # Diagonal body-frame inertia (kg⋅m²): sum of all link inertias (parallel-axis
+  # terms from leg CoM offsets are small vs base_link contribution, omitted here).
+  # base_link alone: Ixx=0.00874 Iyy=0.00892 Izz=0.00903
+  # all links summed: Ixx=0.01472 Iyy=0.01711 Izz=0.01274
+  Ixx:    0.0147
+  Iyy:    0.0171
+  Izz:    0.0127
   horizon: 10   # MPC prediction steps
 
 standup:
