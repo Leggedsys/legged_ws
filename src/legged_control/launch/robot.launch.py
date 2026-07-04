@@ -1,15 +1,15 @@
 """robot.launch.py — real robot with modes.
 
-Includes real.launch.py for all hardware, adds processing + policy.
-kp/kd come from robot.yaml (policy mode) or overridden to 0 (passive mode).
+Includes real.launch.py for all hardware, adds processing + policy/MPC.
+kp/kd come from robot.yaml (policy/mpc mode) or overridden to 0 (passive mode).
 
 Launch args:
-  mode          [passive]           passive | policy
+  mode          [passive]           passive | policy | mpc
   legs          [all]
   serial_port_front   [from robot.yaml]
   serial_port_rear    [from robot.yaml]
-  model_path    []                  Path to TorchScript .pt policy file
-#   dry_run       [false]             true = log motor cmds to file, motors passive
+  model_path    []                  Path to TorchScript .pt file (policy mode only)
+  dry_run       [false]
 """
 
 import os
@@ -39,11 +39,11 @@ def _launch_setup(context, *args, **kwargs):
     if mode == "passive":
         kp_override = "0.0"
         kd_override = "0.0"
-    elif mode == "policy":
+    elif mode in ("policy", "mpc"):
         kp_override = "-1"  # use config value
         kd_override = "-1"
     else:
-        raise RuntimeError(f"Unknown mode '{mode}'. Valid: passive, policy")
+        raise RuntimeError(f"Unknown mode '{mode}'. Valid: passive, policy, mpc")
 
     nodes = [
         IncludeLaunchDescription(
@@ -59,28 +59,31 @@ def _launch_setup(context, *args, **kwargs):
         ),
     ]
 
-    # ── processing + obs ─────────────────────────────────────────────────
-    nodes += [
-        make_state_estimator(), make_teleop(),
-        make_obs_assembler(),
-    ]
+    # ── processing ───────────────────────────────────────────────────────
+    nodes += [make_state_estimator(), make_teleop()]
+    if mode in ("passive", "policy"):
+        # obs_assembler packs 46-dim frame for policy_node; not needed for MPC
+        nodes.append(make_obs_assembler())
+
+    # ── controller ───────────────────────────────────────────────────────
+    if mode == "policy":
+        nodes.append(
+            Node(package="legged_control", executable="policy_node",
+                 name="policy_node",
+                 parameters=[{"model_path": LaunchConfiguration("model_path")}],
+                 output="screen")
+        )
+    elif mode == "mpc":
+        nodes.append(
+            Node(package="legged_control", executable="mpc_node",
+                 name="mpc_node", output="screen")
+        )
 
     # ── TF + visualization ───────────────────────────────────────────────
     rsp = make_robot_state_publisher()
     if rsp is not None:
         nodes.append(rsp)
-    nodes += [make_vel_viz(), make_monitor_node()]
-
-    if mode == "passive":
-        nodes.append(make_rviz2())
-    elif mode == "policy":
-        nodes += [
-            Node(package="legged_control", executable="policy_node",
-                 name="policy_node",
-                 parameters=[{"model_path": LaunchConfiguration("model_path")}],
-                 output="screen"),
-            make_rviz2(),
-        ]
+    nodes += [make_vel_viz(), make_monitor_node(), make_rviz2()]
 
     return nodes
 
