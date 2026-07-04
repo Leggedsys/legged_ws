@@ -323,12 +323,27 @@ class MPCNode(Node):
         gains.data = [val for pair in zip(cmd.kp, cmd.kd) for val in pair]
         self._pub_gains.publish(gains)
 
+    def _compute_stance_q(self, stance_h: float) -> list[float]:
+        """IK-derived joint targets for nominal stance at stance_h. Used by both
+        standup ramp and balance_stance so they share the same goal with no snap."""
+        targets: dict[str, float] = {}
+        for leg in _MPC_LEG_ORDER:
+            p_foot = nominal_foot_position(leg, stance_h)
+            preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
+            q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
+            if q_leg is None:
+                q_leg = tuple(self._q_default[i] for i, n in enumerate(_YAML_JOINTS) if n in _leg_joints(leg))
+            for jname, qval in zip(_leg_joints(leg), q_leg):
+                targets[jname] = float(qval)
+        return [targets[n] for n in _YAML_JOINTS]
+
     def _standup_targets(self, elapsed: float) -> tuple[JointCommand, bool]:
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
-        start = self._standup_start or self._q_default.tolist()
-        q = [(1.0 - alpha) * s + alpha * g
-             for s, g in zip(start, self._q_default.tolist())]
+        start  = self._standup_start or self._q_default.tolist()
+        stance_h = float(self.get_parameter("stance_height").value)
+        goal   = self._compute_stance_q(stance_h)
+        q = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
         kp = [self._base_kp[n] * self._kp_swing_scale for n in _YAML_JOINTS]
         kd = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
         return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= ramp
@@ -345,15 +360,8 @@ class MPCNode(Node):
 
     def _balance_stance(self, stance_h: float) -> JointCommand:
         """Four-foot MPC balance: all legs in contact, zero velocity reference."""
-        joint_targets: dict[str, float] = {}
-        for leg in _MPC_LEG_ORDER:
-            p_foot = nominal_foot_position(leg, stance_h)
-            preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
-            q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
-            if q_leg is None:
-                q_leg = tuple(self._q_default[i] for i, n in enumerate(_YAML_JOINTS) if n in _leg_joints(leg))
-            for jname, qval in zip(_leg_joints(leg), q_leg):
-                joint_targets[jname] = float(qval)
+        stance_q = self._compute_stance_q(stance_h)
+        joint_targets = dict(zip(_YAML_JOINTS, stance_q))
 
         srbd_state = _state_from_estimate(self._state_estimate, self._com_pos)
         state_ref = np.array([
@@ -552,7 +560,8 @@ class MPCNode(Node):
             cmd, done = self._standup_targets(elapsed)
             self._publish(cmd)
             est_fresh = self._est_stamp is not None and (now - self._est_stamp) <= _EST_TIMEOUT
-            if done and self._is_near(self._q_default.tolist(), _STANDUP_TOL) and self._is_settled():
+            stance_h = float(self.get_parameter("stance_height").value)
+            if done and self._is_near(self._compute_stance_q(stance_h), _STANDUP_TOL) and self._is_settled():
                 if not est_fresh:
                     self.get_logger().warn(
                         "[mpc] standup done but state_estimate stale — holding, waiting for estimate",
