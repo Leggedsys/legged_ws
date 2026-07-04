@@ -119,6 +119,38 @@ def _state_from_estimate(est: np.ndarray, pos: np.ndarray | None = None) -> np.n
     ], dtype=float)
 
 
+def _build_stance_tau(
+    grf: np.ndarray,
+    joint_targets: dict[str, float],
+    contact_now: list[bool] | None = None,
+) -> list[float]:
+    """Convert MPC GRF solution to joint torques via Jacobian transpose.
+
+    τ_ff[leg] = J(q)^T · f_contact   (stance legs only; swing legs get 0)
+
+    Args:
+        grf:          12-element GRF vector [f0x,f0y,f0z, ..., f3x,f3y,f3z]
+        joint_targets: per-joint URDF-frame angles used for Jacobian evaluation
+        contact_now:  4-bool list [FR,FL,RR,RL]; None = all in contact
+
+    Returns:
+        12-element list of joint torques in YAML_JOINTS order
+    """
+    if contact_now is None:
+        contact_now = [True, True, True, True]
+    tau_dict: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
+    for i, leg in enumerate(_MPC_LEG_ORDER):
+        if not contact_now[i]:
+            continue
+        f_leg = grf[i * 3 : i * 3 + 3]
+        joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
+        J = _numerical_jacobian(leg, joints_leg)
+        tau_leg = J.T @ f_leg
+        for jname, t in zip(_leg_joints(leg), tau_leg):
+            tau_dict[jname] = float(t)
+    return [tau_dict[n] for n in _YAML_JOINTS]
+
+
 class MPCNode(Node):
     def __init__(self) -> None:
         super().__init__("mpc_node")
@@ -298,12 +330,8 @@ class MPCNode(Node):
         targets = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
         return targets, elapsed >= dur
 
-    def _balance_stance(self, stance_h: float) -> list[float]:
-        """Four-foot MPC balance: all legs in contact, zero velocity reference.
-
-        Runs the full MPC solver with contact_schedule all-True so the robot
-        actively resists perturbations while standing still.
-        """
+    def _balance_stance(self, stance_h: float) -> JointCommand:
+        """Four-foot MPC balance: all legs in contact, zero velocity reference."""
         joint_targets = {n: float(self._q_default[i]) for i, n in enumerate(_YAML_JOINTS)}
 
         srbd_state = _state_from_estimate(self._state_estimate, self._com_pos)
@@ -319,25 +347,26 @@ class MPCNode(Node):
         foot_pos_world = np.zeros((4, 3))
         for i, leg in enumerate(_MPC_LEG_ORDER):
             joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-            p_body = np.array(forward_kinematics(leg, joints_leg))
-            foot_pos_world[i] = R_body @ p_body
+            foot_pos_world[i] = R_body @ np.array(forward_kinematics(leg, joints_leg))
 
+        tau_list = [0.0] * 12
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
-            for i, leg in enumerate(_MPC_LEG_ORDER):
-                f_leg = grf[i * 3 : i * 3 + 3]
-                joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-                J = _numerical_jacobian(leg, joints_leg)
-                K_joint = 20.0  # TODO(Task 3): replace with τ_ff + dynamic kp/kd
-                dq = np.clip(J.T @ f_leg / K_joint, -0.05, 0.05)
-                for jname, delta in zip(_leg_joints(leg), dq):
-                    joint_targets[jname] = float(joint_targets[jname] + delta)
+            tau_list = _build_stance_tau(grf, joint_targets)
         except Exception as exc:
             self.get_logger().warn(
                 f"[mpc/balance] solver failed: {exc}", throttle_duration_sec=2.0
             )
 
-        return [joint_targets[n] for n in _YAML_JOINTS]
+        kp = [self._base_kp[n] * self._kp_stance_scale for n in _YAML_JOINTS]
+        kd = [self._base_kd[n] * self._kd_stance_scale for n in _YAML_JOINTS]
+        return JointCommand(
+            q=[joint_targets[n] for n in _YAML_JOINTS],
+            dq=[0.0] * 12,
+            tau=tau_list,
+            kp=kp,
+            kd=kd,
+        )
 
     def _compute_mpc_joints(self, now: float) -> list[float]:
         """Run one MPC step and return 12 joint position targets."""

@@ -247,3 +247,26 @@ def test_kp_scale_gives_correct_per_joint_value():
     assert stance_kp["FR_calf"]  == pytest.approx(0.125)
     assert swing_kp["FR_hip"]    == pytest.approx(3.0)
     assert swing_kp["FR_calf"]   == pytest.approx(1.0)
+
+
+def test_balance_stance_returns_joint_command_with_tau():
+    """_build_stance_tau should return a 12-element list with non-zero torques for stance legs."""
+    import sys
+    sys.path.insert(0, "src/legged_control")
+    import numpy as np
+    from legged_control.mpc.mpc_node import _build_stance_tau, _YAML_JOINTS
+
+    # 给定已知 GRF（每腿 35.7 N 竖直）
+    grf = np.zeros(12)
+    for i in range(4):
+        grf[i * 3 + 2] = 35.7  # fz
+
+    q_targets = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
+                 for n in _YAML_JOINTS}
+    tau = _build_stance_tau(grf, q_targets)
+
+    assert len(tau) == 12
+    # 至少一个关节有非零力矩
+    assert any(abs(t) > 0.01 for t in tau), "All torques are zero — J^T·f not applied"
+    # 无关节超过电机额定
+    assert all(abs(t) < 23.0 for t in tau), f"Torque out of range: {tau}"
