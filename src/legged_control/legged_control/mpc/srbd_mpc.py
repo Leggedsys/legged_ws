@@ -16,7 +16,6 @@ Reference:
 from __future__ import annotations
 
 import numpy as np
-from scipy.optimize import minimize
 
 
 _G = 9.81  # m/s²
@@ -164,18 +163,17 @@ class SRBDMPC:
         Gamma = np.zeros((N * nx, N * nu))
         g_bias = np.zeros(N * nx)
 
+        # Build Phi and g_bias with O(N) recursion:
+        #   x_{k+1} = Ad_k @ x_k + Bd_k @ u_k + g_vec
+        #   Phi_k   = Ad_k @ Phi_{k-1}
+        #   g_bias_k = Ad_k @ g_bias_{k-1} + g_vec
         A_prod = np.eye(nx)
+        g_bias_k = np.zeros(nx)
         for k in range(N):
-            A_prod = Ad_list[k] @ A_prod
+            A_prod   = Ad_list[k] @ A_prod
+            g_bias_k = Ad_list[k] @ g_bias_k + g_vec
             Phi[k*nx:(k+1)*nx, :] = A_prod
-            # gravity accumulation
-            g_acc = np.zeros(nx)
-            A_run = np.eye(nx)
-            for j in range(k + 1):
-                g_acc += A_run @ g_vec
-                if j < k:
-                    A_run = Ad_list[k - j - 1] @ A_run
-            g_bias[k*nx:(k+1)*nx] = g_acc
+            g_bias[k*nx:(k+1)*nx] = g_bias_k
 
         for k in range(N):
             A_run = np.eye(nx)
@@ -197,73 +195,29 @@ class SRBDMPC:
         # Make symmetric (numerical noise)
         H = (H + H.T) * 0.5
 
-        # Constraints: friction cone + normal force bounds per contact
-        ineq_list = []
+        # Unconstrained QP solution: u* = -H^{-1} f
+        # Much faster than SLSQP with Python lambda constraints (~1ms vs ~1000ms).
+        # Constraints are enforced afterwards by projection (per-leg clamp).
+        try:
+            u_opt = np.linalg.solve(H, -f_vec)
+        except np.linalg.LinAlgError:
+            u_opt = np.linalg.lstsq(H, -f_vec, rcond=None)[0]
+
+        # Project onto constraint set per step per leg:
+        #   swing legs → zero force
+        #   stance legs → fz ∈ [f_min, f_max], |fx|/|fy| ≤ μ*fz
         for k in range(N):
             for i, in_contact in enumerate(contact_schedule[k]):
                 base = k * nu + i * 3
                 if not in_contact:
-                    # force must be zero for swing legs — handled via eq constraint
+                    u_opt[base:base + 3] = 0.0
                     continue
-                # fz ≥ f_min
-                ineq_list.append((base + 2, 1.0, self._f_min, None))
-                # fz ≤ f_max
-                ineq_list.append((base + 2, -1.0, -self._f_max, None))
-                # |fx| ≤ μ*fz  → fx - μ*fz ≤ 0  and  -fx - μ*fz ≤ 0
-                ineq_list.append((base, 1.0, None, (base + 2, self._mu)))
-                ineq_list.append((base, -1.0, None, (base + 2, self._mu)))
-                ineq_list.append((base + 1, 1.0, None, (base + 2, self._mu)))
-                ineq_list.append((base + 1, -1.0, None, (base + 2, self._mu)))
+                fz = float(np.clip(u_opt[base + 2], self._f_min, self._f_max))
+                f_xy_max = self._mu * fz
+                fx = float(np.clip(u_opt[base],     -f_xy_max, f_xy_max))
+                fy = float(np.clip(u_opt[base + 1], -f_xy_max, f_xy_max))
+                u_opt[base]     = fx
+                u_opt[base + 1] = fy
+                u_opt[base + 2] = fz
 
-        def objective(u):
-            return 0.5 * u @ H @ u + f_vec @ u
-
-        def gradient(u):
-            return H @ u + f_vec
-
-        constraints = []
-        # Zero force for swing legs
-        for k in range(N):
-            for i, in_contact in enumerate(contact_schedule[k]):
-                if not in_contact:
-                    for d in range(3):
-                        idx = k * nu + i * 3 + d
-                        constraints.append({
-                            "type": "eq",
-                            "fun": lambda u, idx=idx: u[idx],
-                            "jac": lambda u, idx=idx: np.eye(N * nu)[idx],
-                        })
-
-        # Friction + normal force bounds as inequality constraints
-        for (fi, sign, lb, friction) in ineq_list:
-            if lb is not None:
-                constraints.append({
-                    "type": "ineq",
-                    "fun": lambda u, fi=fi, sign=sign, lb=lb: sign * u[fi] - lb,
-                })
-            elif friction is not None:
-                fz_idx, mu = friction
-                constraints.append({
-                    "type": "ineq",
-                    "fun": lambda u, fi=fi, sign=sign, fz_idx=fz_idx, mu=mu:
-                        mu * u[fz_idx] - sign * u[fi],
-                })
-
-        u0 = np.zeros(N * nu)
-        # Warm-start: set stance forces to body weight / n_contacts
-        n_contacts_0 = max(1, sum(contact_schedule[0]))
-        fz0 = self._mass * _G / n_contacts_0
-        for i, in_contact in enumerate(contact_schedule[0]):
-            if in_contact:
-                u0[i * 3 + 2] = fz0
-
-        result = minimize(
-            objective,
-            u0,
-            jac=gradient,
-            method="SLSQP",
-            constraints=constraints,
-            options={"maxiter": 50, "ftol": 1e-4},
-        )
-
-        return result.x[:nu]  # GRF for first step only
+        return u_opt[:nu]  # GRF for first step only

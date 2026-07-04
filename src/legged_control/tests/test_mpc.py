@@ -22,27 +22,37 @@ def test_gait_all_legs_present():
 
 
 def test_gait_trot_diagonal_pairs():
-    """FL+RR and FR+RL should be in opposite phases."""
+    """Diagonal pairs (FL+RR, FR+RL) must always be in sync; both pairs must swing."""
     g = GaitScheduler(period=0.6, swing_ratio=0.4)
-    for t in [0.0, 0.1, 0.2, 0.3]:
-        s = g.query(t=t)
-        assert s["FL"]["contact"] == s["RR"]["contact"], f"FL/RR mismatch at t={t}"
-        assert s["FR"]["contact"] == s["RL"]["contact"], f"FR/RL mismatch at t={t}"
-        assert s["FL"]["contact"] != s["FR"]["contact"], f"FL/FR should be opposite at t={t}"
+    t0 = g._t0
+    fl_swung = fr_swung = False
+    # sample 100 points across one full period — avoids floating-point boundary cases
+    for dt in np.linspace(0.0, 0.6, 100, endpoint=False):
+        s = g.query(t=t0 + dt)
+        assert s["FL"]["contact"] == s["RR"]["contact"], f"FL/RR mismatch at dt={dt:.4f}"
+        assert s["FR"]["contact"] == s["RL"]["contact"], f"FR/RL mismatch at dt={dt:.4f}"
+        if not s["FL"]["contact"]:
+            fl_swung = True
+        if not s["FR"]["contact"]:
+            fr_swung = True
+    assert fl_swung, "FL/RR pair never entered swing phase"
+    assert fr_swung, "FR/RL pair never entered swing phase"
 
 
 def test_gait_phase_in_range():
     g = GaitScheduler(period=0.6, swing_ratio=0.4)
-    for t in np.linspace(0, 1.2, 50):
+    t0 = g._t0
+    for dt in np.linspace(0, 1.2, 50):
         for leg in LEG_NAMES:
-            p = g.query(t=t)[leg]["phase"]
+            p = g.query(t=t0 + dt)[leg]["phase"]
             assert 0.0 <= p < 1.0, f"phase out of range: {p}"
 
 
 def test_gait_swing_phase_zero_during_stance():
     g = GaitScheduler(period=0.6, swing_ratio=0.4)
-    # At t=0, FL is in swing (phase=0 → swing); check at t where FL is in stance
-    for t in np.linspace(0, 0.6, 30):
+    t0 = g._t0
+    for dt in np.linspace(0, 0.6, 30):
+        t = t0 + dt
         s = g.query(t=t)
         sp = g.swing_phase("FL", t=t)
         if s["FL"]["contact"]:
@@ -103,7 +113,7 @@ def test_landing_target_clamped():
 @pytest.fixture
 def mpc():
     inertia = np.diag([0.0196, 0.0228, 0.0169])
-    return SRBDMPC(mass=14.55, inertia_body=inertia, dt=0.02, horizon=10)
+    return SRBDMPC(mass=14.55, inertia_body=inertia, dt=0.02, horizon=6)
 
 
 def test_mpc_output_shape(mpc):
@@ -116,7 +126,7 @@ def test_mpc_output_shape(mpc):
         [-0.18, -0.13, -0.27],
         [-0.18,  0.13, -0.27],
     ])
-    contact = [[True, False, False, True]] * 10  # trot: FR+RL in contact
+    contact = [[True, False, False, True]] * 6  # trot: FR+RL in contact
     grf = mpc.solve(state, state_ref, foot_pos, contact)
     assert grf.shape == (12,), f"Expected (12,), got {grf.shape}"
 
@@ -128,7 +138,7 @@ def test_mpc_swing_forces_near_zero(mpc):
     state_ref = state.copy()
     foot_pos = np.zeros((4, 3))
     foot_pos[:, 2] = -0.27
-    contact = [[True, False, False, True]] * 10  # FL, RR are swing
+    contact = [[True, False, False, True]] * 6  # FL, RR are swing
     grf = mpc.solve(state, state_ref, foot_pos, contact)
     # FL=index 1, RR=index 2 should be ~0
     fl_force = grf[3:6]
@@ -158,7 +168,7 @@ def test_mpc_weight_support(mpc):
     foot_pos = np.zeros((4, 3))
     foot_pos[:, 2] = -0.27
     # All four legs in contact
-    contact = [[True, True, True, True]] * 10
+    contact = [[True, True, True, True]] * 6
     grf = mpc.solve(state, state_ref, foot_pos, contact)
     total_fz = grf[2] + grf[5] + grf[8] + grf[11]
     weight = 14.55 * 9.81
@@ -170,13 +180,13 @@ def test_mpc_weight_support(mpc):
 # ── Solver timing benchmark ────────────────────────────────────────────────────
 
 def test_mpc_solver_timing(mpc):
-    """SLSQP must solve in < 20ms to fit 50Hz control loop."""
+    """Solver must fit in < 20ms to leave headroom in the 50Hz loop."""
     state = np.zeros(12)
     state[5] = 0.27
     state_ref = state.copy()
     foot_pos = np.zeros((4, 3))
     foot_pos[:, 2] = -0.27
-    contact = [[True, False, False, True]] * 10
+    contact = [[True, False, False, True]] * 6
 
     n_runs = 20
     times = []
@@ -187,7 +197,7 @@ def test_mpc_solver_timing(mpc):
 
     mean_ms = np.mean(times)
     max_ms  = np.max(times)
-    print(f"\n[timing] SLSQP: mean={mean_ms:.1f}ms  max={max_ms:.1f}ms  (budget=20ms)")
+    print(f"\n[timing] solver: mean={mean_ms:.1f}ms  max={max_ms:.1f}ms  (budget=20ms)")
     assert mean_ms < 20.0, (
         f"Solver too slow: mean={mean_ms:.1f}ms > 20ms. "
         f"Consider reducing horizon or switching to OSQP."

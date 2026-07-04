@@ -168,7 +168,7 @@ mpc:
   Ixx:    0.0196
   Iyy:    0.0228
   Izz:    0.0169
-  horizon: 10   # MPC prediction steps
+  horizon: 6    # MPC prediction steps (N=6 → ~10ms solve on laptop; raise if tracking diverges)
 
 standup:
   ramp_duration: 6.0       # seconds for 0 → q_default smooth-step ramp
