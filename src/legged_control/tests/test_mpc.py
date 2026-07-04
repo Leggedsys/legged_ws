@@ -270,3 +270,27 @@ def test_balance_stance_returns_joint_command_with_tau():
     assert any(abs(t) > 0.01 for t in tau), "All torques are zero — J^T·f not applied"
     # 无关节超过电机额定
     assert all(abs(t) < 23.0 for t in tau), f"Torque out of range: {tau}"
+
+
+def test_build_stance_tau_swing_legs_zero():
+    """Swing legs must have zero torque regardless of GRF."""
+    import sys
+    sys.path.insert(0, "src/legged_control")
+    import numpy as np
+    from legged_control.mpc.mpc_node import _build_stance_tau, _YAML_JOINTS
+
+    grf = np.ones(12) * 50.0  # non-zero GRF
+    q_targets = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
+                 for n in _YAML_JOINTS}
+
+    # FR(0) stance, FL(1) swing, RR(2) swing, RL(3) stance
+    contact = [True, False, False, True]
+    tau = _build_stance_tau(grf, q_targets, contact_now=contact)
+
+    # FL joints (index 3,4,5) and RR joints (index 6,7,8) should be 0
+    fl_tau = tau[3:6]
+    rr_tau = tau[6:9]
+    assert all(t == 0.0 for t in fl_tau), f"FL swing should have zero tau: {fl_tau}"
+    assert all(t == 0.0 for t in rr_tau), f"RR swing should have zero tau: {rr_tau}"
+    # FR and RL should be non-zero
+    assert any(abs(t) > 0.0 for t in tau[0:3]), "FR stance should have non-zero tau"

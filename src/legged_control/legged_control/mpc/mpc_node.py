@@ -236,6 +236,7 @@ class MPCNode(Node):
             for leg in LEG_NAMES
         }
         self._prev_contact: dict[str, bool] = {leg: True for leg in LEG_NAMES}
+        self._prev_swing_q: dict[str, float | None] = {n: None for n in _YAML_JOINTS}
 
         self._phase = _PHASE_PASSIVE
         self._phase_start: float | None = None
@@ -368,8 +369,8 @@ class MPCNode(Node):
             kd=kd,
         )
 
-    def _compute_mpc_joints(self, now: float) -> list[float]:
-        """Run one MPC step and return 12 joint position targets."""
+    def _compute_mpc_joints(self, now: float) -> JointCommand:
+        """Run one MPC step and return a full JointCommand."""
         stance_h = float(self.get_parameter("stance_height").value)
         step_h   = float(self.get_parameter("step_height").value)
 
@@ -379,56 +380,49 @@ class MPCNode(Node):
             )
             return self._balance_stance(stance_h)
 
-        # Velocity threshold: hold stance when stopped
         moving = float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
         if not moving:
             if self._walking:
-                # Transition: walk → stand; reset gait for clean restart next time
                 self._gait.reset()
                 self._prev_contact = {leg: True for leg in LEG_NAMES}
                 self._lift_pos = {
                     leg: nominal_foot_position(leg, stance_h) for leg in LEG_NAMES
                 }
+                self._prev_swing_q = {n: None for n in _YAML_JOINTS}
                 self._walking = False
             return self._balance_stance(stance_h)
 
         if not self._walking:
-            # Transition: stand → walk; reset gait phase and lift positions
             self._gait.reset()
             self._lift_pos = {
                 leg: nominal_foot_position(leg, stance_h) for leg in LEG_NAMES
             }
+            self._prev_swing_q = {n: None for n in _YAML_JOINTS}
             self._walking = True
 
         gait_state = self._gait.query(now)
 
-        # Update lift-off positions on stance→swing transition
         for leg in LEG_NAMES:
             in_contact = gait_state[leg]["contact"]
             if self._prev_contact[leg] and not in_contact:
-                # Just entered swing: record current foot position as lift-off
                 joints_leg = tuple(self._joint_pos[j] for j in _leg_joints(leg))
                 self._lift_pos[leg] = np.array(forward_kinematics(leg, joints_leg))
             self._prev_contact[leg] = in_contact
 
-        # --- Foot positions in hip frame ---
-        # Foot positions in world frame for MPC (relative to CoM)
-        # For stance legs: keep at current FK position; for swing: trajectory
         joint_targets: dict[str, float] = {}
+        dq_targets:    dict[str, float] = {}
 
         for leg in LEG_NAMES:
             in_contact = gait_state[leg]["contact"]
-            phase = gait_state[leg]["phase"]
             joints_leg = tuple(self._joint_pos[j] for j in _leg_joints(leg))
 
             if in_contact:
-                # Stance: hold current joint angles (MPC will compute corrections via GRF,
-                # but since we output positions, hold default stance foot position)
                 p_foot = nominal_foot_position(leg, stance_h)
+                for jname in _leg_joints(leg):
+                    dq_targets[jname] = 0.0
             else:
-                # Swing: interpolate foot trajectory
                 s = self._gait.swing_phase(leg, now)
-                body_vel_xy = self._state_estimate[0:2]  # actual velocity for Raibert heuristic
+                body_vel_xy = self._state_estimate[0:2]
                 p_land = landing_target(
                     leg, body_vel_xy,
                     self._gait.period,
@@ -437,32 +431,38 @@ class MPCNode(Node):
                 )
                 p_foot = swing_foot_position(s, self._lift_pos[leg], p_land, step_h)
 
-            # IK: foot position in hip frame → joint angles
             preferred = joints_leg
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
             if q_leg is None:
-                # IK failure: fall back to default
                 q_leg = (
                     _DEFAULT_Q[f"{leg}_hip"],
                     _DEFAULT_Q[f"{leg}_thigh"],
                     _DEFAULT_Q[f"{leg}_calf"],
                 )
+
             for jname, qval in zip(_leg_joints(leg), q_leg):
                 joint_targets[jname] = float(qval)
 
-        # --- MPC body pose correction for stance legs ---
-        # Build current SRBD state
+            if not in_contact:
+                for jname, qval in zip(_leg_joints(leg), q_leg):
+                    prev = self._prev_swing_q.get(jname)
+                    dq_targets[jname] = float(
+                        np.clip((qval - prev) / self._dt, -12.0, 12.0)
+                    ) if prev is not None else 0.0
+                    self._prev_swing_q[jname] = float(qval)
+            else:
+                for jname in _leg_joints(leg):
+                    self._prev_swing_q[jname] = None
+
         srbd_state = _state_from_estimate(self._state_estimate, self._com_pos)
-        # Desired state: level body at stance height, commanded velocity
         state_ref = np.array([
-            0.0, 0.0, 0.0,           # desired rpy = level
-            0.0, 0.0, stance_h,       # desired pos (XY relative, Z = height)
-            0.0, 0.0, self._cmd_vel[2],  # desired ang_vel (yaw rate)
-            self._cmd_vel[0], self._cmd_vel[1], 0.0,  # desired lin_vel
+            0.0, 0.0, 0.0,
+            0.0, 0.0, stance_h,
+            0.0, 0.0, self._cmd_vel[2],
+            self._cmd_vel[0], self._cmd_vel[1], 0.0,
         ])
 
         contact_now = [gait_state[leg]["contact"] for leg in _MPC_LEG_ORDER]
-        # Look-ahead contact schedule: query gait phase at each future step
         contact_schedule = []
         for k in range(self._mpc._N):
             t_future = now + k * self._dt
@@ -471,43 +471,41 @@ class MPCNode(Node):
                 [future_state[leg]["contact"] for leg in _MPC_LEG_ORDER]
             )
 
-        # Foot positions in world frame: rotate body-frame FK result by body orientation
         R_body = _euler_to_R(srbd_state[:3])
         foot_pos_world = np.zeros((4, 3))
         for i, leg in enumerate(_MPC_LEG_ORDER):
             joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-            p_body = np.array(forward_kinematics(leg, joints_leg))
-            foot_pos_world[i] = R_body @ p_body
+            foot_pos_world[i] = R_body @ np.array(forward_kinematics(leg, joints_leg))
 
+        tau_list = [0.0] * 12
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
-            # Convert GRF → joint position correction via Jacobian transpose:
-            #   τ = J^T * f_contact  (contact force in hip frame)
-            #   Δq = τ / K_joint     (K_joint = effective joint stiffness, Nm/rad)
-            # K_joint ≈ kp × gr² ≈ 20 Nm/rad for hip/thigh, calf same by design.
-            K_joint = 20.0
-            for i, leg in enumerate(_MPC_LEG_ORDER):
-                if not contact_now[i]:
-                    continue
-                f_leg = grf[i * 3 : i * 3 + 3]          # contact force for this leg
-                joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-                J = _numerical_jacobian(leg, joints_leg)  # 3×3, hip frame
-                tau = J.T @ f_leg                          # joint torques (3,)
-                K_joint = 20.0  # TODO(Task 4): replace with τ_ff + dynamic kp/kd
-                dq = tau / K_joint                          # position correction (rad)
-                dq = np.clip(dq, -0.05, 0.05)             # safety clamp
-                for jname, delta in zip(_leg_joints(leg), dq):
-                    joint_targets[jname] = float(joint_targets[jname] + delta)
+            tau_list = _build_stance_tau(grf, joint_targets, contact_now=contact_now)
         except Exception as exc:
             self.get_logger().warn(
                 f"[mpc] solver failed: {exc}", throttle_duration_sec=2.0
             )
 
-        # Integrate CoM velocity: rotate body-frame velocity to world frame first
         v_world = R_body @ srbd_state[9:12]
         self._com_pos[:2] += v_world[:2] * self._dt
 
-        return [joint_targets[n] for n in _YAML_JOINTS]
+        kp_list = []
+        kd_list = []
+        for leg in _MPC_LEG_ORDER:
+            in_contact = gait_state[leg]["contact"]
+            scale_kp = self._kp_stance_scale if in_contact else self._kp_swing_scale
+            scale_kd = self._kd_stance_scale if in_contact else self._kd_swing_scale
+            for jname in _leg_joints(leg):
+                kp_list.append(self._base_kp[jname] * scale_kp)
+                kd_list.append(self._base_kd[jname] * scale_kd)
+
+        return JointCommand(
+            q=[joint_targets[n] for n in _YAML_JOINTS],
+            dq=[dq_targets.get(n, 0.0) for n in _YAML_JOINTS],
+            tau=tau_list,
+            kp=kp_list,
+            kd=kd_list,
+        )
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -553,8 +551,8 @@ class MPCNode(Node):
             return
 
         if self._phase == _PHASE_WALK:
-            targets = self._compute_mpc_joints(now)
-            self._publish(targets)
+            cmd = self._compute_mpc_joints(now)
+            self._publish(cmd.q)
             return
 
         if self._phase == _PHASE_LIEDOWN:
