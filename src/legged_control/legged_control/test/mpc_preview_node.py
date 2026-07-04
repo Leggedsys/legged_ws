@@ -56,7 +56,12 @@ class MPCPreviewNode(Node):
 
         vis = JointState()
         vis.header.stamp = self.get_clock().now().to_msg()
-        vis.name     = list(msg.name)
+        # robot_state_publisher matches names against the URDF's <joint> tags,
+        # which all carry a "_joint" suffix (e.g. FR_hip_joint) — /joint_commands
+        # uses the bare motor/policy names, so the suffix must be added here or
+        # robot_state_publisher silently finds zero matching joints and every
+        # leg stays frozen at the URDF default pose.
+        vis.name     = [f"{n}_joint" for n in msg.name]
         vis.position = list(msg.position)
         self._pub_vis.publish(vis)
 

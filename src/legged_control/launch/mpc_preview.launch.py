@@ -22,6 +22,7 @@ def generate_launch_description() -> LaunchDescription:
              name="mpc_node", output="screen"),
         Node(package="legged_control", executable="teleop_node",
              name="teleop_node", output="log"),
+        Node(package="joy", executable="joy_node", name="joy_node", output="log"),
     ]
 
     rsp = make_robot_state_publisher()

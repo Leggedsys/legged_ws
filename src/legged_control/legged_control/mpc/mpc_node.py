@@ -343,7 +343,7 @@ class MPCNode(Node):
             if in_contact:
                 # Stance: hold current joint angles (MPC will compute corrections via GRF,
                 # but since we output positions, hold default stance foot position)
-                p_foot = np.array([0.0, 0.0, -stance_h])
+                p_foot = nominal_foot_position(leg, stance_h)
             else:
                 # Swing: interpolate foot trajectory
                 s = self._gait.swing_phase(leg, now)
