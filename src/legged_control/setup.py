@@ -32,6 +32,7 @@ setup(
                 "launch/test.launch.py",
                 "launch/gazebo_physics.launch.py",
                 "launch/gazebo_sim.launch.py",
+                "launch/mpc_preview.launch.py",
             ],
         ),
     ],
@@ -57,6 +58,7 @@ setup(
             "obs_assembler         = legged_control.processing.obs_assembler:main",
             "policy_node           = legged_control.policy_node:main",
             "mpc_node              = legged_control.mpc.mpc_node:main",
+            "mpc_preview_node      = legged_control.test.mpc_preview_node:main",
         ],
     },
 )
