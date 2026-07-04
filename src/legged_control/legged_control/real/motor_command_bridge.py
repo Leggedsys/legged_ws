@@ -55,7 +55,8 @@ class MotorCommandBridge(Node):
             self._log_file.write(
                 "t,phase," +
                 ",".join(f"{n}_urdf" for n in self._names) + "," +
-                ",".join(f"{n}_motor" for n in self._names) + "\n"
+                ",".join(f"{n}_motor" for n in self._names) + "," +
+                ",".join(f"{n}_tau" for n in self._names) + "\n"
             )
         self.get_logger().info(
             "motor_command_bridge ready — "
@@ -78,43 +79,53 @@ class MotorCommandBridge(Node):
         dt = (now - self._last_time) if has_prev else 0.02
         self._last_time = now
 
-        q_urdf_list: list[float] = []
-        q_motor_list: list[float] = []
+        effort_map: dict[str, float] = {}
+        if len(msg.effort) == len(msg.name):
+            for _n, _e in zip(msg.name, msg.effort):
+                effort_map[_n] = float(_e)
+
+        q_urdf_list:   list[float] = []
+        q_motor_list:  list[float] = []
         dq_motor_list: list[float] = []
+        tau_motor_list: list[float] = []
         for name in self._names:
             cfg = self._joint_cfg[name]
-            direction = float(cfg["direction"])
+            direction   = float(cfg["direction"])
             zero_offset = float(cfg["zero_offset"])
+            gear_ratio  = float(cfg["gear_ratio"])
             q_urdf = float(pos_map.get(name, 0.0))
             q_urdf_clipped = float(
                 max(float(cfg["q_min"]), min(float(cfg["q_max"]), q_urdf))
             )
             q_motor = direction * (q_urdf_clipped - zero_offset)
-            # velocity feedforward: differentiate consecutive position commands.
-            # clamp to max_joint_speed to catch glitches (e.g. first frame, dropout).
             if has_prev:
                 dq = (q_motor - self._last_cmd[name]) / dt
                 dq = max(-self._max_joint_speed, min(self._max_joint_speed, dq))
             else:
                 dq = 0.0
+            tau_urdf  = float(effort_map.get(name, 0.0))
+            tau_motor = direction * tau_urdf / gear_ratio
             self._last_cmd[name] = q_motor
             q_urdf_list.append(q_urdf)
             q_motor_list.append(q_motor)
             dq_motor_list.append(dq)
+            tau_motor_list.append(tau_motor)
 
         if self._log_file is not None:
             self._log_file.write(
                 f"{now:.6f},," +
-                ",".join(f"{v:.6f}" for v in q_urdf_list) + "," +
-                ",".join(f"{v:.6f}" for v in q_motor_list) + "\n"
+                ",".join(f"{v:.6f}" for v in q_urdf_list)    + "," +
+                ",".join(f"{v:.6f}" for v in q_motor_list)   + "," +
+                ",".join(f"{v:.6f}" for v in tau_motor_list) + "\n"
             )
             return  # dry-run: skip publishing, motors stay passive
 
         out = JointState()
         out.header.stamp = self.get_clock().now().to_msg()
-        out.name = list(self._names)
-        out.position = q_motor_list
-        out.velocity = dq_motor_list
+        out.name     = list(self._names)
+        out.position  = q_motor_list
+        out.velocity  = dq_motor_list
+        out.effort    = tau_motor_list
         self._pub.publish(out)
 
 
