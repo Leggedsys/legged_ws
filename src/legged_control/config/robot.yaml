@@ -169,6 +169,13 @@ mpc:
   Iyy:    0.0228
   Izz:    0.0169
   horizon: 6    # MPC prediction steps (N=6 → ~10ms solve on laptop; raise if tracking diverges)
+  K_joint: 20.0 # effective joint stiffness (Nm/rad) used for GRF→Δq mapping (kp × gear_ratio²)
+  # MIT Cheetah 动态增益：比例系数相对各关节现有 kp/kd 基准值
+  # 支撑相低刚度让 tau_ff 主导，摆动相高刚度精确跟踪轨迹
+  kp_stance_scale: 0.25
+  kd_stance_scale: 1.0
+  kp_swing_scale:  2.0
+  kd_swing_scale:  2.0
 
 standup:
   ramp_duration: 6.0       # seconds for 0 → q_default smooth-step ramp
