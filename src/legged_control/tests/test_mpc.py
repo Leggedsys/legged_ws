@@ -100,12 +100,17 @@ def test_swing_clamps_s():
 
 def test_landing_target_zero_vel():
     p = landing_target("FR", np.array([0.0, 0.0]), gait_period=0.6, swing_ratio=0.4)
-    assert p[0] == 0.0 and p[1] == 0.0, "zero velocity → foot directly below hip"
+    expected = nominal_foot_position("FR")
+    np.testing.assert_allclose(p, expected, atol=1e-9,
+                               err_msg="zero velocity → foot at nominal stance position")
 
 
 def test_landing_target_clamped():
     p = landing_target("FR", np.array([10.0, 10.0]), gait_period=0.6, swing_ratio=0.4)
-    assert abs(p[0]) <= 0.12 and abs(p[1]) <= 0.06, "landing target should be clamped"
+    nom = nominal_foot_position("FR")
+    assert abs(p[0] - nom[0]) <= 0.12 and abs(p[1] - nom[1]) <= 0.06, (
+        "Raibert offset should be clamped to ±0.12m x, ±0.06m y"
+    )
 
 
 # ── SRBD MPC ──────────────────────────────────────────────────────────────────
@@ -202,3 +207,43 @@ def test_mpc_solver_timing(mpc):
         f"Solver too slow: mean={mean_ms:.1f}ms > 20ms. "
         f"Consider reducing horizon or switching to OSQP."
     )
+
+
+# ── MIT Cheetah τ_ff ──────────────────────────────────────────────────────────
+
+def test_tau_ff_direction_and_magnitude():
+    """J^T · f_contact should produce plausible stance joint torques."""
+    import sys
+    sys.path.insert(0, "src/legged_control")
+    from legged_control.kinematics import _numerical_jacobian
+    import numpy as np
+
+    joints_fr = (0.1, 0.8, -1.5)
+    J = _numerical_jacobian("FR", joints_fr)
+
+    # 四腿均分 14.55 kg 体重的竖直支撑力
+    fz = 14.55 * 9.81 / 4.0
+    f = np.array([0.0, 0.0, fz])
+    tau = J.T @ f
+
+    # 所有关节力矩绝对值 < 电机额定 23 Nm
+    assert np.all(np.abs(tau) < 23.0), f"τ exceeds motor limit: {tau}"
+    # 大腿（index 1）应为正力矩（支撑体重）
+    assert tau[1] > 0.0, f"Thigh τ should be positive, got {tau[1]:.3f}"
+    # 小腿（index 2）应为负力矩（膝关节弯曲对抗重力）
+    assert tau[2] < 0.0, f"Calf τ should be negative, got {tau[2]:.3f}"
+
+
+def test_kp_scale_gives_correct_per_joint_value():
+    """Stance scale 0.25 applied to base_kp=1.5 should give 0.375."""
+    base_kp = {"FR_hip": 1.5, "FR_thigh": 1.5, "FR_calf": 0.5}
+    stance_scale = 0.25
+    swing_scale  = 2.0
+
+    stance_kp = {n: v * stance_scale for n, v in base_kp.items()}
+    swing_kp  = {n: v * swing_scale  for n, v in base_kp.items()}
+
+    assert stance_kp["FR_hip"]   == pytest.approx(0.375)
+    assert stance_kp["FR_calf"]  == pytest.approx(0.125)
+    assert swing_kp["FR_hip"]    == pytest.approx(3.0)
+    assert swing_kp["FR_calf"]   == pytest.approx(1.0)

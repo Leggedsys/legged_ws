@@ -13,6 +13,7 @@ FSM:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
 import time
 
@@ -37,7 +38,7 @@ from legged_control.mpc.swing_trajectory import (
     nominal_foot_position,
     landing_target,
 )
-from legged_control.mpc.srbd_mpc import SRBDMPC
+from legged_control.mpc.srbd_mpc import SRBDMPC, _euler_to_R
 
 
 # YAML joint order (robot.yaml / /joint_commands convention)
@@ -65,9 +66,20 @@ _STANDUP_TOL  = 0.15   # rad — standup convergence threshold
 _VEL_SETTLED  = 0.05   # rad/s — velocity threshold
 _LIEDOWN_TIMEOUT = 3.0
 _WALK_VEL_THRESH = 0.04  # m/s or rad/s — below this in all axes → hold stance
+_EST_TIMEOUT = 0.5       # s — state_estimate older than this → fall back to balance stance
 
 # MPC leg ordering: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
+
+
+@dataclass
+class JointCommand:
+    """Per-tick joint command output from the MPC controller."""
+    q:   list[float]
+    dq:  list[float]
+    tau: list[float]
+    kp:  list[float]
+    kd:  list[float]
 
 
 def _leg_joints(leg: str) -> list[str]:
@@ -132,6 +144,34 @@ class MPCNode(Node):
         Iyy  = float(mpc_cfg.get("Iyy", 0.056))
         Izz  = float(mpc_cfg.get("Izz", 0.064))
         inertia = np.diag([Ixx, Iyy, Izz])
+
+        # K_joint deprecated (torque feedforward doesn't need this approximation)
+        _ = mpc_cfg.get("K_joint", 20.0)
+
+        # kp/kd scale factors for stance/swing phase switching
+        self._kp_stance_scale = float(mpc_cfg.get("kp_stance_scale", 1.0))
+        self._kd_stance_scale = float(mpc_cfg.get("kd_stance_scale", 1.0))
+        self._kp_swing_scale  = float(mpc_cfg.get("kp_swing_scale",  1.0))
+        self._kd_swing_scale  = float(mpc_cfg.get("kd_swing_scale",  1.0))
+
+        # Per-joint base kp/kd (motor side, same basis as motor_bus_node)
+        _ctrl = control
+        _global_kp = float(_ctrl.get("kp", 0.5))
+        _global_kd = float(_ctrl.get("kd", 0.0125))
+        _calf_kp   = float(_ctrl.get("kp_calf", _global_kp))
+        _calf_kd   = float(_ctrl.get("kd_calf", _global_kd))
+        self._base_kp: dict[str, float] = {}
+        self._base_kd: dict[str, float] = {}
+        for _j in cfg.get("joints", []):
+            _n = _j["name"]
+            _is_calf = "calf" in _n.lower()
+            self._base_kp[_n] = float(_j["kp"]) if "kp" in _j else (_calf_kp if _is_calf else _global_kp)
+            self._base_kd[_n] = float(_j["kd"]) if "kd" in _j else (_calf_kd if _is_calf else _global_kd)
+
+        # Joint limits from robot.yaml — used to clip MPC output before publishing
+        joint_list = cfg.get("joints", [])
+        self._q_min = {j["name"]: float(j["q_min"]) for j in joint_list}
+        self._q_max = {j["name"]: float(j["q_max"]) for j in joint_list}
 
         horizon = int(mpc_cfg.get("horizon", 10))
         self._mpc = SRBDMPC(
@@ -231,11 +271,15 @@ class MPCNode(Node):
         return all(abs(self._joint_vel[n]) <= _VEL_SETTLED for n in _YAML_JOINTS)
 
     def _publish(self, positions: list[float]) -> None:
-        self._last_published = list(positions)
+        clipped = [
+            float(np.clip(q, self._q_min.get(n, -3.14), self._q_max.get(n, 3.14)))
+            for n, q in zip(_YAML_JOINTS, positions)
+        ]
+        self._last_published = clipped
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = list(_YAML_JOINTS)
-        msg.position = positions
+        msg.position = clipped
         self._pub.publish(msg)
 
     def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
@@ -271,18 +315,20 @@ class MPCNode(Node):
         ])
         contact_schedule = [[True, True, True, True]] * self._mpc._N
 
+        R_body = _euler_to_R(srbd_state[:3])
         foot_pos_world = np.zeros((4, 3))
         for i, leg in enumerate(_MPC_LEG_ORDER):
             joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-            foot_pos_world[i] = np.array(forward_kinematics(leg, joints_leg))
+            p_body = np.array(forward_kinematics(leg, joints_leg))
+            foot_pos_world[i] = R_body @ p_body
 
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
-            K_joint = 20.0
             for i, leg in enumerate(_MPC_LEG_ORDER):
                 f_leg = grf[i * 3 : i * 3 + 3]
                 joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
                 J = _numerical_jacobian(leg, joints_leg)
+                K_joint = 20.0  # TODO(Task 3): replace with τ_ff + dynamic kp/kd
                 dq = np.clip(J.T @ f_leg / K_joint, -0.05, 0.05)
                 for jname, delta in zip(_leg_joints(leg), dq):
                     joint_targets[jname] = float(joint_targets[jname] + delta)
@@ -297,6 +343,12 @@ class MPCNode(Node):
         """Run one MPC step and return 12 joint position targets."""
         stance_h = float(self.get_parameter("stance_height").value)
         step_h   = float(self.get_parameter("step_height").value)
+
+        if self._est_stamp is None or (now - self._est_stamp) > _EST_TIMEOUT:
+            self.get_logger().warn(
+                "[mpc] state_estimate stale — holding stance", throttle_duration_sec=1.0
+            )
+            return self._balance_stance(stance_h)
 
         # Velocity threshold: hold stance when stopped
         moving = float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
@@ -347,7 +399,7 @@ class MPCNode(Node):
             else:
                 # Swing: interpolate foot trajectory
                 s = self._gait.swing_phase(leg, now)
-                body_vel_xy = self._cmd_vel[:2]
+                body_vel_xy = self._state_estimate[0:2]  # actual velocity for Raibert heuristic
                 p_land = landing_target(
                     leg, body_vel_xy,
                     self._gait.period,
@@ -390,12 +442,13 @@ class MPCNode(Node):
                 [future_state[leg]["contact"] for leg in _MPC_LEG_ORDER]
             )
 
-        # Foot positions relative to CoM (world frame, approximate as hip frame offsets)
+        # Foot positions in world frame: rotate body-frame FK result by body orientation
+        R_body = _euler_to_R(srbd_state[:3])
         foot_pos_world = np.zeros((4, 3))
         for i, leg in enumerate(_MPC_LEG_ORDER):
             joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-            p_hip = np.array(forward_kinematics(leg, joints_leg))
-            foot_pos_world[i] = p_hip  # approximation: hip ≈ CoM offset
+            p_body = np.array(forward_kinematics(leg, joints_leg))
+            foot_pos_world[i] = R_body @ p_body
 
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
@@ -411,7 +464,8 @@ class MPCNode(Node):
                 joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
                 J = _numerical_jacobian(leg, joints_leg)  # 3×3, hip frame
                 tau = J.T @ f_leg                          # joint torques (3,)
-                dq = tau / K_joint                         # position correction (rad)
+                K_joint = 20.0  # TODO(Task 4): replace with τ_ff + dynamic kp/kd
+                dq = tau / K_joint                          # position correction (rad)
                 dq = np.clip(dq, -0.05, 0.05)             # safety clamp
                 for jname, delta in zip(_leg_joints(leg), dq):
                     joint_targets[jname] = float(joint_targets[jname] + delta)
@@ -420,8 +474,9 @@ class MPCNode(Node):
                 f"[mpc] solver failed: {exc}", throttle_duration_sec=2.0
             )
 
-        # Integrate CoM velocity
-        self._com_pos[:2] += srbd_state[9:11] * self._dt
+        # Integrate CoM velocity: rotate body-frame velocity to world frame first
+        v_world = R_body @ srbd_state[9:12]
+        self._com_pos[:2] += v_world[:2] * self._dt
 
         return [joint_targets[n] for n in _YAML_JOINTS]
 
@@ -449,11 +504,18 @@ class MPCNode(Node):
         if self._phase == _PHASE_STANDUP:
             targets, done = self._standup_targets(elapsed)
             self._publish(targets)
+            est_fresh = self._est_stamp is not None and (now - self._est_stamp) <= _EST_TIMEOUT
             if done and self._is_near(self._q_default.tolist(), _STANDUP_TOL) and self._is_settled():
-                self._phase = _PHASE_WALK
-                self._phase_start = now
-                self._gait.reset()
-                self.get_logger().info("[mpc] standup done → WALK")
+                if not est_fresh:
+                    self.get_logger().warn(
+                        "[mpc] standup done but state_estimate stale — holding, waiting for estimate",
+                        throttle_duration_sec=2.0,
+                    )
+                else:
+                    self._phase = _PHASE_WALK
+                    self._phase_start = now
+                    self._gait.reset()
+                    self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
                 self._phase_start = now
