@@ -345,7 +345,15 @@ class MPCNode(Node):
 
     def _balance_stance(self, stance_h: float) -> JointCommand:
         """Four-foot MPC balance: all legs in contact, zero velocity reference."""
-        joint_targets = {n: float(self._q_default[i]) for i, n in enumerate(_YAML_JOINTS)}
+        joint_targets: dict[str, float] = {}
+        for leg in _MPC_LEG_ORDER:
+            p_foot = nominal_foot_position(leg, stance_h)
+            preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
+            q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
+            if q_leg is None:
+                q_leg = tuple(self._q_default[i] for i, n in enumerate(_YAML_JOINTS) if n in _leg_joints(leg))
+            for jname, qval in zip(_leg_joints(leg), q_leg):
+                joint_targets[jname] = float(qval)
 
         srbd_state = _state_from_estimate(self._state_estimate, self._com_pos)
         state_ref = np.array([
