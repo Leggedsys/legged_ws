@@ -30,13 +30,13 @@ def _validate_leg(leg: str) -> str:
 def _leg_signs(leg: str) -> tuple[float, float, float]:
     """Return (hip axis sign, lateral offset sign, fore-aft x sign).
 
-    hip_sign: maps URDF q1 to physical hip rotation (+1 = front, -1 = rear).
-        The URDF joint axes already encode left/right mirroring.
+    hip_sign: maps URDF q1 to physical hip rotation. +1 for left legs, -1 for right
+        legs — ensures positive q1 = abduction (外展) for all four legs.
     lat_sign: lateral offset direction (+1 = left, -1 = right), used for D_LAT.
     x_sign: fore-aft sign (+1 = front, -1 = rear), used for L_HIP_X.
     """
     leg = _validate_leg(leg)
-    hip_sign = 1.0 if leg in FRONT_LEGS else -1.0
+    hip_sign = 1.0 if leg in LEFT_LEGS else -1.0
     lat_sign = 1.0 if leg in LEFT_LEGS else -1.0
     x_sign = 1.0 if leg in FRONT_LEGS else -1.0
     return hip_sign, lat_sign, x_sign
