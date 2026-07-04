@@ -254,6 +254,45 @@ class MPCNode(Node):
         targets = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
         return targets, elapsed >= dur
 
+    def _balance_stance(self, stance_h: float) -> list[float]:
+        """Four-foot MPC balance: all legs in contact, zero velocity reference.
+
+        Runs the full MPC solver with contact_schedule all-True so the robot
+        actively resists perturbations while standing still.
+        """
+        joint_targets = {n: float(self._q_default[i]) for i, n in enumerate(_YAML_JOINTS)}
+
+        srbd_state = _state_from_estimate(self._state_estimate, self._com_pos)
+        state_ref = np.array([
+            0.0, 0.0, 0.0,
+            0.0, 0.0, stance_h,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+        ])
+        contact_schedule = [[True, True, True, True]] * self._mpc._N
+
+        foot_pos_world = np.zeros((4, 3))
+        for i, leg in enumerate(_MPC_LEG_ORDER):
+            joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
+            foot_pos_world[i] = np.array(forward_kinematics(leg, joints_leg))
+
+        try:
+            grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
+            K_joint = 20.0
+            for i, leg in enumerate(_MPC_LEG_ORDER):
+                f_leg = grf[i * 3 : i * 3 + 3]
+                joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
+                J = _numerical_jacobian(leg, joints_leg)
+                dq = np.clip(J.T @ f_leg / K_joint, -0.05, 0.05)
+                for jname, delta in zip(_leg_joints(leg), dq):
+                    joint_targets[jname] = float(joint_targets[jname] + delta)
+        except Exception as exc:
+            self.get_logger().warn(
+                f"[mpc/balance] solver failed: {exc}", throttle_duration_sec=2.0
+            )
+
+        return [joint_targets[n] for n in _YAML_JOINTS]
+
     def _compute_mpc_joints(self, now: float) -> list[float]:
         """Run one MPC step and return 12 joint position targets."""
         stance_h = float(self.get_parameter("stance_height").value)
@@ -270,7 +309,7 @@ class MPCNode(Node):
                     leg: nominal_foot_position(leg, stance_h) for leg in LEG_NAMES
                 }
                 self._walking = False
-            return list(self._q_default)
+            return self._balance_stance(stance_h)
 
         if not self._walking:
             # Transition: stand → walk; reset gait phase and lift positions
