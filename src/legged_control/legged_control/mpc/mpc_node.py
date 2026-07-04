@@ -249,6 +249,7 @@ class MPCNode(Node):
         self._passive_broadcast = False
 
         self._pub = self.create_publisher(JointState, "/joint_commands", 10)
+        self._pub_gains = self.create_publisher(Float32MultiArray, "/joint_gains", 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
@@ -303,33 +304,44 @@ class MPCNode(Node):
     def _is_settled(self) -> bool:
         return all(abs(self._joint_vel[n]) <= _VEL_SETTLED for n in _YAML_JOINTS)
 
-    def _publish(self, positions: list[float]) -> None:
-        clipped = [
+    def _publish(self, cmd: JointCommand) -> None:
+        clipped_q = [
             float(np.clip(q, self._q_min.get(n, -3.14), self._q_max.get(n, 3.14)))
-            for n, q in zip(_YAML_JOINTS, positions)
+            for n, q in zip(_YAML_JOINTS, cmd.q)
         ]
-        self._last_published = clipped
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = list(_YAML_JOINTS)
-        msg.position = clipped
-        self._pub.publish(msg)
+        self._last_published = clipped_q
 
-    def _standup_targets(self, elapsed: float) -> tuple[list[float], bool]:
+        js = JointState()
+        js.header.stamp = self.get_clock().now().to_msg()
+        js.name     = list(_YAML_JOINTS)
+        js.position = clipped_q
+        js.velocity = list(cmd.dq)
+        js.effort   = list(cmd.tau)
+        self._pub.publish(js)
+
+        gains = Float32MultiArray()
+        gains.data = [val for pair in zip(cmd.kp, cmd.kd) for val in pair]
+        self._pub_gains.publish(gains)
+
+    def _standup_targets(self, elapsed: float) -> tuple[JointCommand, bool]:
         ramp = max(float(self.get_parameter("ramp_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / ramp)
         start = self._standup_start or self._q_default.tolist()
-        targets = [(1.0 - alpha) * s + alpha * g
-                   for s, g in zip(start, self._q_default.tolist())]
-        return targets, elapsed >= ramp
+        q = [(1.0 - alpha) * s + alpha * g
+             for s, g in zip(start, self._q_default.tolist())]
+        kp = [self._base_kp[n] * self._kp_swing_scale for n in _YAML_JOINTS]
+        kd = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
+        return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= ramp
 
-    def _liedown_targets(self, elapsed: float) -> tuple[list[float], bool]:
+    def _liedown_targets(self, elapsed: float) -> tuple[JointCommand, bool]:
         dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
         alpha = _smoothstep(elapsed / dur)
         start = self._lie_down_start or self._q_default.tolist()
         goal  = self._initial_pos or [0.0] * 12
-        targets = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
-        return targets, elapsed >= dur
+        q = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
+        kp = [self._base_kp[n] * self._kp_swing_scale for n in _YAML_JOINTS]
+        kd = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
+        return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= dur
 
     def _balance_stance(self, stance_h: float) -> JointCommand:
         """Four-foot MPC balance: all legs in contact, zero velocity reference."""
@@ -529,8 +541,8 @@ class MPCNode(Node):
         elapsed = now - self._phase_start
 
         if self._phase == _PHASE_STANDUP:
-            targets, done = self._standup_targets(elapsed)
-            self._publish(targets)
+            cmd, done = self._standup_targets(elapsed)
+            self._publish(cmd)
             est_fresh = self._est_stamp is not None and (now - self._est_stamp) <= _EST_TIMEOUT
             if done and self._is_near(self._q_default.tolist(), _STANDUP_TOL) and self._is_settled():
                 if not est_fresh:
@@ -552,12 +564,12 @@ class MPCNode(Node):
 
         if self._phase == _PHASE_WALK:
             cmd = self._compute_mpc_joints(now)
-            self._publish(cmd.q)
+            self._publish(cmd)
             return
 
         if self._phase == _PHASE_LIEDOWN:
-            targets, done = self._liedown_targets(elapsed)
-            self._publish(targets)
+            cmd, done = self._liedown_targets(elapsed)
+            self._publish(cmd)
             lie_dur = max(float(self.get_parameter("lie_down_duration").value), 1e-6)
             near = self._is_near(self._initial_pos or [0.0] * 12, 0.05) and self._is_settled()
             timed_out = done and elapsed > lie_dur + _LIEDOWN_TIMEOUT
