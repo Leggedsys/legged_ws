@@ -11,8 +11,11 @@ mpc_node's convergence checks see realistic tracking.
 
 from __future__ import annotations
 
+import os
 import time
 
+import yaml
+from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -28,13 +31,26 @@ _YAML_JOINTS = [
 _STARTUP_DELAY = 2.0   # seconds before posture_command=true
 
 
+def _lying_pose() -> list[float]:
+    """Return URDF-frame lying pose = zero_offset per joint (motor at position 0).
+
+    Mirrors joint_aggregator: q_urdf = direction * 0 + zero_offset = zero_offset.
+    """
+    share = get_package_share_directory("legged_control")
+    with open(os.path.join(share, "config", "robot.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    joint_map = {j["name"]: float(j["zero_offset"]) for j in cfg["joints"]}
+    return [joint_map[n] for n in _YAML_JOINTS]
+
+
 class MPCPreviewNode(Node):
     def __init__(self) -> None:
         super().__init__("mpc_preview_node")
         self._start = time.monotonic()
         self._posture_sent = False
-        # Starts at all-zeros (flat); updated each time /joint_commands arrives
-        self._fake_pos: list[float] = [0.0] * 12
+        # Start at lying pose (zero_offset values), matching real hardware startup
+        # where joint_aggregator reports q_urdf = zero_offset when motors are at 0.
+        self._fake_pos: list[float] = _lying_pose()
 
         # Fake sensor publishers
         self._pub_agg  = self.create_publisher(JointState, "/joint_states_aggregated", 10)
