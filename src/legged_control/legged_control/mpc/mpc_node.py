@@ -28,8 +28,8 @@ from geometry_msgs.msg import Twist
 from legged_control.kinematics import (
     forward_kinematics,
     inverse_kinematics,
+    _numerical_jacobian,
     _smoothstep,
-    LEG_NAMES as _KIN_LEG_NAMES,  # noqa: may not exist — fallback below
 )
 from legged_control.mpc.gait_scheduler import GaitScheduler, LEG_NAMES
 from legged_control.mpc.swing_trajectory import (
@@ -319,8 +319,14 @@ class MPCNode(Node):
         ])
 
         contact_now = [gait_state[leg]["contact"] for leg in _MPC_LEG_ORDER]
-        # Simple N-step contact schedule (repeat current for now)
-        contact_schedule = [contact_now] * self._mpc._N
+        # Look-ahead contact schedule: query gait phase at each future step
+        contact_schedule = []
+        for k in range(self._mpc._N):
+            t_future = now + k * self._dt
+            future_state = self._gait.query(t_future)
+            contact_schedule.append(
+                [future_state[leg]["contact"] for leg in _MPC_LEG_ORDER]
+            )
 
         # Foot positions relative to CoM (world frame, approximate as hip frame offsets)
         foot_pos_world = np.zeros((4, 3))
@@ -331,28 +337,22 @@ class MPCNode(Node):
 
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
-            # Convert GRF to stance-leg position correction via virtual stiffness
-            # Δq = J^T * Δf / k_virtual (simplified: use GRF z to adjust stance height)
-            # For now, apply a small body-level height correction from MPC fz
-            total_fz = sum(
-                grf[i * 3 + 2] for i, leg in enumerate(_MPC_LEG_ORDER)
-                if contact_now[i]
-            )
-            n_stance = max(1, sum(contact_now))
-            fz_avg = total_fz / n_stance
-            fz_desired = 12.0 * 9.81 / n_stance  # body weight / contacts
-            dz = float(np.clip((fz_avg - fz_desired) * 1e-4, -0.01, 0.01))
-            # Adjust stance foot z for height regulation
-            for leg in _MPC_LEG_ORDER:
-                if not gait_state[leg]["contact"]:
+            # Convert GRF → joint position correction via Jacobian transpose:
+            #   τ = J^T * f_contact  (contact force in hip frame)
+            #   Δq = τ / K_joint     (K_joint = effective joint stiffness, Nm/rad)
+            # K_joint ≈ kp × gr² ≈ 20 Nm/rad for hip/thigh, calf same by design.
+            K_joint = 20.0
+            for i, leg in enumerate(_MPC_LEG_ORDER):
+                if not contact_now[i]:
                     continue
+                f_leg = grf[i * 3 : i * 3 + 3]          # contact force for this leg
                 joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-                p_foot = np.array(forward_kinematics(leg, joints_leg))
-                p_foot[2] += dz
-                q_corrected = inverse_kinematics(leg, tuple(p_foot), preferred_joints=joints_leg)
-                if q_corrected is not None:
-                    for jname, qval in zip(_leg_joints(leg), q_corrected):
-                        joint_targets[jname] = float(qval)
+                J = _numerical_jacobian(leg, joints_leg)  # 3×3, hip frame
+                tau = J.T @ f_leg                          # joint torques (3,)
+                dq = tau / K_joint                         # position correction (rad)
+                dq = np.clip(dq, -0.05, 0.05)             # safety clamp
+                for jname, delta in zip(_leg_joints(leg), dq):
+                    joint_targets[jname] = float(joint_targets[jname] + delta)
         except Exception as exc:
             self.get_logger().warn(
                 f"[mpc] solver failed: {exc}", throttle_duration_sec=2.0
