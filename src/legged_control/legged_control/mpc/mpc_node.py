@@ -64,6 +64,7 @@ _PHASE_LIEDOWN  = "LIEDOWN"
 _STANDUP_TOL  = 0.15   # rad — standup convergence threshold
 _VEL_SETTLED  = 0.05   # rad/s — velocity threshold
 _LIEDOWN_TIMEOUT = 3.0
+_WALK_VEL_THRESH = 0.04  # m/s or rad/s — below this in all axes → hold stance
 
 # MPC leg ordering: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -167,6 +168,7 @@ class MPCNode(Node):
         self._phase = _PHASE_PASSIVE
         self._phase_start: float | None = None
         self._stand_requested = False
+        self._walking = False  # True only when cmd_vel exceeds threshold
         self._standup_start: list[float] | None = None
         self._initial_pos: list[float] | None = None
         self._lie_down_start: list[float] | None = None
@@ -256,6 +258,27 @@ class MPCNode(Node):
         """Run one MPC step and return 12 joint position targets."""
         stance_h = float(self.get_parameter("stance_height").value)
         step_h   = float(self.get_parameter("step_height").value)
+
+        # Velocity threshold: hold stance when stopped
+        moving = float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
+        if not moving:
+            if self._walking:
+                # Transition: walk → stand; reset gait for clean restart next time
+                self._gait.reset()
+                self._prev_contact = {leg: True for leg in LEG_NAMES}
+                self._lift_pos = {
+                    leg: nominal_foot_position(leg, stance_h) for leg in LEG_NAMES
+                }
+                self._walking = False
+            return list(self._q_default)
+
+        if not self._walking:
+            # Transition: stand → walk; reset gait phase and lift positions
+            self._gait.reset()
+            self._lift_pos = {
+                leg: nominal_foot_position(leg, stance_h) for leg in LEG_NAMES
+            }
+            self._walking = True
 
         gait_state = self._gait.query(now)
 
