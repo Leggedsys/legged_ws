@@ -44,3 +44,30 @@ def test_filter_joints_preserves_yaml_order():
     ]
     result = _filter_joints(joints, ['FR_calf', 'FR_hip'])
     assert [j['name'] for j in result] == ['FR_hip', 'FR_calf']
+
+
+import time
+
+
+_GAINS_TIMEOUT = 0.2  # must match motor_bus_node
+
+
+def _gains_are_fresh(stamp: float | None, now: float) -> bool:
+    """Mirrors the timeout logic in motor_bus_node._tick."""
+    if stamp is None:
+        return False
+    return (now - stamp) < _GAINS_TIMEOUT
+
+
+def test_gains_fresh_within_timeout():
+    stamp = time.monotonic()
+    assert _gains_are_fresh(stamp, stamp + 0.1) is True
+
+
+def test_gains_stale_after_timeout():
+    stamp = time.monotonic()
+    assert _gains_are_fresh(stamp, stamp + 0.3) is False
+
+
+def test_gains_stale_when_never_received():
+    assert _gains_are_fresh(None, time.monotonic()) is False

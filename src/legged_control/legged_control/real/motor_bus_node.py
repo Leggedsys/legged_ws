@@ -28,10 +28,19 @@ import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float32MultiArray
 
 
 _ESTOP_HOLD = 0.5  # seconds to hold last target after commands stop
 _ESTOP_FADE = 2.0  # seconds to fade kp from full to 0 after hold period
+_GAINS_TIMEOUT = 0.2  # s — revert to default kp/kd if /joint_gains goes stale
+
+_YAML_JOINTS = [
+    "FR_hip", "FR_thigh", "FR_calf",
+    "FL_hip", "FL_thigh", "FL_calf",
+    "RR_hip", "RR_thigh", "RR_calf",
+    "RL_hip", "RL_thigh", "RL_calf",
+]
 
 
 def _ns_from_joint_name(name: str) -> str:
@@ -133,8 +142,15 @@ class MotorBusNode(Node):
         self._offsets = self._calibrate_offsets()
         # velocity feedforward targets (motor-convention joint frame, rad/s)
         self._dq_targets: dict[str, float] = {j["name"]: 0.0 for j in joints}
+        self._tau_targets: dict[str, float] = {j["name"]: 0.0 for j in joints}
+        self._kp_dynamic:  dict[str, float | None] = {j["name"]: None for j in joints}
+        self._kd_dynamic:  dict[str, float | None] = {j["name"]: None for j in joints}
+        self._gains_stamp: float | None = None
 
         self.create_subscription(JointState, "/joint_commands", self._on_joint_cmd, 10)
+        self.create_subscription(
+            Float32MultiArray, "/joint_gains", self._on_joint_gains, 10
+        )
         self.add_on_set_parameters_callback(self._on_gains_changed)
 
         loop_hz = self.get_parameter("loop_hz").value
@@ -217,9 +233,23 @@ class MotorBusNode(Node):
                 self._targets[name] = float(msg.position[i])
             if name in self._dq_targets and i < len(msg.velocity):
                 self._dq_targets[name] = float(msg.velocity[i])
+        if len(msg.effort) == len(msg.name):
+            for i, name in enumerate(msg.name):
+                if name in self._tau_targets:
+                    self._tau_targets[name] = float(msg.effort[i])
         self._cmd_time = time.monotonic()
         self._estop_logged = False
         self._estop_done_logged = False
+
+    def _on_joint_gains(self, msg: Float32MultiArray) -> None:
+        # data layout: [kp0,kd0,kp1,kd1,...,kp11,kd11] — _YAML_JOINTS order (all 12 joints)
+        if len(msg.data) != 2 * len(_YAML_JOINTS):
+            return
+        for i, jname in enumerate(_YAML_JOINTS):
+            if jname in self._kp_dynamic:
+                self._kp_dynamic[jname] = float(msg.data[2 * i])
+                self._kd_dynamic[jname] = float(msg.data[2 * i + 1])
+        self._gains_stamp = time.monotonic()
 
     def _on_gains_changed(self, params: list) -> SetParametersResult:
         for p in params:
@@ -268,13 +298,21 @@ class MotorBusNode(Node):
             cmd.id = self._motor_ids[name]
             offset = self._offsets[name]
             ratio = effective_kp / self._global_kp_init if self._global_kp_init > 0 else 0.0
-            cmd.kp = ratio * float(self.get_parameter(f"kp_{name}").value)
             ratio_kd = effective_kd / self._global_kd_init if self._global_kd_init > 0 else 0.0
-            cmd.kd = ratio_kd * float(self.get_parameter(f"kd_{name}").value)
-            cmd.q = (self._targets[name] + offset) * gr
+            gains_fresh = (
+                self._gains_stamp is not None
+                and (now - self._gains_stamp) < _GAINS_TIMEOUT
+            )
+            base_kp = float(self.get_parameter(f"kp_{name}").value)
+            base_kd = float(self.get_parameter(f"kd_{name}").value)
+            dyn_kp  = self._kp_dynamic.get(name) if gains_fresh else None
+            dyn_kd  = self._kd_dynamic.get(name) if gains_fresh else None
+            cmd.kp  = ratio * (dyn_kp if dyn_kp is not None else base_kp)
+            cmd.kd  = ratio_kd * (dyn_kd if dyn_kd is not None else base_kd)
+            cmd.q   = (self._targets[name] + offset) * gr
             # velocity feedforward in rotor rad/s; fades to 0 with kp on estop
-            cmd.dq = self._dq_targets[name] * gr * ratio
-            cmd.tau = 0.0
+            cmd.dq  = self._dq_targets[name] * gr * ratio
+            cmd.tau = ratio * self._tau_targets.get(name, 0.0)
             self._serial.sendRecv(cmd, data)
 
             if not data.correct or int(data.motor_id) != self._motor_ids[name]:
