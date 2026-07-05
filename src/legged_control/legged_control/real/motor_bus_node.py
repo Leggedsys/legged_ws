@@ -34,6 +34,13 @@ from std_msgs.msg import Float32MultiArray
 _ESTOP_HOLD = 0.5  # seconds to hold last target after commands stop
 _ESTOP_FADE = 2.0  # seconds to fade kp from full to 0 after hold period
 _GAINS_TIMEOUT = 0.2  # s — revert to default kp/kd if /joint_gains goes stale
+_EXTRAPOLATE_CAP = 0.05  # s — max lookahead for velocity-based target extrapolation
+                          # between /joint_commands updates. Without this, the bus
+                          # holds the last received q as a flat step (ZOH) for the
+                          # whole inter-command gap, which looks like discrete
+                          # "jerky" jumps at low controller rates. Capped well
+                          # below _ESTOP_HOLD so a stalled command stream still
+                          # falls back to the plain hold, not runaway extrapolation.
 
 _YAML_JOINTS = [
     "FR_hip", "FR_thigh", "FR_calf",
@@ -287,6 +294,8 @@ class MotorBusNode(Node):
                     self.get_logger().warn("[estop] kp=0 — motors passive")
                     self._estop_done_logged = True
 
+        extrap_dt = min(now - self._cmd_time, _EXTRAPOLATE_CAP) if self._cmd_time is not None else 0.0
+
         for cmd, data, pub, name in zip(
             self._cmds, self._datas, self._pubs, self._names
         ):
@@ -309,7 +318,11 @@ class MotorBusNode(Node):
             dyn_kd  = self._kd_dynamic.get(name) if gains_fresh else None
             cmd.kp  = ratio * (dyn_kp if dyn_kp is not None else base_kp)
             cmd.kd  = ratio_kd * (dyn_kd if dyn_kd is not None else base_kd)
-            cmd.q   = (self._targets[name] + offset) * gr
+            # Extrapolate toward the next expected setpoint using the last known
+            # velocity, instead of holding the received q flat until the next
+            # /joint_commands arrives — smooths the visible per-tick jump.
+            q_target = self._targets[name] + self._dq_targets[name] * extrap_dt
+            cmd.q   = (q_target + offset) * gr
             # velocity feedforward in rotor rad/s; fades to 0 with kp on estop
             cmd.dq  = self._dq_targets[name] * gr * ratio
             cmd.tau = ratio * self._tau_targets.get(name, 0.0)
