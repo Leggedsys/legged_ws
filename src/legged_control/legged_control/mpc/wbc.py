@@ -14,7 +14,11 @@ import sys
 import numpy as np
 
 sys.path.insert(0, '/opt/ros/humble/lib/python3.10/site-packages')
-import pinocchio as pin
+try:
+    import pinocchio as pin
+    _PIN_AVAILABLE = True
+except ImportError:
+    _PIN_AVAILABLE = False
 
 
 # YAML order: FR(0-2), FL(3-5), RR(6-8), RL(9-11)
@@ -32,22 +36,32 @@ _MPC_LEGS = ["FR", "FL", "RR", "RL"]
 # MPC index for each Pinocchio-order leg
 _PIN_LEG_TO_MPC_IDX = {"FL": 1, "FR": 0, "RL": 3, "RR": 2}
 
-# Foot frame IDs (verified: _foot link, not _foot_joint)
-_FOOT_FRAME_IDS = {"FL": 10, "FR": 18, "RL": 26, "RR": 34}
-
 # YAML joint slice per MPC leg index
 _MPC_IDX_TO_YAML_SLICE = {0: slice(0, 3), 1: slice(3, 6), 2: slice(6, 9), 3: slice(9, 12)}
+
+assert all(_YAML_TO_PIN[_PIN_TO_YAML[i]] == i for i in range(12)), \
+    "_YAML_TO_PIN and _PIN_TO_YAML are not mutual inverses"
 
 
 class WBC:
     """Whole Body Controller using Pinocchio floating-base inverse dynamics."""
 
     def __init__(self, urdf_path: str, kp_swing: float = 800.0, kd_swing: float = 40.0):
+        if not _PIN_AVAILABLE:
+            raise RuntimeError(
+                "pinocchio not available — install: sudo apt install ros-humble-pinocchio"
+            )
         self._model = pin.buildModelFromUrdf(urdf_path, pin.JointModelFreeFlyer())
         self._data  = self._model.createData()
         self._nv    = self._model.nv   # 18
         self._kp_sw = kp_swing
         self._kd_sw = kd_swing
+        self._foot_ids: dict[str, int] = {}
+        for leg in _PIN_LEGS:
+            fid = self._model.getFrameId(f"{leg}_foot")
+            if fid >= self._model.nframes:
+                raise ValueError(f"Frame '{leg}_foot' not found in URDF")
+            self._foot_ids[leg] = fid
 
     def solve(
         self,
@@ -98,6 +112,9 @@ class WBC:
             q_pin[7 + i_pin] = q_yaml[i_yaml]
 
         dq_pin = np.zeros(self._nv)
+        # Pinocchio free-flyer generalized velocity dq[0:3] is in the LOCAL (body)
+        # frame, verified experimentally: with 90° yaw, dq[0]=1 yields
+        # getVelocity(LOCAL)=[1,0,0] not [0,1,0].  body-frame input is correct.
         dq_pin[0:3] = base_vel_body
         dq_pin[3:6] = base_ang_vel_body
         for i_yaml, i_pin in enumerate(_YAML_TO_PIN):
@@ -111,7 +128,7 @@ class WBC:
             mpc_idx = _PIN_LEG_TO_MPC_IDX[leg]
             if not contact[mpc_idx]:
                 continue
-            frame_id = _FOOT_FRAME_IDS[leg]
+            frame_id = self._foot_ids[leg]
             J_full = pin.getFrameJacobian(
                 self._model, self._data, frame_id, pin.LOCAL_WORLD_ALIGNED
             )
