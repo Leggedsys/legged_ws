@@ -8,7 +8,9 @@ FSM:
   PASSIVE → (posture_command=true) → STANDUP → WALK → PASSIVE
   B-button (posture_command=false) → LIEDOWN → PASSIVE from any state.
 
-/joint_commands published at gait_hz (default 50 Hz).
+/joint_commands published at mpc.tick_hz (default 100 Hz). Deliberately a
+separate key from control.gait_hz (policy_node's RL loop rate) — the two
+control stacks have different bandwidth needs and must not move together.
 """
 
 from __future__ import annotations
@@ -67,6 +69,10 @@ _VEL_SETTLED  = 0.05   # rad/s — velocity threshold
 _LIEDOWN_TIMEOUT = 3.0
 _WALK_VEL_THRESH = 0.04  # m/s or rad/s — below this in all axes → hold stance
 _EST_TIMEOUT = 0.5       # s — state_estimate older than this → fall back to balance stance
+_STANCE_BLEND_DURATION = 0.4  # s — ramp tau_ff (0→full) and kp/kd (swing→stance
+                               # scale) in on first entry to balance stance so
+                               # standup's zero-tau hold doesn't step straight
+                               # into a nonzero MPC torque + softer gains.
 
 # MPC leg ordering: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -166,11 +172,11 @@ class MPCNode(Node):
         self.declare_parameter("ramp_duration",    float(standup_cfg.get("ramp_duration", 6.0)))
         self.declare_parameter("lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0)))
 
-        gait_hz = float(control.get("gait_hz", 50.0))
-        self._dt = 1.0 / gait_hz
-
         # Robot physical parameters for MPC
         mpc_cfg = cfg.get("mpc", {})
+        tick_hz = float(mpc_cfg.get("tick_hz", 100.0))
+        self._dt = 1.0 / tick_hz
+
         mass = float(mpc_cfg.get("mass", 12.0))
         Ixx  = float(mpc_cfg.get("Ixx", 0.017))
         Iyy  = float(mpc_cfg.get("Iyy", 0.056))
@@ -247,6 +253,7 @@ class MPCNode(Node):
         self._lie_down_start: list[float] | None = None
         self._last_published: list[float] | None = None
         self._passive_broadcast = False
+        self._stance_entry_time: float | None = None
 
         self._pub = self.create_publisher(JointState, "/joint_commands", 10)
         self._pub_gains = self.create_publisher(Float32MultiArray, "/joint_gains", 10)
@@ -257,7 +264,7 @@ class MPCNode(Node):
 
         self.create_timer(self._dt, self._tick)
         self.get_logger().info(
-            f"mpc_node ready — {gait_hz:.0f} Hz  "
+            f"mpc_node ready — {tick_hz:.0f} Hz  "
             f"mass={mass} kg  horizon={horizon}  "
             f"period={self.get_parameter('gait_period').value:.2f}s"
         )
@@ -292,7 +299,7 @@ class MPCNode(Node):
             if self._phase in (_PHASE_STANDUP, _PHASE_WALK):
                 self._phase = _PHASE_LIEDOWN
                 self._phase_start = time.monotonic()
-                self._lie_down_start = list(self._last_published or self._q_default.tolist())
+                self._lie_down_start = list(self._current_pos())
 
     def _current_pos(self) -> list[float]:
         return [self._joint_pos[n] for n in _YAML_JOINTS]
@@ -358,8 +365,12 @@ class MPCNode(Node):
         kd = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
         return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= dur
 
-    def _balance_stance(self, stance_h: float) -> JointCommand:
+    def _balance_stance(self, stance_h: float, now: float | None = None) -> JointCommand:
         """Four-foot MPC balance: all legs in contact, zero velocity reference."""
+        if now is not None and self._stance_entry_time is not None:
+            blend = _smoothstep((now - self._stance_entry_time) / _STANCE_BLEND_DURATION)
+        else:
+            blend = 1.0
         stance_q = self._compute_stance_q(stance_h)
         joint_targets = dict(zip(_YAML_JOINTS, stance_q))
 
@@ -386,9 +397,17 @@ class MPCNode(Node):
             self.get_logger().warn(
                 f"[mpc/balance] solver failed: {exc}", throttle_duration_sec=2.0
             )
+        tau_list = [t * blend for t in tau_list]
 
-        kp = [self._base_kp[n] * self._kp_stance_scale for n in _YAML_JOINTS]
-        kd = [self._base_kd[n] * self._kd_stance_scale for n in _YAML_JOINTS]
+        kp_stance = [self._base_kp[n] * self._kp_stance_scale for n in _YAML_JOINTS]
+        kd_stance = [self._base_kd[n] * self._kd_stance_scale for n in _YAML_JOINTS]
+        if blend < 1.0:
+            kp_swing = [self._base_kp[n] * self._kp_swing_scale for n in _YAML_JOINTS]
+            kd_swing = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
+            kp = [s * (1.0 - blend) + t * blend for s, t in zip(kp_swing, kp_stance)]
+            kd = [s * (1.0 - blend) + t * blend for s, t in zip(kd_swing, kd_stance)]
+        else:
+            kp, kd = kp_stance, kd_stance
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],
             dq=[0.0] * 12,
@@ -401,12 +420,16 @@ class MPCNode(Node):
         """Run one MPC step and return a full JointCommand."""
         stance_h = float(self.get_parameter("stance_height").value)
         step_h   = float(self.get_parameter("step_height").value)
+        # GaitScheduler.period is a plain attribute set once at construction —
+        # `ros2 param set gait_period` alone never reached it. Sync every tick
+        # so runtime changes actually take effect.
+        self._gait.set_period(float(self.get_parameter("gait_period").value))
 
         if self._est_stamp is None or (now - self._est_stamp) > _EST_TIMEOUT:
             self.get_logger().warn(
                 "[mpc] state_estimate stale — holding stance", throttle_duration_sec=1.0
             )
-            return self._balance_stance(stance_h)
+            return self._balance_stance(stance_h, now)
 
         moving = float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
         if not moving:
@@ -418,7 +441,7 @@ class MPCNode(Node):
                 }
                 self._prev_swing_q = {n: None for n in _YAML_JOINTS}
                 self._walking = False
-            return self._balance_stance(stance_h)
+            return self._balance_stance(stance_h, now)
 
         if not self._walking:
             self._gait.reset()
@@ -570,11 +593,13 @@ class MPCNode(Node):
                 else:
                     self._phase = _PHASE_WALK
                     self._phase_start = now
+                    self._stance_entry_time = now
                     self._gait.reset()
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
                 self._phase_start = now
+                self._stance_entry_time = now
                 self._gait.reset()
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return

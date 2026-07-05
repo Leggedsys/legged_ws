@@ -125,14 +125,21 @@ control:
   # PD 增益是 SDK/转子侧（motor_bus 里 cmd.q 乘了 gear_ratio），
   # 所以关节刚度 K_joint = kp × gear_ratio²。甲方目标：关节 kp=20、kd=0.5。
   # 理论 kp = 20/gr²：hip/thigh(gr 6.33)→0.50 / kd 0.0125；calf(gr 12.66)→0.125 / kd 0.0031。
-  # 下面是手调值（约 3× 理论），跟踪日志验证过（kp1.5/kd0.05，RMS≈基线但偏差≈0）。
+  # 实测已证伪"kp 退回理论值 + mpc.mass 高估补偿"这条路：kp=0.5(K=12 with
+  # kp_stance_scale 0.6) + mass 18~25 仍然软趴——说明支撑靠的是 kp 这个闭环
+  # 修正项，tau_ff 只是开环量，加大 mass 只线性放大稳态力矩，补不了比例刚度。
+  # kp=1.0（K≈40，stance_scale 0.6 → 实际 K≈24）验证过不软趴。standup→balance
+  # 的 tau/kp 阶跃已经用 _stance_entry_time 平滑过渡修掉了（mpc_node.py），
+  # 走路卡顿也已用 mpc.kp_swing_scale 单独调低 + tick_hz 提到 100Hz 解决。
+  # 实测确认 0.8 就站不起来了——0.8~1.0 之间是临界点，不要再往下降 kp。
+  # 走路卡顿/超调不是 kp 的问题，是摆动轨迹本身振幅太大（step_height/落脚点
+  # offset），下一步该调这些运动学参数而不是继续压 kp。
   # TODO(台架)：单关节挂已知重量、量角度偏差 Δθ，算 K_joint = τ/Δθ 确认 ≈20。
-  #   关键：calf 的 gr² 是 hip/thigh 的 4 倍，所以 calf 的 kp/kd 应 ≈ hip/thigh 的 1/4。
-  #   现状：kp 已按 1/4 拆分（1.5 / 0.375）；kd 仍为 0.4×（0.05 / 0.02），待继续调。
-  kp: 0.5
-  kd: 0.0125
-  kp_calf: 0.125
-  kd_calf: 0.0031
+  #   关键：calf 的 gr² 是 hip/thigh 的 4 倍，所以 calf 的 kp/kd 已按 1/4 拆分。
+  kp: 1.0
+  kd: 0.0333
+  kp_calf: 0.25
+  kd_calf: 0.0133
   gait_hz: 50.0   # policy control frequency
   max_joint_speed: 12.0   # rad/s (URDF frame) — safety cap on per-joint cmd delta.
                           # Set near hardware limit (dog_urdf joint vel 12-14 rad/s)
@@ -158,9 +165,22 @@ teleop:
   max_dz:  0.03  # m/s height rate limit
 
 mpc:
+  # tick_hz: mpc_node's own solve/publish rate — deliberately separate from
+  # control.gait_hz (policy_node's RL loop, tuned to 50Hz for that policy).
+  # Standup ramp looks smooth at 50Hz because it's slow (6s ramp → tiny
+  # per-tick step); swing covers a full foot arc in ~0.24s, so 50Hz only
+  # gives ~12 samples across it — visible as "discrete" stair-stepping,
+  # made worse once kp_swing_scale was lowered (joint can't catch up before
+  # the next step arrives). QP solve is the closed-form np.linalg.solve path
+  # (~1ms per SRBDMPC docstring), so there's headroom to raise this well
+  # above 50Hz; watch CPU/solve time on real hardware before going higher.
+  tick_hz: 100.0
   # Physical parameters for SRBD-MPC.
-  # mass: measured — each leg 1.5 kg × 4 + base 8.55 kg = 14.55 kg.
-  # (URDF under-reports base mass; URDF total was 10.92 kg.)
+  # mass: measured total is 14.55 kg (each leg 1.5 kg × 4 + base 8.55 kg;
+  # URDF under-reports base mass, URDF total was 10.92 kg).
+  # Tried overestimating this (18, then 25) to inflate tau_ff and compensate
+  # for a lowered stance kp — real hardware still sagged, so that theory is
+  # falsified. Reverted to the measured value; support now comes from kp again.
   mass:    14.55
   # Diagonal body-frame inertia (kg⋅m²): URDF summed values scaled by
   # actual/URDF mass ratio (14.55/10.92 ≈ 1.33). Rough estimate only —
@@ -168,13 +188,18 @@ mpc:
   Ixx:    0.0196
   Iyy:    0.0228
   Izz:    0.0169
-  horizon: 6    # MPC prediction steps (N=6 → ~10ms solve on laptop; raise if tracking diverges)
+  horizon: 6    # MPC prediction steps (closed-form solve, ~1ms; raise if tracking diverges)
   K_joint: 20.0 # effective joint stiffness (Nm/rad) used for GRF→Δq mapping (kp × gear_ratio²)
   # MIT Cheetah 动态增益：比例系数相对各关节现有 kp/kd 基准值
   # 支撑相低刚度让 tau_ff 主导，摆动相高刚度精确跟踪轨迹
-  kp_stance_scale: 0.25
+  # base kp 已改回手调值（K_joint≈40），站立不软趴靠的是这个 + stance_scale，
+  # 不要再指望靠调 mass 补偿。stance_scale=0.6 → 实际 K≈24（已验证站得住）。
+  # 走路卡顿/超调是摆动相单独的问题：原来 swing_scale=1.0 时 K≈40 偏硬导致超调，
+  # 调低到 0.6（K≈24，与 stance 同档）；kd_swing_scale 适当加大增加阻尼抑制超调。
+  # 若走路仍卡顿 → 继续降 kp_swing_scale（如 0.5）；若摆动腿轨迹跟不上/拖沓 → 升回。
+  kp_stance_scale: 0.6
   kd_stance_scale: 1.0
-  kp_swing_scale:  2.0
+  kp_swing_scale:  0.6
   kd_swing_scale:  2.0
 
 standup:
