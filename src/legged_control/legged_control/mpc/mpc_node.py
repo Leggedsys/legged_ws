@@ -41,6 +41,7 @@ from legged_control.mpc.swing_trajectory import (
     landing_target,
 )
 from legged_control.mpc.srbd_mpc import SRBDMPC, _euler_to_R
+from legged_control.mpc.wbc import WBC
 
 
 # YAML joint order (robot.yaml / /joint_commands convention)
@@ -219,6 +220,22 @@ class MPCNode(Node):
             horizon=horizon,
         )
 
+        # WBC initialization
+        wbc_cfg = cfg.get("wbc", {})
+        self._kp_residual = float(wbc_cfg.get("kp_residual", 0.05))
+        self._kd_residual = float(wbc_cfg.get("kd_residual", 0.002))
+        _kp_sw_wbc = float(wbc_cfg.get("kp_swing", 800.0))
+        _kd_sw_wbc = float(wbc_cfg.get("kd_swing",  40.0))
+
+        self._wbc: WBC | None = None
+        try:
+            _dog_share = get_package_share_directory("dog_urdf")
+            _urdf_path = os.path.join(_dog_share, "urdf", "dog_urdf.urdf")
+            self._wbc = WBC(_urdf_path, kp_swing=_kp_sw_wbc, kd_swing=_kd_sw_wbc)
+            self.get_logger().info("WBC loaded from URDF")
+        except Exception as exc:
+            self.get_logger().warn(f"WBC unavailable ({exc}) — falling back to Jacobian τ_ff")
+
         self._gait = GaitScheduler(
             period=float(self.get_parameter("gait_period").value),
             swing_ratio=float(self.get_parameter("swing_ratio").value),
@@ -389,25 +406,42 @@ class MPCNode(Node):
             joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
             foot_pos_world[i] = R_body @ np.array(forward_kinematics(leg, joints_leg))
 
-        tau_list = [0.0] * 12
+        f_mpc_raw = np.zeros(12)
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
-            tau_list = _build_stance_tau(grf, joint_targets)
+            f_mpc_raw = np.array(grf)
         except Exception as exc:
             self.get_logger().warn(
                 f"[mpc/balance] solver failed: {exc}", throttle_duration_sec=2.0
             )
-        tau_list = [t * blend for t in tau_list]
+        f_mpc_blended = f_mpc_raw * blend
 
-        kp_stance = [self._base_kp[n] * self._kp_stance_scale for n in _YAML_JOINTS]
-        kd_stance = [self._base_kd[n] * self._kd_stance_scale for n in _YAML_JOINTS]
-        if blend < 1.0:
-            kp_swing = [self._base_kp[n] * self._kp_swing_scale for n in _YAML_JOINTS]
-            kd_swing = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
-            kp = [s * (1.0 - blend) + t * blend for s, t in zip(kp_swing, kp_stance)]
-            kd = [s * (1.0 - blend) + t * blend for s, t in zip(kd_swing, kd_stance)]
+        tau_list = [0.0] * 12
+        q_current  = np.array([self._joint_pos[n] for n in _YAML_JOINTS])
+        dq_current = np.array([self._joint_vel[n] for n in _YAML_JOINTS])
+        q_sw_des   = np.array([joint_targets[n] for n in _YAML_JOINTS])
+        rpy        = _state_from_estimate(self._state_estimate)[:3]
+        base_vel   = self._state_estimate[0:3]
+        base_ang   = self._state_estimate[3:6]
+        contact_all = [True, True, True, True]
+        if self._wbc is not None:
+            try:
+                tau_arr = self._wbc.solve(
+                    q_current, dq_current, rpy, base_vel, base_ang,
+                    f_mpc_blended, contact_all,
+                    q_sw_des, np.zeros(12),
+                )
+                tau_list = tau_arr.tolist()
+            except Exception as exc:
+                self.get_logger().warn(
+                    f"[wbc/balance] failed: {exc}", throttle_duration_sec=2.0
+                )
+                tau_list = _build_stance_tau(f_mpc_blended, joint_targets)
         else:
-            kp, kd = kp_stance, kd_stance
+            tau_list = _build_stance_tau(f_mpc_blended, joint_targets)
+
+        kp = [self._kp_residual] * 12
+        kd = [self._kd_residual] * 12
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],
             dq=[0.0] * 12,
@@ -528,10 +562,10 @@ class MPCNode(Node):
             joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
             foot_pos_world[i] = R_body @ np.array(forward_kinematics(leg, joints_leg))
 
-        tau_list = [0.0] * 12
+        f_mpc_raw = np.zeros(12)
         try:
             grf = self._mpc.solve(srbd_state, state_ref, foot_pos_world, contact_schedule)
-            tau_list = _build_stance_tau(grf, joint_targets, contact_now=contact_now)
+            f_mpc_raw = np.array(grf)
         except Exception as exc:
             self.get_logger().warn(
                 f"[mpc] solver failed: {exc}", throttle_duration_sec=2.0
@@ -540,15 +574,32 @@ class MPCNode(Node):
         v_world = R_body @ srbd_state[9:12]
         self._com_pos[:2] += v_world[:2] * self._dt
 
-        kp_list = []
-        kd_list = []
-        for leg in _MPC_LEG_ORDER:
-            in_contact = gait_state[leg]["contact"]
-            scale_kp = self._kp_stance_scale if in_contact else self._kp_swing_scale
-            scale_kd = self._kd_stance_scale if in_contact else self._kd_swing_scale
-            for jname in _leg_joints(leg):
-                kp_list.append(self._base_kp[jname] * scale_kp)
-                kd_list.append(self._base_kd[jname] * scale_kd)
+        tau_list = [0.0] * 12
+        q_current  = np.array([self._joint_pos[n] for n in _YAML_JOINTS])
+        dq_current = np.array([self._joint_vel[n] for n in _YAML_JOINTS])
+        q_sw_des   = np.array([joint_targets[n] for n in _YAML_JOINTS])
+        dq_sw_des  = np.array([dq_targets.get(n, 0.0) for n in _YAML_JOINTS])
+        rpy        = _state_from_estimate(self._state_estimate)[:3]
+        base_vel   = self._state_estimate[0:3]
+        base_ang   = self._state_estimate[3:6]
+        if self._wbc is not None:
+            try:
+                tau_arr = self._wbc.solve(
+                    q_current, dq_current, rpy, base_vel, base_ang,
+                    f_mpc_raw, contact_now,
+                    q_sw_des, dq_sw_des,
+                )
+                tau_list = tau_arr.tolist()
+            except Exception as exc:
+                self.get_logger().warn(
+                    f"[wbc] failed: {exc}", throttle_duration_sec=2.0
+                )
+                tau_list = _build_stance_tau(f_mpc_raw, joint_targets, contact_now=contact_now)
+        else:
+            tau_list = _build_stance_tau(f_mpc_raw, joint_targets, contact_now=contact_now)
+
+        kp_list = [self._kp_residual] * 12
+        kd_list = [self._kd_residual] * 12
 
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],

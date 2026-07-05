@@ -190,17 +190,21 @@ mpc:
   Izz:    0.0169
   horizon: 6    # MPC prediction steps (closed-form solve, ~1ms; raise if tracking diverges)
   K_joint: 20.0 # effective joint stiffness (Nm/rad) used for GRF→Δq mapping (kp × gear_ratio²)
-  # MIT Cheetah 动态增益：比例系数相对各关节现有 kp/kd 基准值
-  # 支撑相低刚度让 tau_ff 主导，摆动相高刚度精确跟踪轨迹
-  # base kp 已改回手调值（K_joint≈40），站立不软趴靠的是这个 + stance_scale，
-  # 不要再指望靠调 mass 补偿。stance_scale=0.6 → 实际 K≈24（已验证站得住）。
-  # 走路卡顿/超调是摆动相单独的问题：原来 swing_scale=1.0 时 K≈40 偏硬导致超调，
-  # 调低到 0.6（K≈24，与 stance 同档）；kd_swing_scale 适当加大增加阻尼抑制超调。
-  # 若走路仍卡顿 → 继续降 kp_swing_scale（如 0.5）；若摆动腿轨迹跟不上/拖沓 → 升回。
-  kp_stance_scale: 0.6
+  # kp_stance_scale / kp_swing_scale: unused when WBC is active.
+  kp_stance_scale: 1.0
   kd_stance_scale: 1.0
-  kp_swing_scale:  0.6
-  kd_swing_scale:  2.0
+  kp_swing_scale:  1.0
+  kd_swing_scale:  1.0
+
+wbc:
+  # Swing leg PD gains in joint-acceleration space [1/s²] and [1/s].
+  # WBC computes τ = M_jj*(kp*(q_des−q)+kd*(dq_des−dq)) + h_j − J_cj^T f.
+  kp_swing: 800.0
+  kd_swing:  40.0
+  # Residual PD to motor driver (motor-side, same basis as control.kp).
+  # Fallback damping only; WBC τ provides the primary torque.
+  kp_residual: 0.05
+  kd_residual: 0.002
 
 standup:
   ramp_duration: 6.0       # seconds for 0 → q_default smooth-step ramp
