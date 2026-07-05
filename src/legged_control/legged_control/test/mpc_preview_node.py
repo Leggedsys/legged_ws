@@ -100,6 +100,14 @@ class MPCPreviewNode(Node):
         js.velocity = [0.0] * 12
         self._pub_agg.publish(js)
 
+        # RViz: publish /joint_states every tick so robot_state_publisher
+        # always has data to generate TF (not just after first /joint_commands)
+        vis = JointState()
+        vis.header.stamp = stamp
+        vis.name     = [f"{n}_joint" for n in _YAML_JOINTS]
+        vis.position = list(self._fake_pos)
+        self._pub_vis.publish(vis)
+
         # Fake /state_estimate: [lin_vel(3), ang_vel(3), proj_gravity(3), health(1)]
         # proj_gravity = [0, 0, -1] → level body, no roll/pitch
         est = Float32MultiArray()

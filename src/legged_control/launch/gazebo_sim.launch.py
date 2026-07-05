@@ -21,7 +21,7 @@ from launch_ros.actions import Node
 
 from legged_control.launch_common import (
     make_state_estimator, make_teleop,
-    make_obs_assembler, make_robot_state_publisher,
+    make_obs_assembler,
     make_obs_monitor, make_vel_viz, make_rviz2,
 )
 
@@ -85,7 +85,6 @@ def _launch_setup(context, *args, **kwargs):
         Node(package="legged_control", executable="policy_node",
              name="policy_node", parameters=[{"model_path": model_path}],
              output="screen"),
-        make_robot_state_publisher(),
         make_obs_monitor(),
         make_vel_viz(),
         make_rviz2(),
@@ -104,7 +103,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("urdf_path", default_value=_default_urdf_path()),
-        DeclareLaunchArgument("spawn_z", default_value="0.40"),
+        DeclareLaunchArgument("spawn_z", default_value="0.15"),
         DeclareLaunchArgument("model_path", default_value=""),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("gui", default_value="true"),
