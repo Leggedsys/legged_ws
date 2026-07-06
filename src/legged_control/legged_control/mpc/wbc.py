@@ -42,6 +42,9 @@ _MPC_IDX_TO_YAML_SLICE = {0: slice(0, 3), 1: slice(3, 6), 2: slice(6, 9), 3: sli
 assert all(_YAML_TO_PIN[_PIN_TO_YAML[i]] == i for i in range(12)), \
     "_YAML_TO_PIN and _PIN_TO_YAML are not mutual inverses"
 
+# GO-M8010-6 joint-side peak ≈ 23.7 Nm; stay 1.7 Nm below to avoid overcurrent trips.
+_TAU_MAX = 22.0
+
 
 class WBC:
     """Whole Body Controller using Pinocchio floating-base inverse dynamics."""
@@ -94,7 +97,7 @@ class WBC:
         tau_yaml = np.zeros(12)
         for i_pin in range(12):
             tau_yaml[_PIN_TO_YAML[i_pin]] = tau_pin[i_pin]
-        return tau_yaml
+        return np.clip(tau_yaml, -_TAU_MAX, _TAU_MAX)
 
     def _build_pin_state(self, q_yaml, dq_yaml, rpy, base_vel_body, base_ang_vel_body):
         r, p, y = float(rpy[0]), float(rpy[1]), float(rpy[2])

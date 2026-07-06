@@ -199,12 +199,16 @@ mpc:
 wbc:
   # Swing leg PD gains in joint-acceleration space [1/s²] and [1/s].
   # WBC computes τ = M_jj*(kp*(q_des−q)+kd*(dq_des−dq)) + h_j − J_cj^T f.
+  # kd_swing reduced from 40 → 20 to limit torque chatter from noisy dq_yaml
+  # (200 Hz finite-diff velocity noise ≈ 0.3-1 rad/s → Δτ ≈ 40×noise×M_jj).
   kp_swing: 800.0
-  kd_swing:  40.0
+  kd_swing:  20.0
   # Residual PD to motor driver (motor-side, same basis as control.kp).
-  # Fallback damping only; WBC τ provides the primary torque.
-  kp_residual: 0.05
-  kd_residual: 0.002
+  # WBC τ (h_j − J_cj^T f*) is the primary torque; this is safety damping only.
+  # Start at 0.30 (K_joint≈12 Nm/rad for hip/thigh) until WBC verified on hardware;
+  # lower toward 0.05 only after confirming WBC gravity compensation is sufficient.
+  kp_residual: 0.30
+  kd_residual: 0.015
 
 standup:
   ramp_duration: 6.0       # seconds for 0 → q_default smooth-step ramp

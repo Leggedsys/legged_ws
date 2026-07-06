@@ -222,10 +222,10 @@ class MPCNode(Node):
 
         # WBC initialization
         wbc_cfg = cfg.get("wbc", {})
-        self._kp_residual = float(wbc_cfg.get("kp_residual", 0.05))
-        self._kd_residual = float(wbc_cfg.get("kd_residual", 0.002))
+        self._kp_residual = float(wbc_cfg.get("kp_residual", 0.30))
+        self._kd_residual = float(wbc_cfg.get("kd_residual", 0.015))
         _kp_sw_wbc = float(wbc_cfg.get("kp_swing", 800.0))
-        _kd_sw_wbc = float(wbc_cfg.get("kd_swing",  40.0))
+        _kd_sw_wbc = float(wbc_cfg.get("kd_swing",  20.0))
 
         self._wbc: WBC | None = None
         try:
@@ -440,8 +440,17 @@ class MPCNode(Node):
         else:
             tau_list = _build_stance_tau(f_mpc_blended, joint_targets)
 
-        kp = [self._kp_residual] * 12
-        kd = [self._kd_residual] * 12
+        # Blend kp/kd from standup values down to residual over the same window as
+        # the tau blend, so stiffness and torque ramp together and kp doesn't
+        # drop 20× in a single tick while WBC τ is still ramping up.
+        kp = [
+            self._kp_residual + (1.0 - blend) * (self._base_kp.get(n, 1.0) - self._kp_residual)
+            for n in _YAML_JOINTS
+        ]
+        kd = [
+            self._kd_residual + (1.0 - blend) * (self._base_kd.get(n, 0.033) - self._kd_residual)
+            for n in _YAML_JOINTS
+        ]
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],
             dq=[0.0] * 12,
@@ -582,6 +591,7 @@ class MPCNode(Node):
         rpy        = _state_from_estimate(self._state_estimate)[:3]
         base_vel   = self._state_estimate[0:3]
         base_ang   = self._state_estimate[3:6]
+        wbc_ok = False
         if self._wbc is not None:
             try:
                 tau_arr = self._wbc.solve(
@@ -590,6 +600,7 @@ class MPCNode(Node):
                     q_sw_des, dq_sw_des,
                 )
                 tau_list = tau_arr.tolist()
+                wbc_ok = True
             except Exception as exc:
                 self.get_logger().warn(
                     f"[wbc] failed: {exc}", throttle_duration_sec=2.0
@@ -600,6 +611,15 @@ class MPCNode(Node):
 
         kp_list = [self._kp_residual] * 12
         kd_list = [self._kd_residual] * 12
+        if not wbc_ok:
+            # WBC failed: swing legs get τ=0 from the J^T fallback; restore full
+            # kp so they don't go limp mid-air.
+            for i, leg in enumerate(_MPC_LEG_ORDER):
+                if not contact_now[i]:
+                    for jname in _leg_joints(leg):
+                        idx = _YAML_JOINTS.index(jname)
+                        kp_list[idx] = self._base_kp.get(jname, 1.0)
+                        kd_list[idx] = self._base_kd.get(jname, 0.033)
 
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],
