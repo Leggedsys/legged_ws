@@ -16,6 +16,7 @@ control stacks have different bandwidth needs and must not move together.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import os
 import time
 
@@ -220,12 +221,15 @@ class MPCNode(Node):
             horizon=horizon,
         )
 
-        # WBC initialization
+        # WBC + contact estimation
         wbc_cfg = cfg.get("wbc", {})
         self._kp_residual = float(wbc_cfg.get("kp_residual", 0.30))
         self._kd_residual = float(wbc_cfg.get("kd_residual", 0.015))
         _kp_sw_wbc = float(wbc_cfg.get("kp_swing", 800.0))
         _kd_sw_wbc = float(wbc_cfg.get("kd_swing",  20.0))
+        self._contact_est_enabled = bool(wbc_cfg.get("contact_est_enabled", True))
+        self._contact_fz_on  = float(wbc_cfg.get("contact_fz_on",  12.0))
+        self._contact_fz_off = float(wbc_cfg.get("contact_fz_off",  2.0))
 
         self._wbc: WBC | None = None
         try:
@@ -246,6 +250,9 @@ class MPCNode(Node):
         )
         self._joint_pos: dict[str, float] = {n: _DEFAULT_Q[n] for n in _YAML_JOINTS}
         self._joint_vel: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
+        self._joint_effort: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
+        # Schmitt-trigger state per leg; initialised to True (all in contact at startup).
+        self._contact_state: dict[str, bool] = {leg: True for leg in LEG_NAMES}
 
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
@@ -296,6 +303,10 @@ class MPCNode(Node):
             if name in self._joint_pos:
                 self._joint_pos[name] = float(pos)
                 self._joint_vel[name] = float(vel)
+        if len(msg.effort) == len(msg.name):
+            for name, eff in zip(msg.name, msg.effort):
+                if name in self._joint_effort:
+                    self._joint_effort[name] = float(eff)
 
     def _on_state(self, msg: Float32MultiArray) -> None:
         self._state_estimate = np.array(msg.data[:10], dtype=float)
@@ -381,6 +392,52 @@ class MPCNode(Node):
         kp = [self._base_kp[n] * self._kp_swing_scale for n in _YAML_JOINTS]
         kd = [self._base_kd[n] * self._kd_swing_scale for n in _YAML_JOINTS]
         return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= dur
+
+    def _estimate_contact(self, gait_contact: dict[str, bool]) -> list[bool]:
+        """Hybrid gait+force contact estimation using J^T torque inversion.
+
+        For each leg, subtracts the WBC gravity torque (h_j) from measured
+        motor torques, then solves J^T f = τ_residual for the foot force.
+        A Schmitt trigger on f_z (upward positive) overrides the gait schedule
+        only when the signal is unambiguous:
+          f_z > contact_fz_on  → early touchdown (swing→contact)
+          f_z < contact_fz_off → slip / missed landing (stance→swing)
+
+        Falls back to pure gait schedule when WBC h_j is unavailable or
+        contact estimation is disabled.
+        """
+        if not self._contact_est_enabled:
+            return [gait_contact[leg] for leg in _MPC_LEG_ORDER]
+
+        h_j = self._wbc.gravity_torque if self._wbc is not None else None
+        if h_j is None:
+            return [gait_contact[leg] for leg in _MPC_LEG_ORDER]
+
+        for i, leg in enumerate(_MPC_LEG_ORDER):
+            tau_meas = np.array([self._joint_effort.get(n, 0.0) for n in _leg_joints(leg)])
+            tau_contact = tau_meas - h_j[i * 3 : i * 3 + 3]
+            q_leg = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
+            J = _numerical_jacobian(leg, q_leg)
+            try:
+                f_est = np.linalg.solve(J.T, tau_contact)
+                f_z = float(f_est[2])
+            except np.linalg.LinAlgError:
+                f_z = float("nan")
+
+            if math.isnan(f_z):
+                pass  # singular config: keep previous Schmitt state
+            elif f_z > self._contact_fz_on:
+                self._contact_state[leg] = True
+            elif f_z < self._contact_fz_off:
+                self._contact_state[leg] = False
+            # else: in hysteresis band → keep previous state
+
+        return [
+            (True  if not gait_contact[leg] and self._contact_state[leg] else
+             False if     gait_contact[leg] and not self._contact_state[leg] else
+             gait_contact[leg])
+            for leg in _MPC_LEG_ORDER
+        ]
 
     def _balance_stance(self, stance_h: float, now: float | None = None) -> JointCommand:
         """Four-foot MPC balance: all legs in contact, zero velocity reference."""
@@ -556,7 +613,8 @@ class MPCNode(Node):
             self._cmd_vel[0], self._cmd_vel[1], 0.0,
         ])
 
-        contact_now = [gait_state[leg]["contact"] for leg in _MPC_LEG_ORDER]
+        gait_contact = {leg: gait_state[leg]["contact"] for leg in _MPC_LEG_ORDER}
+        contact_now = self._estimate_contact(gait_contact)
         contact_schedule = []
         for k in range(self._mpc._N):
             t_future = now + k * self._dt

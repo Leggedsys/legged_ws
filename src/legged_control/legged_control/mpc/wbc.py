@@ -65,6 +65,7 @@ class WBC:
             if fid >= self._model.nframes:
                 raise ValueError(f"Frame '{leg}_foot' not found in URDF")
             self._foot_ids[leg] = fid
+        self._last_h_j_yaml: np.ndarray | None = None
 
     def solve(
         self,
@@ -85,7 +86,13 @@ class WBC:
         M   = self._data.M        # 18×18
         h   = self._data.nle      # 18
         M_jj = M[6:, 6:]          # 12×12
-        h_j  = h[6:]              # 12
+        h_j  = h[6:]              # 12, Pinocchio order
+
+        # Cache gravity+Coriolis in YAML order for the contact estimator.
+        h_j_yaml = np.zeros(12)
+        for i_pin in range(12):
+            h_j_yaml[_PIN_TO_YAML[i_pin]] = h_j[i_pin]
+        self._last_h_j_yaml = h_j_yaml
 
         J_cj, f_stance = self._build_contact_jacobian(contact, f_mpc)
         q_ddot_des = self._build_q_ddot(contact, q_yaml, dq_yaml, q_swing_des, dq_swing_des)
@@ -98,6 +105,11 @@ class WBC:
         for i_pin in range(12):
             tau_yaml[_PIN_TO_YAML[i_pin]] = tau_pin[i_pin]
         return np.clip(tau_yaml, -_TAU_MAX, _TAU_MAX)
+
+    @property
+    def gravity_torque(self) -> np.ndarray | None:
+        """Last gravity+Coriolis torques in YAML joint order (12,). None before first solve."""
+        return self._last_h_j_yaml
 
     def _build_pin_state(self, q_yaml, dq_yaml, rpy, base_vel_body, base_ang_vel_body):
         r, p, y = float(rpy[0]), float(rpy[1]), float(rpy[2])

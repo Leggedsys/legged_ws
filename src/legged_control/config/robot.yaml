@@ -197,6 +197,16 @@ mpc:
   kd_swing_scale:  1.0
 
 wbc:
+  # Contact estimation via foot-force residual (τ_measured − h_j → J^T inversion).
+  # Disable on first bench test and enable once h_j and τ_measured are verified.
+  contact_est_enabled: true
+  # Schmitt trigger thresholds in estimated vertical GRF (N, upward positive).
+  # f_z > on  → override to contact (catches early touchdown on rough terrain).
+  # f_z < off → override to swing  (catches foot slip / missed landing).
+  # Tune on hardware: start wide (on=15, off=1) then tighten.
+  contact_fz_on:  12.0
+  contact_fz_off:  2.0
+
   # Swing leg PD gains in joint-acceleration space [1/s²] and [1/s].
   # WBC computes τ = M_jj*(kp*(q_des−q)+kd*(dq_des−dq)) + h_j − J_cj^T f.
   # kd_swing reduced from 40 → 20 to limit torque chatter from noisy dq_yaml
