@@ -1,16 +1,16 @@
 """Tests for MPC modules — runs offline, no ROS, no hardware required."""
 
-import time
 import numpy as np
 import pytest
 
 from legged_control.mpc.gait_scheduler import GaitScheduler, LEG_NAMES
 from legged_control.mpc.swing_trajectory import (
     swing_foot_position,
+    stance_foot_position,
     nominal_foot_position,
     landing_target,
+    leg_velocity,
 )
-from legged_control.mpc.srbd_mpc import SRBDMPC
 
 
 # ── GaitScheduler ─────────────────────────────────────────────────────────────
@@ -113,184 +113,136 @@ def test_landing_target_clamped():
     )
 
 
-# ── SRBD MPC ──────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def mpc():
-    inertia = np.diag([0.0196, 0.0228, 0.0169])
-    return SRBDMPC(mass=14.55, inertia_body=inertia, dt=0.02, horizon=6)
-
-
-def test_mpc_output_shape(mpc):
-    state = np.zeros(12)
-    state[5] = 0.27  # standing height
-    state_ref = state.copy()
-    foot_pos = np.array([
-        [0.18, -0.13, -0.27],
-        [0.18,  0.13, -0.27],
-        [-0.18, -0.13, -0.27],
-        [-0.18,  0.13, -0.27],
-    ])
-    contact = [[True, False, False, True]] * 6  # trot: FR+RL in contact
-    grf = mpc.solve(state, state_ref, foot_pos, contact)
-    assert grf.shape == (12,), f"Expected (12,), got {grf.shape}"
+def test_stance_phase_progress():
+    """stance_phase runs 0→1 during stance and is 0 during swing."""
+    g = GaitScheduler(period=0.6, swing_ratio=0.4)
+    t0 = g._t0
+    for dt in np.linspace(0.0, 0.6, 60, endpoint=False):
+        t = t0 + dt
+        s = g.query(t=t)
+        sp = g.stance_phase("FR", t=t)
+        if s["FR"]["contact"]:
+            assert 0.0 <= sp <= 1.0
+        else:
+            assert sp == 0.0
+    # stance starts right after swing_ratio: progress near 0 there, near 1 at cycle end
+    assert g.stance_phase("FR", t=t0 + 0.4 * 0.6 + 1e-4) < 0.05
+    assert g.stance_phase("FR", t=t0 + 0.6 - 1e-4) > 0.95
 
 
-def test_mpc_swing_forces_near_zero(mpc):
-    """Swing legs should have near-zero GRF (equality constraint)."""
-    state = np.zeros(12)
-    state[5] = 0.27
-    state_ref = state.copy()
-    foot_pos = np.zeros((4, 3))
-    foot_pos[:, 2] = -0.27
-    contact = [[True, False, False, True]] * 6  # FL, RR are swing
-    grf = mpc.solve(state, state_ref, foot_pos, contact)
-    # FL=index 1, RR=index 2 should be ~0
-    fl_force = grf[3:6]
-    rr_force = grf[6:9]
-    np.testing.assert_allclose(fl_force, 0.0, atol=0.5)
-    np.testing.assert_allclose(rr_force, 0.0, atol=0.5)
+def test_stance_stroke_endpoints_match_transitions():
+    """Stance s=0 == landing_target (touchdown); zero vel → nominal at any s."""
+    vel = np.array([0.3, 0.0])
+    args = dict(body_vel=vel, gait_period=0.6, swing_ratio=0.4, stance_height=0.27)
+    p_td   = stance_foot_position("FR", 0.0, **args)
+    p_land = landing_target("FR", vel, 0.6, 0.4, 0.27)
+    np.testing.assert_allclose(p_td, p_land, atol=1e-9,
+                               err_msg="touchdown stance target must equal swing landing target")
+    # lift-off point mirrors the touchdown offset about nominal
+    p_lo = stance_foot_position("FR", 1.0, **args)
+    nom = nominal_foot_position("FR")
+    np.testing.assert_allclose(p_lo[0] - nom[0], -(p_td[0] - nom[0]), atol=1e-9)
+    # zero velocity: stroke degenerates to nominal
+    for s in (0.0, 0.5, 1.0):
+        p = stance_foot_position("FR", s, np.zeros(2), 0.6, 0.4, 0.27)
+        np.testing.assert_allclose(p, nom, atol=1e-9)
 
 
-def test_mpc_stance_fz_positive(mpc):
-    """Stance legs should push up (fz > 0)."""
-    state = np.zeros(12)
-    state[5] = 0.27
-    state_ref = state.copy()
-    foot_pos = np.zeros((4, 3))
-    foot_pos[:, 2] = -0.27
-    contact = [[True, False, False, True]] * 10
-    grf = mpc.solve(state, state_ref, foot_pos, contact)
-    assert grf[2] > 0, f"FR fz should be positive, got {grf[2]:.2f}"
-    assert grf[11] > 0, f"RL fz should be positive, got {grf[11]:.2f}"
+def test_stance_stroke_sweeps_backward():
+    """With forward velocity the stance foot must move backward monotonically."""
+    vel = np.array([0.3, 0.0])
+    xs = [
+        stance_foot_position("FR", s, vel, 0.6, 0.4, 0.27)[0]
+        for s in np.linspace(0.0, 1.0, 11)
+    ]
+    assert all(a > b for a, b in zip(xs, xs[1:])), f"x not decreasing: {xs}"
+    # total stroke = 2 × Raibert offset = v · T_stance
+    assert xs[0] - xs[-1] == pytest.approx(0.3 * 0.6 * 0.6, abs=1e-9)
 
 
-def test_mpc_weight_support(mpc):
-    """Total fz from stance legs should roughly equal body weight."""
-    state = np.zeros(12)
-    state[5] = 0.27
-    state_ref = state.copy()
-    foot_pos = np.zeros((4, 3))
-    foot_pos[:, 2] = -0.27
-    # All four legs in contact
-    contact = [[True, True, True, True]] * 6
-    grf = mpc.solve(state, state_ref, foot_pos, contact)
-    total_fz = grf[2] + grf[5] + grf[8] + grf[11]
-    weight = 14.55 * 9.81
-    assert abs(total_fz - weight) < weight * 0.3, (
-        f"Total fz={total_fz:.1f} N, weight={weight:.1f} N — too far off"
-    )
+def test_swing_end_slope_matches_ground_velocity():
+    """With xy_end_slope=−v·T, foot xy moves backward (with the ground) right
+    after lift-off and right before touchdown, and endpoints stay exact."""
+    v = np.array([0.3, 0.0])
+    t_sw = 0.24
+    o = 0.054
+    p_lift = np.array([-o, 0.0, -0.27])
+    p_land = np.array([+o, 0.0, -0.27])
+    slope = -v * t_sw
+    p0 = swing_foot_position(0.0, p_lift, p_land, 0.06, xy_end_slope=slope)
+    p1 = swing_foot_position(1.0, p_lift, p_land, 0.06, xy_end_slope=slope)
+    np.testing.assert_allclose(p0[:2], p_lift[:2], atol=1e-9)
+    np.testing.assert_allclose(p1[:2], p_land[:2], atol=1e-9)
+    # numeric slope at endpoints ≈ −v·T (foot moves with the ground)
+    eps = 1e-4
+    d0 = (swing_foot_position(eps, p_lift, p_land, 0.06, xy_end_slope=slope)[0] - p0[0]) / eps
+    d1 = (p1[0] - swing_foot_position(1 - eps, p_lift, p_land, 0.06, xy_end_slope=slope)[0]) / eps
+    assert d0 == pytest.approx(slope[0], abs=1e-2)
+    assert d1 == pytest.approx(slope[0], abs=1e-2)
+    # mid-swing still travels forward past both endpoints overall
+    p_mid = swing_foot_position(0.5, p_lift, p_land, 0.06, xy_end_slope=slope)
+    assert p_mid[0] == pytest.approx((p_lift[0] + p_land[0]) / 2, abs=0.02)
 
 
-# ── Solver timing benchmark ────────────────────────────────────────────────────
-
-def test_mpc_solver_timing(mpc):
-    """Solver must fit in < 20ms to leave headroom in the 50Hz loop."""
-    state = np.zeros(12)
-    state[5] = 0.27
-    state_ref = state.copy()
-    foot_pos = np.zeros((4, 3))
-    foot_pos[:, 2] = -0.27
-    contact = [[True, False, False, True]] * 6
-
-    n_runs = 20
-    times = []
-    for _ in range(n_runs):
-        t0 = time.perf_counter()
-        mpc.solve(state, state_ref, foot_pos, contact)
-        times.append((time.perf_counter() - t0) * 1000)
-
-    mean_ms = np.mean(times)
-    max_ms  = np.max(times)
-    print(f"\n[timing] solver: mean={mean_ms:.1f}ms  max={max_ms:.1f}ms  (budget=20ms)")
-    assert mean_ms < 20.0, (
-        f"Solver too slow: mean={mean_ms:.1f}ms > 20ms. "
-        f"Consider reducing horizon or switching to OSQP."
-    )
+def test_backward_walk_reverses_stroke():
+    """Negative vx: touchdown behind nominal, stroke sweeps forward."""
+    vel = np.array([-0.3, 0.0])
+    nom = nominal_foot_position("FR")
+    p_td = stance_foot_position("FR", 0.0, vel, 0.6, 0.4, 0.27)
+    p_lo = stance_foot_position("FR", 1.0, vel, 0.6, 0.4, 0.27)
+    assert p_td[0] < nom[0], "backward: touchdown must be behind nominal"
+    assert p_lo[0] > nom[0], "backward: lift-off must be ahead of nominal"
 
 
-# ── MIT Cheetah τ_ff ──────────────────────────────────────────────────────────
+def test_leg_velocity_yaw_differential():
+    """Pure yaw: left/right sides get opposite fore-aft velocity (turn in place),
+    front/rear get opposite lateral velocity."""
+    wz = 0.5  # rad/s, positive = CCW (left turn)
+    v = {leg: leg_velocity(np.zeros(2), wz, leg) for leg in ("FR", "FL", "RR", "RL")}
+    # CCW: right side (FR/RR, y<0) moves forward, left side (FL/RL) backward
+    assert v["FR"][0] > 0 and v["RR"][0] > 0
+    assert v["FL"][0] < 0 and v["RL"][0] < 0
+    # front feet (x>0) move left (+y), rear feet right (−y)
+    assert v["FR"][1] > 0 and v["FL"][1] > 0
+    assert v["RR"][1] < 0 and v["RL"][1] < 0
+    # symmetric magnitudes
+    assert v["FR"][0] == pytest.approx(-v["FL"][0])
+    assert v["FR"][1] == pytest.approx(-v["RR"][1])
 
-def test_tau_ff_direction_and_magnitude():
-    """J^T · f_contact should produce plausible stance joint torques."""
-    import sys
-    sys.path.insert(0, "src/legged_control")
-    from legged_control.kinematics import _numerical_jacobian
-    import numpy as np
 
-    joints_fr = (0.1, 0.8, -1.5)
-    J = _numerical_jacobian("FR", joints_fr)
+def test_leg_velocity_zero_yaw_passthrough():
+    """No yaw: per-leg velocity equals body velocity for every leg."""
+    body = np.array([0.3, 0.1])
+    for leg in ("FR", "FL", "RR", "RL"):
+        np.testing.assert_allclose(leg_velocity(body, 0.0, leg), body, atol=1e-12)
 
-    # 四腿均分 14.55 kg 体重的竖直支撑力
-    fz = 14.55 * 9.81 / 4.0
-    f = np.array([0.0, 0.0, fz])
-    tau = J.T @ f
 
-    # 所有关节力矩绝对值 < 电机额定 23 Nm
-    assert np.all(np.abs(tau) < 23.0), f"τ exceeds motor limit: {tau}"
-    # 大腿（index 1）应为正力矩（支撑体重）
-    assert tau[1] > 0.0, f"Thigh τ should be positive, got {tau[1]:.3f}"
-    # 小腿（index 2）应为负力矩（膝关节弯曲对抗重力）
-    assert tau[2] < 0.0, f"Calf τ should be negative, got {tau[2]:.3f}"
+def test_leveling_dz_signs_and_clamp():
+    """Attitude leveling: tilted-down side gets longer legs (more negative z)."""
+    from legged_control.mpc.mpc_node import _leveling_dz
+
+    # nose down (gravity gains +x in body frame) → front legs extend, rear shorten
+    dz = _leveling_dz(0.1, 0.0)
+    assert dz["FR"] < 0 and dz["FL"] < 0, "front legs must extend when nose is down"
+    assert dz["RR"] > 0 and dz["RL"] > 0, "rear legs must shorten when nose is down"
+    # left side down (gravity gains +y) → left legs extend, right shorten
+    dz = _leveling_dz(0.0, 0.1)
+    assert dz["FL"] < 0 and dz["RL"] < 0, "left legs must extend when left is down"
+    assert dz["FR"] > 0 and dz["RR"] > 0, "right legs must shorten when left is down"
+    # symmetric magnitudes, clamped
+    dz = _leveling_dz(10.0, 10.0)
+    assert all(abs(v) <= 0.04 + 1e-12 for v in dz.values())
+    # level → all zero
+    dz = _leveling_dz(0.0, 0.0)
+    assert all(v == 0.0 for v in dz.values())
 
 
 def test_kp_scale_gives_correct_per_joint_value():
-    """Stance scale 0.25 applied to base_kp=1.5 should give 0.375."""
+    """kp_scale applied to base_kp should scale each joint uniformly."""
     base_kp = {"FR_hip": 1.5, "FR_thigh": 1.5, "FR_calf": 0.5}
-    stance_scale = 0.25
-    swing_scale  = 2.0
+    scale = 0.6
 
-    stance_kp = {n: v * stance_scale for n, v in base_kp.items()}
-    swing_kp  = {n: v * swing_scale  for n, v in base_kp.items()}
+    scaled_kp = {n: v * scale for n, v in base_kp.items()}
 
-    assert stance_kp["FR_hip"]   == pytest.approx(0.375)
-    assert stance_kp["FR_calf"]  == pytest.approx(0.125)
-    assert swing_kp["FR_hip"]    == pytest.approx(3.0)
-    assert swing_kp["FR_calf"]   == pytest.approx(1.0)
-
-
-def test_balance_stance_returns_joint_command_with_tau():
-    """_build_stance_tau should return a 12-element list with non-zero torques for stance legs."""
-    import sys
-    sys.path.insert(0, "src/legged_control")
-    import numpy as np
-    from legged_control.mpc.mpc_node import _build_stance_tau, _YAML_JOINTS
-
-    # 给定已知 GRF（每腿 35.7 N 竖直）
-    grf = np.zeros(12)
-    for i in range(4):
-        grf[i * 3 + 2] = 35.7  # fz
-
-    q_targets = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
-                 for n in _YAML_JOINTS}
-    tau = _build_stance_tau(grf, q_targets)
-
-    assert len(tau) == 12
-    # 至少一个关节有非零力矩
-    assert any(abs(t) > 0.01 for t in tau), "All torques are zero — J^T·f not applied"
-    # 无关节超过电机额定
-    assert all(abs(t) < 23.0 for t in tau), f"Torque out of range: {tau}"
-
-
-def test_build_stance_tau_swing_legs_zero():
-    """Swing legs must have zero torque regardless of GRF."""
-    import sys
-    sys.path.insert(0, "src/legged_control")
-    import numpy as np
-    from legged_control.mpc.mpc_node import _build_stance_tau, _YAML_JOINTS
-
-    grf = np.ones(12) * 50.0  # non-zero GRF
-    q_targets = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
-                 for n in _YAML_JOINTS}
-
-    # FR(0) stance, FL(1) swing, RR(2) swing, RL(3) stance
-    contact = [True, False, False, True]
-    tau = _build_stance_tau(grf, q_targets, contact_now=contact)
-
-    # FL joints (index 3,4,5) and RR joints (index 6,7,8) should be 0
-    fl_tau = tau[3:6]
-    rr_tau = tau[6:9]
-    assert all(t == 0.0 for t in fl_tau), f"FL swing should have zero tau: {fl_tau}"
-    assert all(t == 0.0 for t in rr_tau), f"RR swing should have zero tau: {rr_tau}"
-    # FR and RL should be non-zero
-    assert any(abs(t) > 0.0 for t in tau[0:3]), "FR stance should have non-zero tau"
+    assert scaled_kp["FR_hip"]  == pytest.approx(0.9)
+    assert scaled_kp["FR_calf"] == pytest.approx(0.3)

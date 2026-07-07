@@ -82,3 +82,13 @@ class GaitScheduler:
         if s[leg]["contact"]:
             return 0.0
         return phase / self._swing_ratio
+
+    def stance_phase(self, leg: str, t: float | None = None) -> float:
+        """Return stance progress in [0,1] for a leg currently in stance.
+        Returns 0.0 if the leg is in swing.
+        """
+        s = self.query(t)
+        phase = s[leg]["phase"]
+        if not s[leg]["contact"]:
+            return 0.0
+        return (phase - self._swing_ratio) / (1.0 - self._swing_ratio)

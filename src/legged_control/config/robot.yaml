@@ -138,7 +138,7 @@ control:
   #   关键：calf 的 gr² 是 hip/thigh 的 4 倍，所以 calf 的 kp/kd 已按 1/4 拆分。
   kp: 1.0
   kd: 0.0333
-  kp_calf: 0.25
+  kp_calf: 0.20
   kd_calf: 0.0133
   gait_hz: 50.0   # policy control frequency
   max_joint_speed: 12.0   # rad/s (URDF frame) — safety cap on per-joint cmd delta.
@@ -148,8 +148,8 @@ control:
   estimator_hz: 200.0    # state_estimator publish rate (was: per-IMU ≈400 Hz)
 
 teleop:
-  max_vx:  0.60  # m/s  forward/backward
-  max_vy:  0.05  # m/s  lateral
+  max_vx:  0.40  # m/s  forward/backward
+  max_vy:  0.10  # m/s  lateral
   max_yaw: 0.5   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
   btn_posture_toggle: 0  # A button: toggle stand up / lie down
@@ -163,6 +163,12 @@ teleop:
   axis_lt: 4
   axis_rt: 5
   max_dz:  0.03  # m/s height rate limit
+  # Absolute stance-height command integrated from LT/RT (/height_command).
+  # height_init must match mpc.stance_height — otherwise teleop connecting
+  # drags the standing height toward its own initial value.
+  height_min:  0.15
+  height_max:  0.30
+  height_init: 0.27
 
 mpc:
   # tick_hz: mpc_node's own solve/publish rate — deliberately separate from
@@ -175,35 +181,31 @@ mpc:
   # (~1ms per SRBDMPC docstring), so there's headroom to raise this well
   # above 50Hz; watch CPU/solve time on real hardware before going higher.
   tick_hz: 100.0
-  # Physical parameters for SRBD-MPC.
-  # mass: measured total is 14.55 kg (each leg 1.5 kg × 4 + base 8.55 kg;
-  # URDF under-reports base mass, URDF total was 10.92 kg).
-  # Tried overestimating this (18, then 25) to inflate tau_ff and compensate
-  # for a lowered stance kp — real hardware still sagged, so that theory is
-  # falsified. Reverted to the measured value; support now comes from kp again.
-  mass:    14.55
-  # Diagonal body-frame inertia (kg⋅m²): URDF summed values scaled by
-  # actual/URDF mass ratio (14.55/10.92 ≈ 1.33). Rough estimate only —
-  # replace with system-ID result if oscillation is observed.
-  Ixx:    0.0196
-  Iyy:    0.0228
-  Izz:    0.0169
-  horizon: 6    # MPC prediction steps (closed-form solve, ~1ms; raise if tracking diverges)
-  K_joint: 20.0 # effective joint stiffness (Nm/rad) used for GRF→Δq mapping (kp × gear_ratio²)
-  # MIT Cheetah 动态增益：比例系数相对各关节现有 kp/kd 基准值
-  # 支撑相低刚度让 tau_ff 主导，摆动相高刚度精确跟踪轨迹
-  # base kp 已改回手调值（K_joint≈40），站立不软趴靠的是这个 + stance_scale，
-  # 不要再指望靠调 mass 补偿。stance_scale=0.6 → 实际 K≈24（已验证站得住）。
-  # 走路卡顿/超调是摆动相单独的问题：原来 swing_scale=1.0 时 K≈40 偏硬导致超调，
-  # 调低到 0.6（K≈24，与 stance 同档）；kd_swing_scale 适当加大增加阻尼抑制超调。
-  # 若走路仍卡顿 → 继续降 kp_swing_scale（如 0.5）；若摆动腿轨迹跟不上/拖沓 → 升回。
-  kp_stance_scale: 0.6
-  kd_stance_scale: 1.0
-  kp_swing_scale:  0.6
-  kd_swing_scale:  2.0
+  gait_period:   0.4    # s — full stance+swing cycle per leg (trot)
+  swing_ratio:   0.35    # fraction of gait_period spent in swing
+  step_height:   0.05   # m — foot clearance at mid-swing
+  stance_height: 0.27   # m — nominal body height above feet
+  # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
+  # for the whole gait cycle (no stance/swing gain switching). See
+  # dev/mpc-purepos branch — removed SRBD-MPC + J^T·f torque path entirely
+  # to isolate sim2real gap from PD tracking before reintroducing force control.
+  # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
+  # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
+  # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
+  kp_scale: 2.0
+  kd_scale: 2.0
+  # IMU 姿态调平（仅 WALK 相）：projected_gravity 的 x/y 分量为倾斜量（0.1s 低通
+  # 滤触地噪声），阻尼取该滤波信号自身的数值微分——不用原始 gyro（其轴向取决于
+  # IMU 安装朝向，猜错符号会变成快速正反馈，实测表现为微小倾斜即剧烈弹跳）。
+  # PD 输出映射为四脚 z 修正（倾低侧伸腿顶回），±4cm 限幅 + 0.25 m/s 斜率硬限
+  # （任何调参都不可能让脚"跳"）。att_kp 单位 m/单位倾斜；设 0 关闭。
+  # 环路增益 = 2·att_kp/轮距(0.32m)：att_kp 0.16 即增益 1（必振荡，实测 0.25 时
+  # 左右横跳）。安全范围 0.05~0.12，每次加 0.02；过修/振荡 → 先加 att_kd 再降 att_kp。
+  att_kp: 0.08
+  att_kd: 0.02
 
 standup:
-  ramp_duration: 6.0       # seconds for 0 → q_default smooth-step ramp
+  ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
   lie_down_duration: 2.0   # seconds for current → 0 smooth-step ramp
 
 height_scan:
