@@ -136,7 +136,7 @@ control:
   # offset），下一步该调这些运动学参数而不是继续压 kp。
   # TODO(台架)：单关节挂已知重量、量角度偏差 Δθ，算 K_joint = τ/Δθ 确认 ≈20。
   #   关键：calf 的 gr² 是 hip/thigh 的 4 倍，所以 calf 的 kp/kd 已按 1/4 拆分。
-  kp: 1.0
+  kp: 1.0 
   kd: 0.0333
   kp_calf: 0.20
   kd_calf: 0.0133
@@ -181,6 +181,20 @@ mpc:
   # (~1ms per SRBDMPC docstring), so there's headroom to raise this well
   # above 50Hz; watch CPU/solve time on real hardware before going higher.
   tick_hz: 100.0
+  # SRBD-MPC physical parameters (GRF feedforward on top of the position gait).
+  # mass: measured 14.55 kg (legs 1.5×4 + base 8.55; URDF under-reports).
+  # Inertia: URDF sums scaled by mass ratio 14.55/10.92 — rough estimate.
+  mass:    14.55
+  Ixx:     0.0196
+  Iyy:     0.0228
+  Izz:     0.0169
+  horizon: 6
+  # tau_ff 三层平滑保证任何切换都无阶跃：全局 0.3s blend（进 WALK / 运行时开关）、
+  # 支撑相首尾 20% 力渐变（触地/离地瞬间该腿力为零）、输出 40ms 低通（吸收其余
+  # 腿在接触切换时的受力重分配阶跃）。运行时 A/B 对比：
+  #   ros2 param set /mpc_node tau_ff_enabled false   # 0.3s 内平滑退出
+  # tau_ff 验证有效后可逐步下调 kp_scale（2.0 → 1.0），让力矩承重、PD 提供柔顺。
+  tau_ff_enabled: true
   gait_period:   0.4    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.35    # fraction of gait_period spent in swing
   step_height:   0.05   # m — foot clearance at mid-swing
@@ -192,7 +206,7 @@ mpc:
   # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
   # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
   # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
-  kp_scale: 2.0
+  kp_scale: 1.5
   kd_scale: 2.0
   # IMU 姿态调平（仅 WALK 相）：projected_gravity 的 x/y 分量为倾斜量（0.1s 低通
   # 滤触地噪声），阻尼取该滤波信号自身的数值微分——不用原始 gyro（其轴向取决于

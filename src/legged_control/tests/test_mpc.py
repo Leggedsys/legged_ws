@@ -246,3 +246,70 @@ def test_kp_scale_gives_correct_per_joint_value():
 
     assert scaled_kp["FR_hip"]  == pytest.approx(0.9)
     assert scaled_kp["FR_calf"] == pytest.approx(0.3)
+
+
+# ── SRBD MPC (tau_ff feedforward) ────────────────────────────────────────────
+
+@pytest.fixture
+def mpc():
+    from legged_control.mpc.srbd_mpc import SRBDMPC
+    inertia = np.diag([0.0196, 0.0228, 0.0169])
+    return SRBDMPC(mass=14.55, inertia_body=inertia, dt=0.01, horizon=6)
+
+
+def _flat_feet():
+    foot_pos = np.zeros((4, 3))
+    foot_pos[:, 2] = -0.27
+    return foot_pos
+
+
+def test_mpc_output_shape(mpc):
+    state = np.zeros(12); state[5] = 0.27
+    grf = mpc.solve(state, state.copy(), _flat_feet(), [[True, False, False, True]] * 6)
+    assert grf.shape == (12,)
+
+
+def test_mpc_swing_forces_near_zero(mpc):
+    state = np.zeros(12); state[5] = 0.27
+    grf = mpc.solve(state, state.copy(), _flat_feet(), [[True, False, False, True]] * 6)
+    np.testing.assert_allclose(grf[3:6], 0.0, atol=0.5)   # FL swing
+    np.testing.assert_allclose(grf[6:9], 0.0, atol=0.5)   # RR swing
+
+
+def test_mpc_weight_support(mpc):
+    state = np.zeros(12); state[5] = 0.27
+    grf = mpc.solve(state, state.copy(), _flat_feet(), [[True] * 4] * 6)
+    total_fz = grf[2] + grf[5] + grf[8] + grf[11]
+    weight = 14.55 * 9.81
+    assert abs(total_fz - weight) < weight * 0.3
+
+
+def test_stance_load_ramp_endpoints():
+    """Force scale must be exactly 0 at touchdown/lift-off and 1 mid-stance."""
+    from legged_control.mpc.mpc_node import _stance_load_ramp
+    assert _stance_load_ramp(0.0) == 0.0
+    assert _stance_load_ramp(1.0) == 0.0
+    assert _stance_load_ramp(0.5) == pytest.approx(1.0)
+    # monotone ramp-in over the first _TAU_RAMP_FRAC
+    vals = [_stance_load_ramp(s) for s in np.linspace(0.0, 0.2, 10)]
+    assert all(b >= a for a, b in zip(vals, vals[1:]))
+
+
+def test_build_stance_tau_scaled_and_swing_zero():
+    """leg_scale gates per-leg torque; scale 0 (swing / touchdown) gives 0."""
+    from legged_control.mpc.mpc_node import _build_stance_tau, _YAML_JOINTS
+
+    grf = np.zeros(12)
+    for i in range(4):
+        grf[i * 3 + 2] = 35.7
+    q = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
+         for n in _YAML_JOINTS}
+
+    full = _build_stance_tau(grf, q, {l: 1.0 for l in ("FR", "FL", "RR", "RL")})
+    assert any(abs(t) > 0.01 for t in full)
+    assert all(abs(t) < 23.0 for t in full)
+
+    half = _build_stance_tau(grf, q, {"FR": 0.5, "FL": 0.0, "RR": 0.0, "RL": 1.0})
+    np.testing.assert_allclose(half[0:3], [t * 0.5 for t in full[0:3]], atol=1e-9)
+    assert all(t == 0.0 for t in half[3:9]), "scale-0 legs must have zero tau"
+    np.testing.assert_allclose(half[9:12], full[9:12], atol=1e-9)

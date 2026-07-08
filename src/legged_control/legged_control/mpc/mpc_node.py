@@ -1,4 +1,4 @@
-"""mpc_node — fixed-gain PD trot gait controller (no force feedforward).
+"""mpc_node — hybrid trot gait controller: position gait + SRBD-MPC tau_ff.
 
 Replaces policy_node for non-RL trot gait. Output is /joint_commands
 (URDF frame, same as policy_node), so all downstream hardware nodes are
@@ -12,9 +12,13 @@ FSM:
 separate key from control.gait_hz (policy_node's RL loop rate) — the two
 control stacks have different bandwidth needs and must not move together.
 
-Pure position control: joint targets come from gait-scheduled IK only,
-tau is always 0, and kp/kd use one fixed scale for the whole gait cycle
-(no stance/swing gain switching, no GRF-based torque feedforward).
+Structure: joint position targets come from gait-scheduled IK (stance
+stroke + swing spline + IMU attitude leveling) with one fixed kp/kd scale
+for the whole cycle — no stance/swing gain switching. On top of that,
+SRBD-MPC solves ground reaction forces and J^T·f torque feedforward is
+added, smoothed at every transition (global blend, per-leg stance load
+ramp, output low-pass) so the commanded torque can never step. Runtime
+toggle: `ros2 param set /mpc_node tau_ff_enabled false`.
 """
 
 from __future__ import annotations
@@ -36,9 +40,11 @@ from legged_control.kinematics import (
     forward_kinematics,
     inverse_kinematics,
     _leg_signs,
+    _numerical_jacobian,
     _smoothstep,
 )
 from legged_control.mpc.gait_scheduler import GaitScheduler, LEG_NAMES
+from legged_control.mpc.srbd_mpc import SRBDMPC, _euler_to_R
 from legged_control.mpc.swing_trajectory import (
     swing_foot_position,
     stance_foot_position,
@@ -96,6 +102,16 @@ _ATT_DRV_TAU = 0.05      # s — light smoothing on the tilt derivative. Damping
                          # feedback (observed as violent hopping on tiny tilts).
 _ATT_DZ_SLEW = 0.25      # m/s — hard rate limit on the leveling correction:
                          # whatever the tuning does, foot targets cannot jump.
+# tau_ff smoothing — three layers so the feedforward torque can never step
+# (the phase-transition snaps that plagued the original force controller):
+_TAU_BLEND_TAU = 0.3     # s — global ramp on WALK entry / runtime enable-disable
+_TAU_RAMP_FRAC = 0.2     # per-leg force ramps over the first/last 20% of stance,
+                         # so a foot carries no commanded force at the instants
+                         # of touchdown and lift-off
+_TAU_LP_TAU = 0.04       # s — low-pass on the final torque vector: absorbs the
+                         # MPC force-redistribution step the *other* legs see
+                         # when a contact flips. Feedforward lag only; position
+                         # targets are untouched and PD covers the transient.
 
 # Leg ordering used for stance IK loops: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -113,6 +129,58 @@ class JointCommand:
 
 def _leg_joints(leg: str) -> list[str]:
     return [f"{leg}_hip", f"{leg}_thigh", f"{leg}_calf"]
+
+
+def _stance_load_ramp(s: float) -> float:
+    """Per-leg force scale over stance progress s ∈ [0,1]: 0 at touchdown,
+    1 through mid-stance, 0 at lift-off (smoothstep ramps of _TAU_RAMP_FRAC)."""
+    s = float(np.clip(s, 0.0, 1.0))
+    return _smoothstep(s / _TAU_RAMP_FRAC) * _smoothstep((1.0 - s) / _TAU_RAMP_FRAC)
+
+
+def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
+    """Build 12-dim SRBD state from /state_estimate and an assumed CoM position.
+
+    /state_estimate layout: [0:3] base_lin_vel, [3:6] base_ang_vel,
+    [6:9] projected_gravity, [9] health. Roll/pitch from gravity direction,
+    yaw unobservable from IMU alone → 0.
+    """
+    ang_vel = est[3:6]
+    proj_g  = est[6:9]
+    roll  = float(np.arctan2(proj_g[1], -proj_g[2]))
+    pitch = float(np.arctan2(-proj_g[0], -proj_g[2]))
+    lin_vel = est[0:3]
+    return np.array([
+        roll, pitch, 0.0,
+        pos[0], pos[1], pos[2],
+        ang_vel[0], ang_vel[1], ang_vel[2],
+        lin_vel[0], lin_vel[1], lin_vel[2],
+    ], dtype=float)
+
+
+def _build_stance_tau(
+    grf: np.ndarray,
+    joint_targets: dict[str, float],
+    leg_scale: dict[str, float],
+) -> list[float]:
+    """Convert MPC GRF to joint torques via Jacobian transpose, per-leg scaled.
+
+    τ[leg] = leg_scale · J(q)^T · f_leg — leg_scale carries the stance load
+    ramp (0 at touchdown/lift-off), so commanded force never steps at a
+    contact transition.
+    """
+    tau_dict: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
+    for i, leg in enumerate(_MPC_LEG_ORDER):
+        scale = float(leg_scale.get(leg, 0.0))
+        if scale <= 0.0:
+            continue
+        f_leg = grf[i * 3 : i * 3 + 3]
+        joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
+        J = _numerical_jacobian(leg, joints_leg)
+        tau_leg = (J.T @ f_leg) * scale
+        for jname, t in zip(_leg_joints(leg), tau_leg):
+            tau_dict[jname] = float(t)
+    return [tau_dict[n] for n in _YAML_JOINTS]
 
 
 def _leveling_dz(u_x: float, u_y: float, dz_max: float = _ATT_DZ_MAX) -> dict[str, float]:
@@ -161,6 +229,21 @@ class MPCNode(Node):
         # (track ≈ 0.32 m) — att_kp 0.16 is unity DC loop gain, keep well below.
         self.declare_parameter("att_kp", float(mpc_cfg.get("att_kp", 0.08)))
         self.declare_parameter("att_kd", float(mpc_cfg.get("att_kd", 0.02)))
+        # SRBD-MPC GRF feedforward on top of the (unchanged) position gait.
+        # Runtime A/B: `ros2 param set /mpc_node tau_ff_enabled false` — the
+        # global blend ramps it out over ~0.3 s, never a step.
+        self.declare_parameter("tau_ff_enabled", bool(mpc_cfg.get("tau_ff_enabled", True)))
+
+        mass = float(mpc_cfg.get("mass", 14.55))
+        inertia = np.diag([
+            float(mpc_cfg.get("Ixx", 0.0196)),
+            float(mpc_cfg.get("Iyy", 0.0228)),
+            float(mpc_cfg.get("Izz", 0.0169)),
+        ])
+        horizon = int(mpc_cfg.get("horizon", 6))
+        self._mpc = SRBDMPC(mass=mass, inertia_body=inertia, dt=self._dt, horizon=horizon)
+        self._tau_blend = 0.0            # global enable ramp state
+        self._tau_lp = [0.0] * 12        # low-passed output torque
 
         # Per-joint base kp/kd (motor side, same basis as motor_bus_node)
         _ctrl = control
@@ -326,6 +409,63 @@ class MPCNode(Node):
             out[leg] = val
         return out
 
+    def _tau_feedforward(
+        self,
+        joint_targets: dict[str, float],
+        leg_scale: dict[str, float],
+        contact_schedule: list[list[bool]],
+        stance_h: float,
+        vel_ref: np.ndarray,
+        yaw_ref: float,
+    ) -> list[float]:
+        """SRBD-MPC GRF → J^T·f feedforward torque, smooth by construction.
+
+        Three smoothing layers guarantee no torque step at any transition:
+        global enable blend (WALK entry / runtime toggle), per-leg stance load
+        ramp in leg_scale, and a low-pass on the output vector (absorbs the
+        force redistribution other legs see when a contact flips). Falls back
+        to a decaying hold on solver failure and ramps out on stale estimates.
+        """
+        fresh = (
+            self._est_stamp is not None
+            and (time.monotonic() - self._est_stamp) <= _EST_TIMEOUT
+        )
+        enabled = bool(self.get_parameter("tau_ff_enabled").value) and fresh
+        a_b = min(1.0, self._dt / _TAU_BLEND_TAU)
+        self._tau_blend += a_b * ((1.0 if enabled else 0.0) - self._tau_blend)
+
+        tau_raw = [0.0] * 12
+        if self._tau_blend > 1e-3:
+            srbd_state = _state_from_estimate(
+                self._state_estimate, np.array([0.0, 0.0, stance_h])
+            )
+            state_ref = np.array([
+                0.0, 0.0, 0.0,
+                0.0, 0.0, stance_h,
+                0.0, 0.0, yaw_ref,
+                float(vel_ref[0]), float(vel_ref[1]), 0.0,
+            ])
+            R_body = _euler_to_R(srbd_state[:3])
+            foot_pos_world = np.zeros((4, 3))
+            for i, leg in enumerate(_MPC_LEG_ORDER):
+                joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
+                foot_pos_world[i] = R_body @ np.array(forward_kinematics(leg, joints_leg))
+            try:
+                grf = self._mpc.solve(
+                    srbd_state, state_ref, foot_pos_world, contact_schedule
+                )
+                tau_raw = _build_stance_tau(grf, joint_targets, leg_scale)
+                tau_raw = [t * self._tau_blend for t in tau_raw]
+            except Exception as exc:
+                self.get_logger().warn(
+                    f"[mpc/tau] solver failed: {exc}", throttle_duration_sec=2.0
+                )
+                tau_raw = [t * 0.8 for t in self._tau_lp]
+
+        a_lp = min(1.0, self._dt / _TAU_LP_TAU)
+        self._tau_lp = [p + a_lp * (t - p) for p, t in zip(self._tau_lp, tau_raw)]
+        return list(self._tau_lp)
+
     def _on_posture(self, msg: Bool) -> None:
         if bool(msg.data):
             if self._phase == _PHASE_PASSIVE:
@@ -405,7 +545,7 @@ class MPCNode(Node):
         return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= dur
 
     def _balance_stance(self, stance_h: float) -> JointCommand:
-        """Four-foot stance: nominal IK pose + attitude leveling, zero torque."""
+        """Four-foot stance: nominal IK pose + attitude leveling + MPC tau_ff."""
         dz = self._attitude_dz()
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
@@ -417,10 +557,18 @@ class MPCNode(Node):
                 q_leg = tuple(_DEFAULT_Q[j] for j in _leg_joints(leg))
             for jname, qval in zip(_leg_joints(leg), q_leg):
                 targets[jname] = float(qval)
+        tau = self._tau_feedforward(
+            targets,
+            leg_scale={leg: 1.0 for leg in LEG_NAMES},
+            contact_schedule=[[True] * 4] * self._mpc._N,
+            stance_h=stance_h,
+            vel_ref=np.zeros(2),
+            yaw_ref=0.0,
+        )
         kp, kd = self._fixed_gains()
         return JointCommand(
             q=[targets[n] for n in _YAML_JOINTS],
-            dq=[0.0] * 12, tau=[0.0] * 12, kp=kp, kd=kd,
+            dq=[0.0] * 12, tau=tau, kp=kp, kd=kd,
         )
 
     def _compute_mpc_joints(self, now: float) -> JointCommand:
@@ -563,12 +711,28 @@ class MPCNode(Node):
                 ) if prev is not None else 0.0
                 self._prev_cmd_q[jname] = qval
 
+        # Per-leg load ramp: zero commanded force at touchdown and lift-off.
+        leg_scale = {
+            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now))
+                  if gait_state[leg]["contact"] else 0.0)
+            for leg in LEG_NAMES
+        }
+        contact_schedule = [
+            [self._gait.query(now + k * self._dt)[leg]["contact"]
+             for leg in _MPC_LEG_ORDER]
+            for k in range(self._mpc._N)
+        ]
+        tau = self._tau_feedforward(
+            joint_targets, leg_scale, contact_schedule,
+            stance_h, vel_xy, yaw_rate,
+        )
+
         kp, kd = self._fixed_gains()
 
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],
             dq=[dq_targets.get(n, 0.0) for n in _YAML_JOINTS],
-            tau=[0.0] * 12,
+            tau=tau,
             kp=kp,
             kd=kd,
         )
@@ -611,6 +775,8 @@ class MPCNode(Node):
                     self._gait.reset()
                     self._att_gx = self._att_gy = self._att_dgx = self._att_dgy = 0.0
                     self._att_dz = {leg: 0.0 for leg in LEG_NAMES}
+                    self._tau_blend = 0.0
+                    self._tau_lp = [0.0] * 12
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -618,6 +784,8 @@ class MPCNode(Node):
                 self._gait.reset()
                 self._att_gx = self._att_gy = self._att_dgx = self._att_dgy = 0.0
                 self._att_dz = {leg: 0.0 for leg in LEG_NAMES}
+                self._tau_blend = 0.0
+                self._tau_lp = [0.0] * 12
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 
