@@ -304,12 +304,42 @@ def test_build_stance_tau_scaled_and_swing_zero():
         grf[i * 3 + 2] = 35.7
     q = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
          for n in _YAML_JOINTS}
+    R = np.eye(3)
 
-    full = _build_stance_tau(grf, q, {l: 1.0 for l in ("FR", "FL", "RR", "RL")})
+    full = _build_stance_tau(grf, q, {l: 1.0 for l in ("FR", "FL", "RR", "RL")}, R)
     assert any(abs(t) > 0.01 for t in full)
     assert all(abs(t) < 23.0 for t in full)
 
-    half = _build_stance_tau(grf, q, {"FR": 0.5, "FL": 0.0, "RR": 0.0, "RL": 1.0})
+    half = _build_stance_tau(grf, q, {"FR": 0.5, "FL": 0.0, "RR": 0.0, "RL": 1.0}, R)
     np.testing.assert_allclose(half[0:3], [t * 0.5 for t in full[0:3]], atol=1e-9)
     assert all(t == 0.0 for t in half[3:9]), "scale-0 legs must have zero tau"
     np.testing.assert_allclose(half[9:12], full[9:12], atol=1e-9)
+
+
+def test_build_stance_tau_supports_weight():
+    """τ_ff must RESIST the upward GRF (τ = −J^T R^T f), i.e. do positive work
+    lifting the body: τ · ∂h/∂q > 0 with h = −z_foot (foot pinned on ground).
+    The original +J^T·f sign pushed the body down — seen on hardware as the
+    stance height dropping when tau_ff was enabled."""
+    from legged_control.kinematics import _numerical_jacobian
+    from legged_control.mpc.mpc_node import _build_stance_tau, _YAML_JOINTS, _leg_joints
+
+    grf = np.zeros(12)
+    for i in range(4):
+        grf[i * 3 + 2] = 35.7  # ground pushes UP on each foot (world z+)
+    q = {n: 0.1 if "hip" in n else (0.8 if "thigh" in n else -1.5)
+         for n in _YAML_JOINTS}
+    tau = _build_stance_tau(grf, q, {l: 1.0 for l in ("FR", "FL", "RR", "RL")},
+                            np.eye(3))
+
+    for i, leg in enumerate(("FR", "FL", "RR", "RL")):
+        joints_leg = tuple(q[j] for j in _leg_joints(leg))
+        J = _numerical_jacobian(leg, joints_leg)
+        tau_leg = np.array(tau[i * 3:i * 3 + 3])
+        # exact statics: actuator cancels the generalized force of the GRF
+        np.testing.assert_allclose(tau_leg, -(J.T @ grf[i * 3:i * 3 + 3]),
+                                   atol=1e-9)
+        # physical direction: with the foot on the ground, body height
+        # h = −z_foot, so lifting power is τ·(−J_z) — must be positive.
+        dh_dq = -J[2, :]
+        assert float(tau_leg @ dh_dq) > 0.0, f"{leg}: tau_ff not lifting the body"

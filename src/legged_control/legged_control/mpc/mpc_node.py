@@ -162,22 +162,28 @@ def _build_stance_tau(
     grf: np.ndarray,
     joint_targets: dict[str, float],
     leg_scale: dict[str, float],
+    R_body: np.ndarray,
 ) -> list[float]:
     """Convert MPC GRF to joint torques via Jacobian transpose, per-leg scaled.
 
-    τ[leg] = leg_scale · J(q)^T · f_leg — leg_scale carries the stance load
-    ramp (0 at touchdown/lift-off), so commanded force never steps at a
-    contact transition.
+    τ[leg] = −leg_scale · J(q)^T · R^T · f_leg. The MPC GRF is ground-on-body
+    in the world frame (z up, fz ∈ [f_min, f_max]); R^T maps it to the body
+    frame the Jacobian lives in, and the minus sign is the statics of the
+    actuator RESISTING that external force (τ + J^T·f = 0). Without it the
+    feedforward pushes the body down with ~mg instead of carrying it —
+    observed on hardware as the stance height dropping when tau_ff is
+    enabled. leg_scale carries the stance load ramp (0 at touchdown and
+    lift-off), so commanded force never steps at a contact transition.
     """
     tau_dict: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
     for i, leg in enumerate(_MPC_LEG_ORDER):
         scale = float(leg_scale.get(leg, 0.0))
         if scale <= 0.0:
             continue
-        f_leg = grf[i * 3 : i * 3 + 3]
+        f_leg = R_body.T @ grf[i * 3 : i * 3 + 3]
         joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
         J = _numerical_jacobian(leg, joints_leg)
-        tau_leg = (J.T @ f_leg) * scale
+        tau_leg = -(J.T @ f_leg) * scale
         for jname, t in zip(_leg_joints(leg), tau_leg):
             tau_dict[jname] = float(t)
     return [tau_dict[n] for n in _YAML_JOINTS]
@@ -454,7 +460,7 @@ class MPCNode(Node):
                 grf = self._mpc.solve(
                     srbd_state, state_ref, foot_pos_world, contact_schedule
                 )
-                tau_raw = _build_stance_tau(grf, joint_targets, leg_scale)
+                tau_raw = _build_stance_tau(grf, joint_targets, leg_scale, R_body)
                 tau_raw = [t * self._tau_blend for t in tau_raw]
             except Exception as exc:
                 self.get_logger().warn(

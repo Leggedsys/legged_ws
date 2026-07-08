@@ -125,9 +125,11 @@ control:
   # PD 增益是 SDK/转子侧（motor_bus 里 cmd.q 乘了 gear_ratio），
   # 所以关节刚度 K_joint = kp × gear_ratio²。甲方目标：关节 kp=20、kd=0.5。
   # 理论 kp = 20/gr²：hip/thigh(gr 6.33)→0.50 / kd 0.0125；calf(gr 12.66)→0.125 / kd 0.0031。
-  # 实测已证伪"kp 退回理论值 + mpc.mass 高估补偿"这条路：kp=0.5(K=12 with
-  # kp_stance_scale 0.6) + mass 18~25 仍然软趴——说明支撑靠的是 kp 这个闭环
-  # 修正项，tau_ff 只是开环量，加大 mass 只线性放大稳态力矩，补不了比例刚度。
+  # 旧结论作废：曾实测 kp=0.5 + mass 18~25 仍软趴，当时归因"tau_ff 开环量
+  # 补不了比例刚度"——后来发现 _build_stance_tau 少了负号（τ=+J^T·f 是在把
+  # 身体往下压，mass 越大压得越狠），实验前提就是错的。符号修正后
+  # （τ=−J^T·R^T·f）tau_ff 真实承重，kp 下限需要重新实测——判据：开 tau_ff
+  # 身高应微升（PD 静差被前馈消掉）而不是下降。
   # kp=1.0（K≈40，stance_scale 0.6 → 实际 K≈24）验证过不软趴。standup→balance
   # 的 tau/kp 阶跃已经用 _stance_entry_time 平滑过渡修掉了（mpc_node.py），
   # 走路卡顿也已用 mpc.kp_swing_scale 单独调低 + tick_hz 提到 100Hz 解决。
@@ -206,7 +208,7 @@ mpc:
   # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
   # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
   # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
-  kp_scale: 1.5
+  kp_scale: 1.0
   kd_scale: 2.0
   # IMU 姿态调平（仅 WALK 相）：projected_gravity 的 x/y 分量为倾斜量（0.1s 低通
   # 滤触地噪声），阻尼取该滤波信号自身的数值微分——不用原始 gyro（其轴向取决于
