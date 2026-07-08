@@ -460,6 +460,15 @@ class MPCNode(Node):
                 0.0, 0.0, yaw_ref,
                 float(vel_ref[0]), float(vel_ref[1]), 0.0,
             ])
+            # Neutralise every velocity channel (ang_vel + lin_vel): raw IMU
+            # gyro axes are mounting-dependent and were already caught flipping
+            # a damping loop into fast positive feedback (see _attitude_dz);
+            # VIO lin_vel axes are equally unverified. A flipped rate feeding
+            # the QP is ANTI-damping — observed as a limit cycle that starts
+            # the moment standup completes. Zero error → zero force response:
+            # tau_ff does only verified work (weight support + gravity-vector
+            # attitude P). Physical damping comes from the motor PD.
+            srbd_state[6:12] = state_ref[6:12]
             R_body = _euler_to_R(srbd_state[:3])
             foot_pos_world = np.zeros((4, 3))
             for i, leg in enumerate(_MPC_LEG_ORDER):
