@@ -343,3 +343,54 @@ def test_build_stance_tau_supports_weight():
         # h = −z_foot, so lifting power is τ·(−J_z) — must be positive.
         dh_dq = -J[2, :]
         assert float(tau_leg @ dh_dq) > 0.0, f"{leg}: tau_ff not lifting the body"
+
+
+def test_state_from_estimate_recovers_euler():
+    """Roll/pitch extracted from projected_gravity must match the ZYX Euler
+    angles that generated it (proj_g = R^T·[0,0,−1], legged_gym convention).
+    The original atan2 forms NEGATED both angles — the MPC leveled the mirror
+    image of the actual tilt (positive feedback through the force path)."""
+    from legged_control.mpc.mpc_node import _state_from_estimate
+    from legged_control.mpc.srbd_mpc import _euler_to_R
+
+    for roll, pitch in [(0.1, 0.0), (0.0, 0.1), (-0.15, 0.08), (0.2, -0.12)]:
+        R = _euler_to_R(np.array([roll, pitch, 0.3]))  # yaw must not matter
+        est = np.zeros(10)
+        est[6:9] = R.T @ np.array([0.0, 0.0, -1.0])
+        state = _state_from_estimate(est, np.array([0.0, 0.0, 0.27]))
+        assert state[0] == pytest.approx(roll, abs=1e-9), "roll sign/value"
+        assert state[1] == pytest.approx(pitch, abs=1e-9), "pitch sign/value"
+
+
+def _spread_feet():
+    """Realistic footprint (nominal contact points, body frame): FR,FL,RR,RL."""
+    x, y = 0.207, 0.159
+    return np.array([
+        [ x, -y, -0.27], [ x,  y, -0.27],
+        [-x, -y, -0.27], [-x,  y, -0.27],
+    ])
+
+
+def test_mpc_grf_restores_tilt(mpc):
+    """Tilt fed through _state_from_estimate must yield GRF that pushes the
+    LOW side up (restoring moment). With the old negated roll/pitch the force
+    went to the high side — anti-leveling."""
+    from legged_control.mpc.mpc_node import _state_from_estimate
+
+    ref = np.zeros(12); ref[5] = 0.27
+    schedule = [[True] * 4] * 6
+
+    # roll +0.1 rad → right side down (g_y < 0) → FR+RR must carry more
+    est = np.zeros(10)
+    est[6:9] = [0.0, -np.sin(0.1), -np.cos(0.1)]
+    state = _state_from_estimate(est, np.array([0.0, 0.0, 0.27]))
+    grf = mpc.solve(state, ref, _spread_feet(), schedule)
+    right, left = grf[2] + grf[8], grf[5] + grf[11]
+    assert right > left + 2.0, f"roll: low (right) side not loaded ({right=} {left=})"
+
+    # pitch +0.1 rad → nose down (g_x > 0) → FR+FL must carry more
+    est[6:9] = [np.sin(0.1), 0.0, -np.cos(0.1)]
+    state = _state_from_estimate(est, np.array([0.0, 0.0, 0.27]))
+    grf = mpc.solve(state, ref, _spread_feet(), schedule)
+    front, rear = grf[2] + grf[5], grf[8] + grf[11]
+    assert front > rear + 2.0, f"pitch: low (front) side not loaded ({front=} {rear=})"

@@ -144,11 +144,20 @@ def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
     /state_estimate layout: [0:3] base_lin_vel, [3:6] base_ang_vel,
     [6:9] projected_gravity, [9] health. Roll/pitch from gravity direction,
     yaw unobservable from IMU alone → 0.
+
+    projected_gravity = R^T·[0,0,−1] (legged_gym convention), so for ZYX
+    Euler angles g_body = [sin p, −sin r·cos p, −cos r·cos p] and the
+    inversions are roll = atan2(−gy, −gz), pitch = atan2(gx, √(gy²+gz²)).
+    The previous atan2(gy,−gz)/atan2(−gx,−gz) NEGATED both angles — the MPC
+    saw a mirrored tilt and, roll/pitch being its heaviest-weighted states,
+    pushed the body harder INTO the lean: positive feedback through the
+    force path (hardware: growing tilt while walking, violent non-converging
+    sway in balance stance fighting the position-side leveling).
     """
     ang_vel = est[3:6]
     proj_g  = est[6:9]
-    roll  = float(np.arctan2(proj_g[1], -proj_g[2]))
-    pitch = float(np.arctan2(-proj_g[0], -proj_g[2]))
+    roll  = float(np.arctan2(-proj_g[1], -proj_g[2]))
+    pitch = float(np.arctan2(proj_g[0], float(np.hypot(proj_g[1], proj_g[2]))))
     lin_vel = est[0:3]
     return np.array([
         roll, pitch, 0.0,
