@@ -178,9 +178,10 @@ try:
                         return 0.0
                     return _scale_axis(axes[idx], dz, max_v, invert)
 
-                # Forward stick → fixed 0.4 m/s; neutral → 0
-                raw_vx = axes[self._axis_vx] if 0 <= self._axis_vx < len(axes) else 0.0
-                twist.linear.x = 0.4 if _apply_deadzone(raw_vx, dz) > 0.0 else 0.0
+                # Proportional stick, both directions: forward AND backward
+                # (was: forward binarised to a fixed 0.4 m/s, backward dropped).
+                # The gait's stance stroke / Raibert offset handle vx < 0.
+                twist.linear.x = _safe(self._axis_vx, self._max_vx, self._invert_vx)
                 twist.linear.y = _safe(self._axis_vy, self._max_vy, self._invert_vy)
                 twist.angular.z = _safe(self._axis_yaw, self._max_yaw, self._invert_yaw)
                 # Calibrate released trigger baselines from live /joy data so this

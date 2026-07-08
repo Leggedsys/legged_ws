@@ -102,6 +102,11 @@ _ATT_DRV_TAU = 0.05      # s — light smoothing on the tilt derivative. Damping
                          # feedback (observed as violent hopping on tiny tilts).
 _ATT_DZ_SLEW = 0.25      # m/s — hard rate limit on the leveling correction:
                          # whatever the tuning does, foot targets cannot jump.
+_ATT_I_MAX = 0.03        # m — clamp on the integral trim (windup guard). The
+                         # proportional loop only rejects gain/(1+gain) ≈ 1/3 of
+                         # a static tilt; the integrator trims the remainder.
+_ATT_I_LEAK_TAU = 1.0    # s — integral decays to zero when the estimate is
+                         # stale or leveling is disabled, same as the P path.
 # tau_ff smoothing — three layers so the feedforward torque can never step
 # (the phase-transition snaps that plagued the original force controller):
 _TAU_BLEND_TAU = 0.3     # s — global ramp on WALK entry / runtime enable-disable
@@ -244,6 +249,7 @@ class MPCNode(Node):
         # (track ≈ 0.32 m) — att_kp 0.16 is unity DC loop gain, keep well below.
         self.declare_parameter("att_kp", float(mpc_cfg.get("att_kp", 0.08)))
         self.declare_parameter("att_kd", float(mpc_cfg.get("att_kd", 0.02)))
+        self.declare_parameter("att_ki", float(mpc_cfg.get("att_ki", 0.10)))
         # SRBD-MPC GRF feedforward on top of the (unchanged) position gait.
         # Runtime A/B: `ros2 param set /mpc_node tau_ff_enabled false` — the
         # global blend ramps it out over ~0.3 s, never a step.
@@ -298,6 +304,8 @@ class MPCNode(Node):
         self._att_gy = 0.0                    # filtered tilt, lateral
         self._att_dgx = 0.0                   # filtered tilt derivative, fore-aft
         self._att_dgy = 0.0                   # filtered tilt derivative, lateral
+        self._att_ix = 0.0                    # integral trim, fore-aft
+        self._att_iy = 0.0                    # integral trim, lateral
         self._att_dz = {leg: 0.0 for leg in LEG_NAMES}  # slew-limited output
         # Live stance height: follows /height_command (LT/RT) slew-limited;
         # falls back to the stance_height parameter until a command arrives.
@@ -395,16 +403,18 @@ class MPCNode(Node):
         """
         kp = float(self.get_parameter("att_kp").value)
         kd = float(self.get_parameter("att_kd").value)
+        ki = float(self.get_parameter("att_ki").value)
         g = self._state_estimate[6:9]
         g_norm = float(np.linalg.norm(g))
         fresh = (
             self._est_stamp is not None
             and (time.monotonic() - self._est_stamp) <= _EST_TIMEOUT
         )
-        if not fresh or g_norm < 0.5 or kp <= 0.0:
-            gx = gy = 0.0
-        else:
+        valid = fresh and g_norm >= 0.5 and kp > 0.0
+        if valid:
             gx, gy = float(g[0]) / g_norm, float(g[1]) / g_norm
+        else:
+            gx = gy = 0.0
         a_g = min(1.0, self._dt / _ATT_TILT_TAU)
         a_d = min(1.0, self._dt / _ATT_DRV_TAU)
         prev_gx, prev_gy = self._att_gx, self._att_gy
@@ -412,8 +422,21 @@ class MPCNode(Node):
         self._att_gy += a_g * (gy - self._att_gy)
         self._att_dgx += a_d * ((self._att_gx - prev_gx) / self._dt - self._att_dgx)
         self._att_dgy += a_d * ((self._att_gy - prev_gy) / self._dt - self._att_dgy)
-        u_x = kp * self._att_gx + kd * self._att_dgx
-        u_y = kp * self._att_gy + kd * self._att_dgy
+        # Integral trim: the P loop settles at gain/(1+gain) rejection (~1/3 of
+        # a static tilt at att_kp 0.08); the integrator walks out the residual
+        # in ~1-2 s. Clamped against windup; leaks to zero whenever the tilt
+        # signal is invalid so a stale estimate cannot hold a stance offset.
+        if valid and ki > 0.0:
+            self._att_ix = float(np.clip(self._att_ix + ki * self._dt * self._att_gx,
+                                         -_ATT_I_MAX, _ATT_I_MAX))
+            self._att_iy = float(np.clip(self._att_iy + ki * self._dt * self._att_gy,
+                                         -_ATT_I_MAX, _ATT_I_MAX))
+        else:
+            leak = 1.0 - min(1.0, self._dt / _ATT_I_LEAK_TAU)
+            self._att_ix *= leak
+            self._att_iy *= leak
+        u_x = kp * self._att_gx + kd * self._att_dgx + self._att_ix
+        u_y = kp * self._att_gy + kd * self._att_dgy + self._att_iy
         raw = _leveling_dz(u_x, u_y)
         max_step = _ATT_DZ_SLEW * self._dt
         out: dict[str, float] = {}
@@ -798,6 +821,7 @@ class MPCNode(Node):
                     self._phase_start = now
                     self._gait.reset()
                     self._att_gx = self._att_gy = self._att_dgx = self._att_dgy = 0.0
+                    self._att_ix = self._att_iy = 0.0
                     self._att_dz = {leg: 0.0 for leg in LEG_NAMES}
                     self._tau_blend = 0.0
                     self._tau_lp = [0.0] * 12
@@ -807,6 +831,7 @@ class MPCNode(Node):
                 self._phase_start = now
                 self._gait.reset()
                 self._att_gx = self._att_gy = self._att_dgx = self._att_dgy = 0.0
+                self._att_ix = self._att_iy = 0.0
                 self._att_dz = {leg: 0.0 for leg in LEG_NAMES}
                 self._tau_blend = 0.0
                 self._tau_lp = [0.0] * 12

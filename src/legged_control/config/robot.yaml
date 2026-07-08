@@ -219,6 +219,10 @@ mpc:
   # 左右横跳）。安全范围 0.05~0.12，每次加 0.02；过修/振荡 → 先加 att_kd 再降 att_kp。
   att_kp: 0.08
   att_kd: 0.02
+  # 积分修正：纯 P 稳态只能消掉 增益/(1+增益)≈1/3 的静态倾斜，剩余静差靠积分
+  # 在 1~2s 内走完（之前收敛要 4~5s 就是在等 P 慢慢磨）。限幅 ±0.03 m 防饱和，
+  # 估计失效时 1s 泄漏归零。若出现低频缓慢摆动（周期数秒）→ 减半 att_ki。
+  att_ki: 0.10
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
