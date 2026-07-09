@@ -201,6 +201,48 @@ def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
     ], dtype=float)
 
 
+def _project_vertical_grf(grf: np.ndarray, foot_pos: np.ndarray) -> np.ndarray:
+    """Project the QP GRF onto vertical-only forces, preserving total weight
+    support and the roll/pitch leveling moments.
+
+    With a CoM offset the feet sit asymmetrically about the CoM, and the QP
+    discovers it can balance the pitch moment with a NET HORIZONTAL push
+    (moment arm = stance height) instead of a front/rear fz split — x position
+    has zero cost weight and the velocity channels are neutralised, so the
+    push looks free. On hardware it shoves the body sideways/forward until
+    the PD leg stiffness catches it: body creeps forward as tau_ff blends in,
+    walking toward the tip-over boundary (com_x 0.05 → ~25 N forward).
+
+    Keep what the QP is trusted for — Σfz (weight) and Mx/My (leveling) —
+    re-solved as the min-change vertical distribution over the stance legs;
+    horizontal dynamics belong to the position-control PD. Yaw moment is
+    dropped (yaw is unobservable and its reference is zero).
+    """
+    f = grf.reshape(4, 3).copy()
+    stance = f[:, 2] > 1e-9
+    if not np.any(stance):
+        return grf
+    r = foot_pos[stance]
+    fz0 = f[stance, 2]
+    M = np.cross(foot_pos, f).sum(axis=0)
+    # rows: Σfz = weight, Σ r_y·fz = Mx, Σ −r_x·fz = My
+    A = np.stack([np.ones(len(fz0)), r[:, 1], -r[:, 0]])
+    b = np.array([float(f[:, 2].sum()), float(M[0]), float(M[1])])
+    # min ‖fz − fz0‖² s.t. A·fz = b — least-squares via pseudo-inverse so a
+    # two-leg stance (rank-deficient) degrades gracefully instead of raising.
+    lam = np.linalg.pinv(A @ A.T, rcond=1e-8) @ (b - A @ fz0)
+    fz = np.clip(fz0 + A.T @ lam, 0.0, None)
+    # Weight support is a hard constraint: on a rank-deficient (two-leg)
+    # stance the least-squares splits the residual between weight and
+    # moments — rescale so Σfz is exact and let the leveling loops absorb
+    # the (second-order) moment remainder.
+    if fz.sum() > 1e-9:
+        fz *= b[0] / fz.sum()
+    out = np.zeros_like(f)
+    out[stance, 2] = fz
+    return out.reshape(-1)
+
+
 def _apply_load_ramp(
     grf: np.ndarray,
     leg_scale: dict[str, float],
@@ -611,9 +653,11 @@ class MPCNode(Node):
                 grf = self._mpc.solve(
                     srbd_state, state_ref, foot_pos_world, contact_schedule
                 )
-                # Load ramp + hand-off at force level: total commanded force
-                # stays equal to the QP solution through every contact flip
-                # (a leg ramping out passes its share to the loaded legs).
+                # Vertical-only projection (weight + leveling moments kept,
+                # net horizontal push removed), then load ramp + hand-off at
+                # force level: total commanded force stays equal to the
+                # projected solution through every contact flip.
+                grf = _project_vertical_grf(grf, foot_pos_world)
                 grf = _apply_load_ramp(grf, leg_scale, mu=self._mpc._mu)
                 tau_raw = _build_stance_tau(
                     grf, joint_targets, {leg: 1.0 for leg in LEG_NAMES}, R_body

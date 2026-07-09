@@ -503,3 +503,38 @@ def test_remove_mount_bias_round_trip():
     est[6:9] = _remove_mount_bias(est[6:9], 0.03, -0.05)
     state = _state_from_estimate(est, np.zeros(3))
     assert abs(state[0]) < 1e-9 and abs(state[1]) < 1e-9
+
+
+def test_project_vertical_grf_removes_net_push(mpc):
+    """With a forward CoM offset the raw QP balances part of the pitch moment
+    with a net horizontal push (x cost weight is 0) — the body creeps forward
+    as tau_ff blends in. The projection must zero net fx/fy while preserving
+    total weight support and the roll/pitch moments via the fz split."""
+    from legged_control.mpc.mpc_node import _project_vertical_grf
+
+    ref = np.zeros(12); ref[5] = 0.27
+    state = ref.copy()
+    schedule = [[True] * 4] * 6
+    feet = _spread_feet(); feet[:, 0] -= 0.05   # CoM 5 cm forward of center
+
+    grf = mpc.solve(state, ref, feet, schedule)
+    f_raw = grf.reshape(4, 3)
+    assert abs(f_raw[:, 0].sum()) > 5.0, "precondition: raw QP does push horizontally"
+
+    proj = _project_vertical_grf(grf, feet).reshape(4, 3)
+    assert np.allclose(proj[:, 0], 0.0) and np.allclose(proj[:, 1], 0.0)
+    assert proj[:, 2].sum() == pytest.approx(f_raw[:, 2].sum(), rel=1e-6), "weight kept"
+    M_raw = np.cross(feet, f_raw).sum(axis=0)
+    M_proj = np.cross(feet, proj).sum(axis=0)
+    assert M_proj[0] == pytest.approx(M_raw[0], abs=1e-6), "roll moment kept"
+    assert M_proj[1] == pytest.approx(M_raw[1], abs=1e-6), "pitch moment kept"
+    # moment balance now through the fz split: front pair carries more
+    assert proj[0, 2] + proj[1, 2] > proj[2, 2] + proj[3, 2] + 5.0
+
+    # two-leg (trot) stance degrades gracefully: weight preserved, no NaN
+    grf2 = grf.copy().reshape(4, 3)
+    grf2[1] = 0.0; grf2[2] = 0.0            # only FR + RL loaded
+    proj2 = _project_vertical_grf(grf2.reshape(-1), feet).reshape(4, 3)
+    assert np.all(np.isfinite(proj2))
+    assert proj2[:, 2].sum() == pytest.approx(grf2[:, 2].sum(), rel=1e-6)
+    assert proj2[1, 2] == 0.0 and proj2[2, 2] == 0.0, "swing legs stay zero"
