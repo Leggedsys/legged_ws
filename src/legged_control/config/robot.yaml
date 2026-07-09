@@ -193,13 +193,17 @@ mpc:
   horizon: 6
   # tau_ff 三层平滑保证任何切换都无阶跃：全局 0.3s blend（进 WALK / 运行时开关）、
   # 支撑相首尾 20% 力渐变（触地/离地瞬间该腿力为零）、输出 40ms 低通（吸收其余
-  # 腿在接触切换时的受力重分配阶跃）。运行时 A/B 对比：
+  # 腿在接触切换时的受力重分配阶跃）。
+  # 换腿力再分配（_apply_load_ramp）：渐变削掉的离地腿份额实时转给仍承重的腿，
+  # 前馈合力恒等于 QP 解——此前 ramp 单纯把力乘系数，换腿窗口欠命令 ~70N，
+  # 身体每步下塌 ~1.5cm 靠 PD 兜底（实测加 kp 塌陷不变、关 tau_ff 更差即此因）。
+  # 运行时 A/B 对比：
   #   ros2 param set /mpc_node tau_ff_enabled false   # 0.3s 内平滑退出
   # tau_ff 验证有效后可逐步下调 kp_scale（2.0 → 1.0），让力矩承重、PD 提供柔顺。
   tau_ff_enabled: true
-  gait_period:   0.4    # s — full stance+swing cycle per leg (trot)
-  swing_ratio:   0.35    # fraction of gait_period spent in swing
-  step_height:   0.05   # m — foot clearance at mid-swing
+  gait_period:   0.5    # s — full stance+swing cycle per leg (trot)
+  swing_ratio:   0.4    # fraction of gait_period spent in swing
+  step_height:   0.03   # m — foot clearance at mid-swing
   stance_height: 0.27   # m — nominal body height above feet
   # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
   # for the whole gait cycle (no stance/swing gain switching). See
@@ -208,7 +212,7 @@ mpc:
   # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
   # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
   # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
-  kp_scale: 1.0
+  kp_scale: 1.2
   kd_scale: 2.0
   # IMU 姿态调平（仅 WALK 相）：projected_gravity 的 x/y 分量为倾斜量（0.1s 低通
   # 滤触地噪声），阻尼取该滤波信号自身的数值微分——不用原始 gyro（其轴向取决于

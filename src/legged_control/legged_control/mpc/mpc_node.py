@@ -172,6 +172,43 @@ def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
     ], dtype=float)
 
 
+def _apply_load_ramp(
+    grf: np.ndarray,
+    leg_scale: dict[str, float],
+    mu: float = 0.6,
+) -> np.ndarray:
+    """Scale each leg's GRF by its stance load ramp and hand the removed share
+    to the still-loaded legs.
+
+    The per-leg ramp alone commands less than the QP's total force through
+    every touchdown/lift-off window (~60 ms each flip), and the PD absorbs
+    the deficit — measured on hardware as a 1-2 cm body dip at every contact
+    flip (walking bob/sway that more kp does not fix, only stiffens). Real
+    weight transfer is a hand-off, not a fade-out: redistribute the ramped-off
+    force to the other stance legs in proportion to their own ramp, keeping
+    the commanded total constant. Receiving legs are re-clipped to the
+    friction cone.
+    """
+    f = grf.reshape(4, 3)
+    s = np.clip(
+        [float(leg_scale.get(leg, 0.0)) for leg in _MPC_LEG_ORDER], 0.0, 1.0
+    )
+    f_scaled = f * s[:, None]
+    deficit = (f - f_scaled).sum(axis=0)
+    w = s * (f[:, 2] > 1e-9)
+    if w.sum() > 1e-6:
+        f_scaled = f_scaled + np.outer(w / w.sum(), deficit)
+        for i in range(4):
+            fz = f_scaled[i, 2]
+            if fz <= 0.0:
+                f_scaled[i] = 0.0
+                continue
+            f_xy_max = mu * fz
+            f_scaled[i, 0] = float(np.clip(f_scaled[i, 0], -f_xy_max, f_xy_max))
+            f_scaled[i, 1] = float(np.clip(f_scaled[i, 1], -f_xy_max, f_xy_max))
+    return f_scaled.reshape(-1)
+
+
 def _build_stance_tau(
     grf: np.ndarray,
     joint_targets: dict[str, float],
@@ -501,7 +538,13 @@ class MPCNode(Node):
                 grf = self._mpc.solve(
                     srbd_state, state_ref, foot_pos_world, contact_schedule
                 )
-                tau_raw = _build_stance_tau(grf, joint_targets, leg_scale, R_body)
+                # Load ramp + hand-off at force level: total commanded force
+                # stays equal to the QP solution through every contact flip
+                # (a leg ramping out passes its share to the loaded legs).
+                grf = _apply_load_ramp(grf, leg_scale, mu=self._mpc._mu)
+                tau_raw = _build_stance_tau(
+                    grf, joint_targets, {leg: 1.0 for leg in LEG_NAMES}, R_body
+                )
                 tau_raw = [t * self._tau_blend for t in tau_raw]
             except Exception as exc:
                 self.get_logger().warn(

@@ -345,6 +345,44 @@ def test_build_stance_tau_supports_weight():
         assert float(tau_leg @ dh_dq) > 0.0, f"{leg}: tau_ff not lifting the body"
 
 
+def test_apply_load_ramp_conserves_total_force():
+    """Force ramped off a lifting leg must be handed to the loaded legs —
+    total commanded force equals the QP total through every ramp window."""
+    from legged_control.mpc.mpc_node import _apply_load_ramp
+
+    grf = np.zeros(12)
+    # FR, FL, RL in stance (30 N + some tangential); RR swing (already zero)
+    for i, fz in [(0, 30.0), (1, 30.0), (3, 30.0)]:
+        grf[i * 3 + 0] = 3.0
+        grf[i * 3 + 2] = fz
+    scale = {"FR": 1.0, "FL": 0.3, "RR": 0.0, "RL": 1.0}
+
+    out = _apply_load_ramp(grf, scale).reshape(4, 3)
+    np.testing.assert_allclose(out.sum(axis=0), grf.reshape(4, 3).sum(axis=0),
+                               atol=1e-9)
+    assert np.all(out[2] == 0.0), "swing leg must stay at zero force"
+    # ramping leg keeps less than its full share; loaded legs carry more
+    assert out[1, 2] < 30.0
+    assert out[0, 2] > 30.0 and out[3, 2] > 30.0
+    # friction cone respected everywhere
+    for i in range(4):
+        if out[i, 2] > 0:
+            assert abs(out[i, 0]) <= 0.6 * out[i, 2] + 1e-9
+            assert abs(out[i, 1]) <= 0.6 * out[i, 2] + 1e-9
+
+
+def test_apply_load_ramp_noop_at_full_support():
+    """Balance stance (all scales 1) must pass the GRF through unchanged."""
+    from legged_control.mpc.mpc_node import _apply_load_ramp
+
+    grf = np.zeros(12)
+    for i in range(4):
+        grf[i * 3 + 2] = 35.7
+        grf[i * 3 + 1] = 1.5
+    out = _apply_load_ramp(grf, {l: 1.0 for l in ("FR", "FL", "RR", "RL")})
+    np.testing.assert_allclose(out, grf, atol=1e-9)
+
+
 def test_state_from_estimate_recovers_euler():
     """Roll/pitch extracted from projected_gravity must match the ZYX Euler
     angles that generated it (proj_g = R^T·[0,0,−1], legged_gym convention).
