@@ -184,9 +184,20 @@ mpc:
   # above 50Hz; watch CPU/solve time on real hardware before going higher.
   tick_hz: 100.0
   # SRBD-MPC physical parameters (GRF feedforward on top of the position gait).
-  # mass: measured 14.55 kg (legs 1.5×4 + base 8.55; URDF under-reports).
-  # Inertia: URDF sums scaled by mass ratio 14.55/10.92 — rough estimate.
-  mass:    14.55
+  # mass: 有效承重质量,站高标定得出（scripts/height_check.py，2026-07-09）：
+  #   秤重 14.55 kg，但 m_true = 14.55×(H_cmd−H_off)/(H_on−H_off)
+  #   = 14.55×13mm/13.8mm ≈ 13.6 —— 差值 ≈ 站立时小腿/足端质量直接落地。
+  #   运行时可调：ros2 param set /mpc_node mass 13.6（看 height_check 的
+  #   mean Δ 归零即为准）。
+  # Inertia: URDF sums scaled by mass ratio — rough estimate.
+  mass:    13.6
+  # 质心偏移（机体系，m，前 x+ / 左 y+）：QP 对质心取矩,默认假设质心在几何
+  # 中心。实测站立（2026-07-09）前腿比指令矮 4mm、后腿反被顶高 4~7mm ——
+  # 前馈给前腿少、后腿多,即真实质心偏前。站立开 tau_ff,每次 +0.01 上调
+  # com_x（ros2 param set /mpc_node com_x 0.02）,直到 height_check 四腿
+  # Δ 大致相等；左右不均则同法调 com_y。
+  com_x:   0.0
+  com_y:   0.0
   Ixx:     0.0196
   Iyy:     0.0228
   Izz:     0.0169

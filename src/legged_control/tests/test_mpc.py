@@ -432,3 +432,27 @@ def test_mpc_grf_restores_tilt(mpc):
     grf = mpc.solve(state, ref, _spread_feet(), schedule)
     front, rear = grf[2] + grf[5], grf[8] + grf[11]
     assert front > rear + 2.0, f"pitch: low (front) side not loaded ({front=} {rear=})"
+
+
+def test_mpc_com_offset_shifts_load_forward(mpc):
+    """Feet expressed relative to a forward-shifted CoM (feet move backward)
+    must load the front pair more — the mechanism behind the com_x parameter:
+    moment balance about the true CoM instead of the geometric center."""
+    ref = np.zeros(12); ref[5] = 0.27
+    state = ref.copy()
+    schedule = [[True] * 4] * 6
+
+    grf_centered = mpc.solve(state, ref, _spread_feet(), schedule)
+    feet = _spread_feet(); feet[:, 0] -= 0.03  # CoM 3 cm forward of center
+    grf_shifted = mpc.solve(state, ref, feet, schedule)
+
+    def _front_minus_rear(g):
+        return (g[2] + g[5]) - (g[8] + g[11])
+
+    assert abs(_front_minus_rear(grf_centered)) < 1.0, "centered feet: even split"
+    assert _front_minus_rear(grf_shifted) > 5.0, (
+        f"forward CoM must load front pair (diff={_front_minus_rear(grf_shifted):.2f} N)"
+    )
+    total_c = grf_centered[2::3].sum()
+    total_s = grf_shifted[2::3].sum()
+    assert total_s == pytest.approx(total_c, rel=0.05), "total weight support unchanged"

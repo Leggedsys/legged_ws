@@ -291,8 +291,17 @@ class MPCNode(Node):
         # Runtime A/B: `ros2 param set /mpc_node tau_ff_enabled false` — the
         # global blend ramps it out over ~0.3 s, never a step.
         self.declare_parameter("tau_ff_enabled", bool(mpc_cfg.get("tau_ff_enabled", True)))
+        # Physical calibration, runtime-tunable against scripts/height_check.py
+        # while standing with tau_ff on:
+        #   mass  — mean Δ (meas−cmd height) nulls when mass is right;
+        #   com_x/com_y — per-leg Δ spread nulls when the CoM offset is right
+        #   (front legs sagging while rear legs ride above command ⇒ real CoM
+        #   is forward of the geometric foot center ⇒ raise com_x).
+        self.declare_parameter("mass",  float(mpc_cfg.get("mass", 14.55)))
+        self.declare_parameter("com_x", float(mpc_cfg.get("com_x", 0.0)))
+        self.declare_parameter("com_y", float(mpc_cfg.get("com_y", 0.0)))
 
-        mass = float(mpc_cfg.get("mass", 14.55))
+        mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
             float(mpc_cfg.get("Ixx", 0.0196)),
             float(mpc_cfg.get("Iyy", 0.0228)),
@@ -530,10 +539,23 @@ class MPCNode(Node):
             # attitude P). Physical damping comes from the motor PD.
             srbd_state[6:12] = state_ref[6:12]
             R_body = _euler_to_R(srbd_state[:3])
+            # QP moments balance about the CoM, so foot vectors are taken
+            # relative to it — not the body-frame origin. A real CoM forward
+            # of the origin loads the front pair more; without this offset the
+            # QP splits weight evenly and each stance leg holds a standing PD
+            # error that releases as a twitch in the lift-off ramp window.
+            self._mpc._mass = float(self.get_parameter("mass").value)
+            com = np.array([
+                float(self.get_parameter("com_x").value),
+                float(self.get_parameter("com_y").value),
+                0.0,
+            ])
             foot_pos_world = np.zeros((4, 3))
             for i, leg in enumerate(_MPC_LEG_ORDER):
                 joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-                foot_pos_world[i] = R_body @ np.array(forward_kinematics(leg, joints_leg))
+                foot_pos_world[i] = R_body @ (
+                    np.array(forward_kinematics(leg, joints_leg)) - com
+                )
             try:
                 grf = self._mpc.solve(
                     srbd_state, state_ref, foot_pos_world, contact_schedule
