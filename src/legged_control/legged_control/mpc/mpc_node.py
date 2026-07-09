@@ -593,6 +593,14 @@ class MPCNode(Node):
         self._tau_lp = [p + a_lp * (t - p) for p, t in zip(self._tau_lp, tau_raw)]
         return list(self._tau_lp)
 
+    def _tau_rampout(self) -> list[float]:
+        """Decay the held feedforward smoothly to zero — same time constant
+        as the enable blend, so leaving WALK never steps the torque."""
+        a_b = min(1.0, self._dt / _TAU_BLEND_TAU)
+        self._tau_blend += a_b * (0.0 - self._tau_blend)
+        self._tau_lp = [t * (1.0 - a_b) for t in self._tau_lp]
+        return list(self._tau_lp)
+
     def _on_posture(self, msg: Bool) -> None:
         if bool(msg.data):
             if self._phase == _PHASE_PASSIVE:
@@ -601,7 +609,17 @@ class MPCNode(Node):
             if self._phase in (_PHASE_STANDUP, _PHASE_WALK):
                 self._phase = _PHASE_LIEDOWN
                 self._phase_start = time.monotonic()
-                self._lie_down_start = list(self._current_pos())
+                # Anchor the ramp to the last COMMANDED pose, not the measured
+                # one: while gains are active, snapping the command onto the
+                # measured pose injects the tracking error as a step — the PD
+                # torque releases all at once and the body drops before the
+                # ramp catches it. Measured is only right when no command has
+                # been issued yet (kp was zero, so there is no error to step).
+                self._lie_down_start = (
+                    list(self._last_published)
+                    if self._last_published is not None
+                    else list(self._current_pos())
+                )
 
     def _current_pos(self) -> list[float]:
         return [self._joint_pos[n] for n in _YAML_JOINTS]
@@ -688,8 +706,14 @@ class MPCNode(Node):
         start = self._lie_down_start or self._q_default.tolist()
         goal  = self._initial_pos or [0.0] * 12
         q = [(1.0 - alpha) * s + alpha * g for s, g in zip(start, goal)]
-        kp, kd = self._fixed_gains()
-        return JointCommand(q=q, dq=[0.0]*12, tau=[0.0]*12, kp=kp, kd=kd), elapsed >= dur
+        # Ramp the held tau_ff out over _TAU_BLEND_TAU instead of cutting
+        # ~full body weight of feedforward in one tick (the body would
+        # free-fall onto the position ramp). Gains come from _walk_gains so
+        # soft stance kp hardens in sync as the blend decays — same invariant
+        # as everywhere else: soft PD only where tau_ff still carries load.
+        tau = self._tau_rampout()
+        kp, kd = self._walk_gains({leg: 1.0 for leg in LEG_NAMES})
+        return JointCommand(q=q, dq=[0.0]*12, tau=tau, kp=kp, kd=kd), elapsed >= dur
 
     def _balance_stance(self, stance_h: float) -> JointCommand:
         """Four-foot stance: nominal IK pose + attitude leveling + MPC tau_ff."""
