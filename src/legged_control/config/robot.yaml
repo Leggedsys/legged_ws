@@ -190,7 +190,10 @@ mpc:
   #   运行时可调：ros2 param set /mpc_node mass 13.6（看 height_check 的
   #   mean Δ 归零即为准）。
   # Inertia: URDF sums scaled by mass ratio — rough estimate.
-  mass:    25.0
+  # 【2026-07-09】曾虚报 25.0 硬顶迈步塌陷——z_fb（见下）闭环后该 hack 反而
+  # 有害：前馈恒多推 ~110N,高度环被迫顶着 ±5cm 误差限幅反向对抗,两边都失真。
+  # z_fb 上线起 mass 回归标定真值,塌陷交给闭环补。
+  mass:    13.6
   # 质心偏移（机体系，m，前 x+ / 左 y+）：QP 对质心取矩,默认假设质心在几何
   # 中心。实测站立（2026-07-09）前腿比指令矮 4mm、后腿反被顶高 4~7mm ——
   # 前馈给前腿少、后腿多,即真实质心偏前。站立开 tau_ff,每次 +0.01 上调
@@ -270,6 +273,16 @@ mpc:
   # 现场定稿后把最终值写回这里（当前 1.0 是保守下限,实测更大收敛更快）。
   rate_fb_enabled: true
   rate_fb_weight:  1.0
+  # z 反馈闭高度环：支撑腿 FK 实测机体高度 + 垂直速度（−J·q̇，按支撑力渐变
+  # 加权,刚触地/将离地的腿自动不算数）喂进 QP 的 z/vz 通道——塌了误差自己
+  # 变升力,总力不再依赖 mass 精确（此前迈步塌陷靠虚报 mass 25 硬顶即此因,
+  # 已回归 13.6）。误差限幅 ±5cm、速度 ±0.4 m/s：接触误判骗不出大力。
+  # z_fb_weight 即高度刚度：2000 ≈ 3200 N/m（塌 1.5cm 补 ~48N,固有频率
+  # ~2.4Hz,vz 阻尼通道 ζ≈1 不会弹）。塌陷仍明显 → ×2 上调（4000/8000,
+  # ~8000 起注意上下弹跳/抖动 → 减半）；A/B：ros2 param set /mpc_node
+  # z_fb_enabled false（退回纯 mass 前馈,0 误差 0 响应,无阶跃）。
+  z_fb_enabled: true
+  z_fb_weight:  2000.0
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp

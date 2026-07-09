@@ -39,6 +39,7 @@ from geometry_msgs.msg import Twist
 from legged_control.kinematics import (
     forward_kinematics,
     inverse_kinematics,
+    leg_kinematic_velocity,
     _leg_signs,
     _numerical_jacobian,
     _smoothstep,
@@ -121,6 +122,10 @@ _RATE_LP_TAU = 0.03      # s — light low-pass on the gyro before it enters the
                          # QP state. Short on purpose: this channel exists to
                          # damp 2 Hz body sway, so lag here eats the phase
                          # margin the whole feature is meant to buy.
+_Z_ERR_CLIP = 0.05       # m — cap on the height error fed to the QP: a wrong
+                         # contact set or an IK-failed leg can fake a large
+                         # sag, and z weight 200 would turn it into a launch.
+_VZ_CLIP = 0.4           # m/s — same guard on the leg-odometry vertical rate.
 
 # Leg ordering used for stance IK loops: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -203,6 +208,36 @@ def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
         ang_vel[0], ang_vel[1], ang_vel[2],
         lin_vel[0], lin_vel[1], lin_vel[2],
     ], dtype=float)
+
+
+def _measured_body_z(
+    joint_pos: dict[str, float],
+    joint_vel: dict[str, float],
+    weights: dict[str, float],
+    R_body: np.ndarray,
+) -> tuple[float, float] | None:
+    """Body height + vertical velocity from stance-leg FK (leg odometry, z only).
+
+    A planted foot is pinned to the ground, so the body sits −(R·p_foot)_z
+    above it and moves at (R·(−J·q̇))_z. Averaged over legs weighted by their
+    stance load ramp: a foot at touchdown/lift-off carries ~zero weight in the
+    estimate exactly when its contact is least trustworthy. Returns None when
+    no leg carries load (full flight — never happens in trot)."""
+    num_h = num_v = den = 0.0
+    for leg in _MPC_LEG_ORDER:
+        w = float(weights.get(leg, 0.0))
+        if w <= 1e-6:
+            continue
+        q = tuple(joint_pos[j] for j in _leg_joints(leg))
+        dq = tuple(joint_vel[j] for j in _leg_joints(leg))
+        p_w = R_body @ np.asarray(forward_kinematics(leg, q), dtype=float)
+        v_w = R_body @ leg_kinematic_velocity(leg, q, dq)
+        num_h += w * -p_w[2]
+        num_v += w * v_w[2]
+        den += w
+    if den <= 1e-6:
+        return None
+    return num_h / den, num_v / den
 
 
 def _project_vertical_grf(grf: np.ndarray, foot_pos: np.ndarray) -> np.ndarray:
@@ -396,6 +431,13 @@ class MPCNode(Node):
         # to the roll/pitch weight of 200: damping strength knob.
         self.declare_parameter("rate_fb_enabled", bool(mpc_cfg.get("rate_fb_enabled", True)))
         self.declare_parameter("rate_fb_weight",  float(mpc_cfg.get("rate_fb_weight", 1.0)))
+        # Height loop closure: measured body z (+ vertical rate) from
+        # stance-leg FK fed into the QP. Sag → z error → extra lift, so total
+        # force no longer relies on the mass parameter being exact — set mass
+        # back to its calibrated value when this is on; an inflated mass just
+        # biases the feedforward and parks the loop against the error clip.
+        self.declare_parameter("z_fb_enabled", bool(mpc_cfg.get("z_fb_enabled", True)))
+        self.declare_parameter("z_fb_weight",  float(mpc_cfg.get("z_fb_weight", 2000.0)))
 
         mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
@@ -408,6 +450,7 @@ class MPCNode(Node):
         self._tau_blend = 0.0            # global enable ramp state
         self._tau_lp = [0.0] * 12        # low-passed output torque
         self._rate_lp = np.zeros(3)      # low-passed world-frame body rate
+        self._z_lp: np.ndarray | None = None  # low-passed (height, vz) leg odometry
 
         # Per-joint base kp/kd (motor side, same basis as motor_bus_node)
         _ctrl = control
@@ -658,6 +701,25 @@ class MPCNode(Node):
             self._mpc._Q[6, 6] = self._mpc._Q[7, 7] = float(
                 self.get_parameter("rate_fb_weight").value
             )
+            # z feedback: measured height + vertical rate from stance-leg FK
+            # closes the height loop — sag becomes a z error becomes extra
+            # lift, instead of relying on the mass feedforward being exact.
+            # Load-ramp-weighted so a barely-touching foot barely counts;
+            # same 30 ms LP as the gyro to smooth contact-set changes.
+            zm = _measured_body_z(
+                self._joint_pos, self._joint_vel, leg_scale, R_body
+            )
+            if zm is not None:
+                if self._z_lp is None:
+                    self._z_lp = np.array(zm)
+                else:
+                    self._z_lp += a_r * (np.array(zm) - self._z_lp)
+            if zm is not None and bool(self.get_parameter("z_fb_enabled").value):
+                srbd_state[5] = stance_h + float(np.clip(
+                    self._z_lp[0] - stance_h, -_Z_ERR_CLIP, _Z_ERR_CLIP
+                ))
+                srbd_state[11] = float(np.clip(self._z_lp[1], -_VZ_CLIP, _VZ_CLIP))
+            self._mpc._Q[5, 5] = float(self.get_parameter("z_fb_weight").value)
             # QP moments balance about the CoM, so foot vectors are taken
             # relative to it — not the body-frame origin. A real CoM forward
             # of the origin loads the front pair more; without this offset the
@@ -1057,6 +1119,7 @@ class MPCNode(Node):
                     self._tau_blend = 0.0
                     self._tau_lp = [0.0] * 12
                     self._rate_lp = np.zeros(3)
+                    self._z_lp = None
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1068,6 +1131,7 @@ class MPCNode(Node):
                 self._tau_blend = 0.0
                 self._tau_lp = [0.0] * 12
                 self._rate_lp = np.zeros(3)
+                self._z_lp = None
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 

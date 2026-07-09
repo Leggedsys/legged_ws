@@ -540,6 +540,82 @@ def test_project_vertical_grf_removes_net_push(mpc):
     assert proj2[1, 2] == 0.0 and proj2[2, 2] == 0.0, "swing legs stay zero"
 
 
+def test_measured_body_z_matches_fk():
+    """Load-weighted stance FK height: matches plain FK, ignores unloaded
+    legs, returns None with no load anywhere."""
+    from legged_control.kinematics import forward_kinematics
+    from legged_control.mpc.mpc_node import _measured_body_z
+
+    q_leg = (0.0, 0.8, -1.6)
+    joint_pos = {f"{leg}_{j}": v for leg in ["FR", "FL", "RR", "RL"]
+                 for j, v in zip(["hip", "thigh", "calf"], q_leg)}
+    joint_vel = {n: 0.0 for n in joint_pos}
+    R = np.eye(3)
+
+    h_fk = -forward_kinematics("FR", q_leg)[2]
+    out = _measured_body_z(joint_pos, joint_vel, {l: 1.0 for l in ["FR", "FL", "RR", "RL"]}, R)
+    assert out is not None
+    assert out[0] == pytest.approx(h_fk, abs=1e-9)
+    assert out[1] == pytest.approx(0.0, abs=1e-9)
+
+    # a zero-weight leg is excluded: garbage joints there must not matter
+    joint_pos["RL_calf"] = 2.5
+    out2 = _measured_body_z(
+        joint_pos, joint_vel, {"FR": 1.0, "FL": 1.0, "RR": 1.0, "RL": 0.0}, R
+    )
+    assert out2[0] == pytest.approx(h_fk, abs=1e-9)
+
+    assert _measured_body_z(joint_pos, joint_vel, {}, R) is None
+
+
+def test_measured_body_z_vz_finite_diff():
+    """Vertical rate must equal the finite-difference of the FK height."""
+    from legged_control.kinematics import forward_kinematics
+    from legged_control.mpc.mpc_node import _measured_body_z
+
+    q = (0.05, 0.9, -1.7)
+    dq = (0.1, -0.4, 0.6)
+    dt = 1e-6
+    joint_pos = {f"FR_{j}": v for j, v in zip(["hip", "thigh", "calf"], q)}
+    joint_vel = {f"FR_{j}": v for j, v in zip(["hip", "thigh", "calf"], dq)}
+    # other legs unloaded
+    for leg in ["FL", "RR", "RL"]:
+        for j, v in zip(["hip", "thigh", "calf"], q):
+            joint_pos[f"{leg}_{j}"] = v
+            joint_vel[f"{leg}_{j}"] = 0.0
+    out = _measured_body_z(
+        joint_pos, joint_vel,
+        {"FR": 1.0, "FL": 0.0, "RR": 0.0, "RL": 0.0}, np.eye(3),
+    )
+    q2 = tuple(qi + di * dt for qi, di in zip(q, dq))
+    h1 = -forward_kinematics("FR", q)[2]
+    h2 = -forward_kinematics("FR", q2)[2]
+    assert out[1] == pytest.approx((h2 - h1) / dt, rel=1e-2)
+
+
+def test_mpc_z_feedback_lifts_sagging_body(mpc):
+    """A measured height below reference must raise total commanded lift —
+    the closed height loop that replaces inflating the mass parameter."""
+    mpc._Q[5, 5] = 2000.0                  # node default z_fb_weight
+    ref = np.zeros(12); ref[5] = 0.27
+    schedule = [[True] * 4] * 6
+    feet = _spread_feet()
+
+    fz_level = mpc.solve(ref.copy(), ref, feet, schedule).reshape(4, 3)[:, 2].sum()
+
+    sag = ref.copy(); sag[5] = 0.23        # body 4 cm low
+    fz_sag = mpc.solve(sag, ref, feet, schedule).reshape(4, 3)[:, 2].sum()
+    assert fz_sag > fz_level + 80.0, "sag must command extra lift"
+
+    fall = ref.copy(); fall[11] = -0.3     # body moving down
+    fz_fall = mpc.solve(fall, ref, feet, schedule).reshape(4, 3)[:, 2].sum()
+    assert fz_fall > fz_level + 50.0, "downward rate must command extra lift"
+
+    high = ref.copy(); high[5] = 0.31      # body 4 cm high
+    fz_high = mpc.solve(high, ref, feet, schedule).reshape(4, 3)[:, 2].sum()
+    assert fz_high < fz_level - 20.0, "riding high must shed force"
+
+
 def test_mpc_rate_feedback_damps_roll(mpc):
     """A measured body rate in the QP state must yield a counteracting moment
     (force-level attitude damping) that survives the vertical projection:
