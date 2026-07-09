@@ -540,6 +540,16 @@ def test_project_vertical_grf_removes_net_push(mpc):
     assert proj2[1, 2] == 0.0 and proj2[2, 2] == 0.0, "swing legs stay zero"
 
 
+def test_stance_load_ramp_frac_param():
+    """Runtime tau_ramp_frac: smaller frac reaches full load sooner."""
+    from legged_control.mpc.mpc_node import _stance_load_ramp
+    assert _stance_load_ramp(0.1, 0.1) == pytest.approx(1.0)
+    assert _stance_load_ramp(0.1, 0.2) < 1.0
+    assert _stance_load_ramp(0.95, 0.1) < 1.0   # lift-off ramp still applies
+    assert _stance_load_ramp(0.0, 0.1) == 0.0
+    assert _stance_load_ramp(1.0, 0.1) == 0.0
+
+
 def test_measured_body_z_matches_fk():
     """Load-weighted stance FK height: matches plain FK, ignores unloaded
     legs, returns None with no load anywhere."""

@@ -145,11 +145,12 @@ def _leg_joints(leg: str) -> list[str]:
     return [f"{leg}_hip", f"{leg}_thigh", f"{leg}_calf"]
 
 
-def _stance_load_ramp(s: float) -> float:
+def _stance_load_ramp(s: float, frac: float = _TAU_RAMP_FRAC) -> float:
     """Per-leg force scale over stance progress s ∈ [0,1]: 0 at touchdown,
-    1 through mid-stance, 0 at lift-off (smoothstep ramps of _TAU_RAMP_FRAC)."""
+    1 through mid-stance, 0 at lift-off (smoothstep ramps over `frac`)."""
     s = float(np.clip(s, 0.0, 1.0))
-    return _smoothstep(s / _TAU_RAMP_FRAC) * _smoothstep((1.0 - s) / _TAU_RAMP_FRAC)
+    frac = max(1e-3, float(frac))
+    return _smoothstep(s / frac) * _smoothstep((1.0 - s) / frac)
 
 
 def _remove_mount_bias(g: np.ndarray, roll_off: float, pitch_off: float) -> np.ndarray:
@@ -438,6 +439,15 @@ class MPCNode(Node):
         # biases the feedforward and parks the loop against the error clip.
         self.declare_parameter("z_fb_enabled", bool(mpc_cfg.get("z_fb_enabled", True)))
         self.declare_parameter("z_fb_weight",  float(mpc_cfg.get("z_fb_weight", 2000.0)))
+        # Hand-off dip knobs (mpc_debug data 2026-07-09: sag is a 4 Hz
+        # transient peaking ~90 ms after touchdown — inside the load-ramp
+        # window — not a stiffness problem):
+        # tau_ramp_frac shrinks the under-supported window itself;
+        # vz_fb_weight is the QP cost on measured vertical rate — damping
+        # that catches the body early in the fall, when the position error
+        # is still too small for z_fb_weight to matter.
+        self.declare_parameter("tau_ramp_frac", float(mpc_cfg.get("tau_ramp_frac", _TAU_RAMP_FRAC)))
+        self.declare_parameter("vz_fb_weight",  float(mpc_cfg.get("vz_fb_weight", 10.0)))
 
         mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
@@ -725,6 +735,7 @@ class MPCNode(Node):
                 ))
                 srbd_state[11] = float(np.clip(self._z_lp[1], -_VZ_CLIP, _VZ_CLIP))
             self._mpc._Q[5, 5] = float(self.get_parameter("z_fb_weight").value)
+            self._mpc._Q[11, 11] = float(self.get_parameter("vz_fb_weight").value)
             # QP moments balance about the CoM, so foot vectors are taken
             # relative to it — not the body-frame origin. A real CoM forward
             # of the origin loads the front pair more; without this offset the
@@ -1071,8 +1082,9 @@ class MPCNode(Node):
                 self._prev_cmd_q[jname] = qval
 
         # Per-leg load ramp: zero commanded force at touchdown and lift-off.
+        ramp_frac = float(self.get_parameter("tau_ramp_frac").value)
         leg_scale = {
-            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now))
+            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now), ramp_frac)
                   if gait_state[leg]["contact"] else 0.0)
             for leg in LEG_NAMES
         }

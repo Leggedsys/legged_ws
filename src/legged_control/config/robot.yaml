@@ -283,6 +283,18 @@ mpc:
   # z_fb_enabled false（退回纯 mass 前馈,0 误差 0 响应,无阶跃）。
   z_fb_enabled: true
   z_fb_weight:  2000.0
+  # 【2026-07-09 mpc_debug 实测】迈步塌陷不是刚度问题：站立 p95 ±1.6mm 完美,
+  # 行走塌陷是 4Hz 锁相瞬态——触地后 0~90ms 塌到 ~13mm、200ms 恢复,正压在
+  # 换腿力渐变窗口（支撑相首 20%=60ms）上,窗口内实际支撑缺口 ~40N。
+  # 所以 z_fb_weight 2000/4000/8000 手感无差（刚度救不了 60ms 瞬态）。
+  # 两个直接打这个窗口的旋钮（判据：mpc_debug_check 的 walking p95 sag）：
+  # tau_ramp_frac —— 力渐变窗口占支撑相比例。0.2→0.1 窗口减半（60→30ms）,
+  #   交接更快但触地冲击变硬；先试 0.1,冲击可接受再试 0.08。
+  # vz_fb_weight —— QP 对实测垂直速度的权重（阻尼）。10 ≈ 500 N/(m/s),
+  #   在位置误差还小时就接住下坠,对瞬态比 z_fb_weight 有效。试 20/40,
+  #   出现高频抖动或憋着不动的过阻尼感 → 减半。
+  tau_ramp_frac: 0.2
+  vz_fb_weight:  10.0
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
