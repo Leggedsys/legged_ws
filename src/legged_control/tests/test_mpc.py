@@ -538,3 +538,32 @@ def test_project_vertical_grf_removes_net_push(mpc):
     assert np.all(np.isfinite(proj2))
     assert proj2[:, 2].sum() == pytest.approx(grf2[:, 2].sum(), rel=1e-6)
     assert proj2[1, 2] == 0.0 and proj2[2, 2] == 0.0, "swing legs stay zero"
+
+
+def test_mpc_rate_feedback_damps_roll(mpc):
+    """A measured body rate in the QP state must yield a counteracting moment
+    (force-level attitude damping) that survives the vertical projection:
+    +wx rolls the right (−y) side down → right pair pushed up harder, Mx < 0."""
+    from legged_control.mpc.mpc_node import _project_vertical_grf
+
+    ref = np.zeros(12); ref[5] = 0.27
+    schedule = [[True] * 4] * 6
+    feet = _spread_feet()
+
+    still = _project_vertical_grf(
+        mpc.solve(ref.copy(), ref, feet, schedule), feet
+    ).reshape(4, 3)
+    state = ref.copy(); state[6] = 1.0     # pure roll rate, attitude still level
+    rolling = _project_vertical_grf(
+        mpc.solve(state, ref, feet, schedule), feet
+    ).reshape(4, 3)
+
+    Mx_still = float(np.cross(feet, still).sum(axis=0)[0])
+    Mx_roll = float(np.cross(feet, rolling).sum(axis=0)[0])
+    assert abs(Mx_still) < 0.5, "no rate error → no damping moment"
+    assert Mx_roll < -1.0, "damping moment must oppose the roll rate"
+    right = rolling[0, 2] + rolling[2, 2]
+    left = rolling[1, 2] + rolling[3, 2]
+    assert right > left + 2.0, "falling side must be pushed up harder"
+    # weight support must not be traded away for the damping moment
+    assert rolling[:, 2].sum() == pytest.approx(still[:, 2].sum(), rel=0.05)

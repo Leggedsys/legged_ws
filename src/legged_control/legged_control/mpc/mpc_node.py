@@ -117,6 +117,10 @@ _TAU_LP_TAU = 0.04       # s — low-pass on the final torque vector: absorbs th
                          # MPC force-redistribution step the *other* legs see
                          # when a contact flips. Feedforward lag only; position
                          # targets are untouched and PD covers the transient.
+_RATE_LP_TAU = 0.03      # s — light low-pass on the gyro before it enters the
+                         # QP state. Short on purpose: this channel exists to
+                         # damp 2 Hz body sway, so lag here eats the phase
+                         # margin the whole feature is meant to buy.
 
 # Leg ordering used for stance IK loops: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -383,6 +387,15 @@ class MPCNode(Node):
         self.declare_parameter("mass",  float(mpc_cfg.get("mass", 14.55)))
         self.declare_parameter("com_x", float(mpc_cfg.get("com_x", 0.0)))
         self.declare_parameter("com_y", float(mpc_cfg.get("com_y", 0.0)))
+        # Body-rate feedback into the QP state (force-level attitude damping,
+        # the MIT fast channel). Assumes the standard gyro axis convention
+        # (wx=ang_vel[0], wy=ang_vel[1], right-handed x-forward/z-up); if the
+        # body starts a growing oscillation the moment tau blends in, an axis
+        # is flipped — `ros2 param set /mpc_node rate_fb_enabled false` reverts
+        # instantly. rate_fb_weight is the QP cost on the wx/wy error relative
+        # to the roll/pitch weight of 200: damping strength knob.
+        self.declare_parameter("rate_fb_enabled", bool(mpc_cfg.get("rate_fb_enabled", True)))
+        self.declare_parameter("rate_fb_weight",  float(mpc_cfg.get("rate_fb_weight", 1.0)))
 
         mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
@@ -394,6 +407,7 @@ class MPCNode(Node):
         self._mpc = SRBDMPC(mass=mass, inertia_body=inertia, dt=self._dt, horizon=horizon)
         self._tau_blend = 0.0            # global enable ramp state
         self._tau_lp = [0.0] * 12        # low-passed output torque
+        self._rate_lp = np.zeros(3)      # low-passed world-frame body rate
 
         # Per-joint base kp/kd (motor side, same basis as motor_bus_node)
         _ctrl = control
@@ -622,16 +636,28 @@ class MPCNode(Node):
                 0.0, 0.0, yaw_ref,
                 float(vel_ref[0]), float(vel_ref[1]), 0.0,
             ])
-            # Neutralise every velocity channel (ang_vel + lin_vel): raw IMU
-            # gyro axes are mounting-dependent and were already caught flipping
-            # a damping loop into fast positive feedback (see _attitude_dz);
-            # VIO lin_vel axes are equally unverified. A flipped rate feeding
-            # the QP is ANTI-damping — observed as a limit cycle that starts
-            # the moment standup completes. Zero error → zero force response:
-            # tau_ff does only verified work (weight support + gravity-vector
-            # attitude P). Physical damping comes from the motor PD.
-            srbd_state[6:12] = state_ref[6:12]
             R_body = _euler_to_R(srbd_state[:3])
+            # lin_vel stays neutralised: no leg-odometry estimate yet and the
+            # VIO axes are unverified — a flipped velocity feeding the QP is
+            # anti-damping. wz too: yaw moments need horizontal forces, which
+            # _project_vertical_grf discards, so measured wz could only
+            # perturb the solve for zero output.
+            srbd_state[8:12] = state_ref[8:12]
+            # wx/wy: measured body rates → force-level attitude damping (the
+            # MIT fast channel; unlike _attitude_dz there is no tilt-filter
+            # lag in this path). The gyro is body-frame but the dynamics use
+            # world-frame ω (Θ̇ ≈ Rz⁻¹ω) → rotate by R_body (yaw is 0 here).
+            # Axis convention assumed standard; if a growing sway starts the
+            # moment tau blends in, flip rate_fb_enabled off (see param note).
+            a_r = min(1.0, self._dt / _RATE_LP_TAU)
+            self._rate_lp += a_r * (R_body @ est[3:6] - self._rate_lp)
+            if bool(self.get_parameter("rate_fb_enabled").value):
+                srbd_state[6:8] = self._rate_lp[:2]
+            else:
+                srbd_state[6:8] = state_ref[6:8]
+            self._mpc._Q[6, 6] = self._mpc._Q[7, 7] = float(
+                self.get_parameter("rate_fb_weight").value
+            )
             # QP moments balance about the CoM, so foot vectors are taken
             # relative to it — not the body-frame origin. A real CoM forward
             # of the origin loads the front pair more; without this offset the
@@ -1030,6 +1056,7 @@ class MPCNode(Node):
                     self._att_dz = {leg: 0.0 for leg in LEG_NAMES}
                     self._tau_blend = 0.0
                     self._tau_lp = [0.0] * 12
+                    self._rate_lp = np.zeros(3)
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1040,6 +1067,7 @@ class MPCNode(Node):
                 self._att_dz = {leg: 0.0 for leg in LEG_NAMES}
                 self._tau_blend = 0.0
                 self._tau_lp = [0.0] * 12
+                self._rate_lp = np.zeros(3)
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 

@@ -190,13 +190,13 @@ mpc:
   #   运行时可调：ros2 param set /mpc_node mass 13.6（看 height_check 的
   #   mean Δ 归零即为准）。
   # Inertia: URDF sums scaled by mass ratio — rough estimate.
-  mass:    13.6
+  mass:    25.0
   # 质心偏移（机体系，m，前 x+ / 左 y+）：QP 对质心取矩,默认假设质心在几何
   # 中心。实测站立（2026-07-09）前腿比指令矮 4mm、后腿反被顶高 4~7mm ——
   # 前馈给前腿少、后腿多,即真实质心偏前。站立开 tau_ff,每次 +0.01 上调
   # com_x（ros2 param set /mpc_node com_x 0.02）,直到 height_check 四腿
   # Δ 大致相等；左右不均则同法调 com_y。
-  com_x:   0.10
+  com_x:   0.05
   com_y:   0.0
   Ixx:     0.0196
   Iyy:     0.0228
@@ -223,7 +223,7 @@ mpc:
   # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
   # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
   # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
-  kp_scale: 1.0
+  kp_scale: 1.5
   kd_scale: 2.0
   # "小kp大tau"分相增益：支撑腿随受力渐变把 kp/kd 交叉过渡到下面的低值
   # （前馈承重、PD 只管柔顺纠偏），摆动腿保持上面的 kp_scale/kd_scale 不变
@@ -257,6 +257,20 @@ mpc:
   # 拿它抬前身是在用错误的负载分配对抗错误的姿态零点，两个都失真。
   att_roll_offset:  0.0
   att_pitch_offset: 0.0
+  # 机体角速度直接进 QP 状态（力级姿态阻尼，MIT 的"快通道"）：gyro 无滤波
+  # 延迟，直接变成反向支撑力矩——位置侧调平（att_kp/kd，0.1s 低通 + 微分再
+  # 滤波）在 2Hz 步频下相位滞后 ~83°，越调越晃的根源。轴向按标准约定
+  # （x前/y左/z上，wx=ang_vel[0]）。风险自查：tau 一介入就出现越来越大的
+  # 摆动 = 某轴符号反了（阻尼变正反馈）——
+  #   ros2 param set /mpc_node rate_fb_enabled false   # 立即回退
+  # 注意：imu_axis_check 实测时 /state_estimate 的 ang_vel 疑似恒零（相关性
+  # 全为 0）。上机前先确认信号活着：ros2 topic echo /odin1/imu/filtered
+  # --field angular_velocity 手动晃动应看到明显非零；死信号则本功能无效果。
+  # rate_fb_weight：wx/wy 误差的 QP 权重（roll/pitch 姿态权重为 200），
+  # 即阻尼强度。晃动收敛慢 → 每次 ×2 上调（2/4/8）；出现高频抖动 → 减半。
+  # 生效后位置侧调平只留静态 trim：att_ki 0、att_kp 降到 0.04 左右试。
+  rate_fb_enabled: true
+  rate_fb_weight:  1.0
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
