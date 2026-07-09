@@ -456,3 +456,20 @@ def test_mpc_com_offset_shifts_load_forward(mpc):
     total_c = grf_centered[2::3].sum()
     total_s = grf_shifted[2::3].sum()
     assert total_s == pytest.approx(total_c, rel=0.05), "total weight support unchanged"
+
+
+def test_stance_gain_scale_crossfade():
+    """Soft-stance gain split: disabled passthrough, endpoint values, and a
+    monotone crossfade in between (weight = load ramp × tau blend)."""
+    from legged_control.mpc.mpc_node import _stance_gain_scale
+
+    # stance <= 0 disables the split entirely
+    assert _stance_gain_scale(1.2, -1.0, 1.0) == pytest.approx(1.2)
+    assert _stance_gain_scale(1.2, 0.0, 0.7) == pytest.approx(1.2)
+    # endpoints: swing (w=0) keeps base, full stance (w=1) reaches stance value
+    assert _stance_gain_scale(1.2, 0.6, 0.0) == pytest.approx(1.2)
+    assert _stance_gain_scale(1.2, 0.6, 1.0) == pytest.approx(0.6)
+    # halfway crossfade, and weights are clipped to [0, 1]
+    assert _stance_gain_scale(1.2, 0.6, 0.5) == pytest.approx(0.9)
+    assert _stance_gain_scale(1.2, 0.6, 1.7) == pytest.approx(0.6)
+    assert _stance_gain_scale(1.2, 0.6, -0.3) == pytest.approx(1.2)

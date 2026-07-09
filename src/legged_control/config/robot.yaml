@@ -196,7 +196,7 @@ mpc:
   # 前馈给前腿少、后腿多,即真实质心偏前。站立开 tau_ff,每次 +0.01 上调
   # com_x（ros2 param set /mpc_node com_x 0.02）,直到 height_check 四腿
   # Δ 大致相等；左右不均则同法调 com_y。
-  com_x:   0.0
+  com_x:   0.05
   com_y:   0.0
   Ixx:     0.0196
   Iyy:     0.0228
@@ -223,8 +223,17 @@ mpc:
   # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
   # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
   # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
-  kp_scale: 1.2
+  kp_scale: 1.0
   kd_scale: 2.0
+  # "小kp大tau"分相增益：支撑腿随受力渐变把 kp/kd 交叉过渡到下面的低值
+  # （前馈承重、PD 只管柔顺纠偏），摆动腿保持上面的 kp_scale/kd_scale 不变
+  # ——摆动腿悬空没有 tau_ff，全靠 PD 跟轨迹，全局压 kp 时塌的正是它们。
+  # 过渡权重 = 支撑力渐变 × tau 全局 blend：tau_ff 关闭/失效时支撑腿自动
+  # 恢复硬 PD，不会出现"没前馈还软腿"。<=0 表示不启用（全程 kp_scale）。
+  # 现场实验：ros2 param set /mpc_node kp_stance_scale 0.8，再逐步 0.6/0.5；
+  # 塌 → 回调大一档。判据：height_check 站立 Δ 不变差、走路塌陷感减轻。
+  kp_stance_scale: -1.0
+  kd_stance_scale: -1.0
   # IMU 姿态调平（仅 WALK 相）：projected_gravity 的 x/y 分量为倾斜量（0.1s 低通
   # 滤触地噪声），阻尼取该滤波信号自身的数值微分——不用原始 gyro（其轴向取决于
   # IMU 安装朝向，猜错符号会变成快速正反馈，实测表现为微小倾斜即剧烈弹跳）。

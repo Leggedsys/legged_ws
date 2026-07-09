@@ -143,6 +143,14 @@ def _stance_load_ramp(s: float) -> float:
     return _smoothstep(s / _TAU_RAMP_FRAC) * _smoothstep((1.0 - s) / _TAU_RAMP_FRAC)
 
 
+def _stance_gain_scale(base: float, stance: float, w: float) -> float:
+    """Crossfade a gain scale from its swing value (w=0) to its stance value
+    (w=1). stance <= 0 disables the split — the gain follows base everywhere."""
+    if stance <= 0.0:
+        return base
+    return base + (stance - base) * float(np.clip(w, 0.0, 1.0))
+
+
 def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
     """Build 12-dim SRBD state from /state_estimate and an assumed CoM position.
 
@@ -279,6 +287,13 @@ class MPCNode(Node):
         # Runtime-tunable: `ros2 param set /mpc_node kp_scale 0.5`
         self.declare_parameter("kp_scale", float(mpc_cfg.get("kp_scale", 0.6)))
         self.declare_parameter("kd_scale", float(mpc_cfg.get("kd_scale", 1.0)))
+        # "Soft stance / stiff swing" split (<= 0 disables → kp_scale
+        # everywhere). Loaded stance legs crossfade toward these as tau_ff
+        # takes their weight (weight = load ramp × tau blend), swing legs — the
+        # ones with no feedforward at all — keep the full kp_scale/kd_scale.
+        # Reverts to stiff automatically whenever tau_ff is off or ramping.
+        self.declare_parameter("kp_stance_scale", float(mpc_cfg.get("kp_stance_scale", -1.0)))
+        self.declare_parameter("kd_stance_scale", float(mpc_cfg.get("kd_stance_scale", -1.0)))
         # IMU attitude leveling (WALK phase): tilt from projected_gravity,
         # damping from that signal's own derivative → per-foot z offsets.
         # att_kp in m per unit tilt (≈ m/rad for small angles); 0 disables.
@@ -624,6 +639,26 @@ class MPCNode(Node):
         kd = [self._base_kd[n] * kd_scale for n in _YAML_JOINTS]
         return kp, kd
 
+    def _walk_gains(self, leg_scale: dict[str, float]) -> tuple[list[float], list[float]]:
+        """Per-joint gains for WALK: loaded stance legs crossfade toward
+        kp_stance_scale/kd_stance_scale as tau_ff takes their weight, swing
+        legs keep the full kp_scale/kd_scale (no feedforward exists in the
+        air — PD alone tracks the swing arc). Crossfade weight is the same
+        load ramp that scales the leg's force, times the global tau blend,
+        so gains soften exactly where — and only while — the feedforward is
+        actually carrying the load. Call after _tau_feedforward so the blend
+        state is current."""
+        kp_base = float(self.get_parameter("kp_scale").value)
+        kd_base = float(self.get_parameter("kd_scale").value)
+        kp_st = float(self.get_parameter("kp_stance_scale").value)
+        kd_st = float(self.get_parameter("kd_stance_scale").value)
+        kp, kd = [], []
+        for n in _YAML_JOINTS:
+            w = float(leg_scale.get(n.split("_")[0], 0.0)) * self._tau_blend
+            kp.append(self._base_kp[n] * _stance_gain_scale(kp_base, kp_st, w))
+            kd.append(self._base_kd[n] * _stance_gain_scale(kd_base, kd_st, w))
+        return kp, kd
+
     def _compute_stance_q(self, stance_h: float) -> list[float]:
         """IK-derived joint targets for nominal stance at stance_h. Used by both
         standup ramp and balance_stance so they share the same goal with no snap."""
@@ -669,15 +704,16 @@ class MPCNode(Node):
                 q_leg = tuple(_DEFAULT_Q[j] for j in _leg_joints(leg))
             for jname, qval in zip(_leg_joints(leg), q_leg):
                 targets[jname] = float(qval)
+        leg_scale = {leg: 1.0 for leg in LEG_NAMES}
         tau = self._tau_feedforward(
             targets,
-            leg_scale={leg: 1.0 for leg in LEG_NAMES},
+            leg_scale=leg_scale,
             contact_schedule=[[True] * 4] * self._mpc._N,
             stance_h=stance_h,
             vel_ref=np.zeros(2),
             yaw_ref=0.0,
         )
-        kp, kd = self._fixed_gains()
+        kp, kd = self._walk_gains(leg_scale)
         return JointCommand(
             q=[targets[n] for n in _YAML_JOINTS],
             dq=[0.0] * 12, tau=tau, kp=kp, kd=kd,
@@ -839,7 +875,7 @@ class MPCNode(Node):
             stance_h, vel_xy, yaw_rate,
         )
 
-        kp, kd = self._fixed_gains()
+        kp, kd = self._walk_gains(leg_scale)
 
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],
