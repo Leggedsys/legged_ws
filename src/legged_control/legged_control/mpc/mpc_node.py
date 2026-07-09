@@ -143,6 +143,27 @@ def _stance_load_ramp(s: float) -> float:
     return _smoothstep(s / _TAU_RAMP_FRAC) * _smoothstep((1.0 - s) / _TAU_RAMP_FRAC)
 
 
+def _remove_mount_bias(g: np.ndarray, roll_off: float, pitch_off: float) -> np.ndarray:
+    """Remove the IMU mounting bias from a projected-gravity vector.
+
+    Every attitude consumer (position-side leveling trim AND the MPC attitude
+    P) drives the tilt it sees to zero — so a mounting bias makes both loops
+    actively HOLD the body at the biased attitude, and enabling tau_ff leans
+    the body harder into it (more authority toward the same wrong zero).
+    Converting to roll/pitch, subtracting the calibrated offsets and
+    rebuilding the vector makes "zero tilt" mean geometrically level.
+    Calibration: standing with tau_ff on, nudge att_pitch_offset (negative =
+    nose-up correction) until height_check shows equal front/rear measured
+    heights; same for att_roll_offset left/right."""
+    if roll_off == 0.0 and pitch_off == 0.0:
+        return g
+    roll  = float(np.arctan2(-g[1], -g[2])) - roll_off
+    pitch = float(np.arctan2(g[0], float(np.hypot(g[1], g[2])))) - pitch_off
+    sr, cr = np.sin(roll), np.cos(roll)
+    sp, cp = np.sin(pitch), np.cos(pitch)
+    return np.array([sp, -sr * cp, -cr * cp]) * float(np.linalg.norm(g))
+
+
 def _stance_gain_scale(base: float, stance: float, w: float) -> float:
     """Crossfade a gain scale from its swing value (w=0) to its stance value
     (w=1). stance <= 0 disables the split — the gain follows base everywhere."""
@@ -302,6 +323,11 @@ class MPCNode(Node):
         self.declare_parameter("att_kp", float(mpc_cfg.get("att_kp", 0.08)))
         self.declare_parameter("att_kd", float(mpc_cfg.get("att_kd", 0.02)))
         self.declare_parameter("att_ki", float(mpc_cfg.get("att_ki", 0.10)))
+        # IMU mounting bias (rad): what "level" should mean. Both leveling
+        # loops zero the corrected tilt, so these are, directly, the attitude
+        # the body is held at. See _remove_mount_bias for the calibration.
+        self.declare_parameter("att_roll_offset",  float(mpc_cfg.get("att_roll_offset", 0.0)))
+        self.declare_parameter("att_pitch_offset", float(mpc_cfg.get("att_pitch_offset", 0.0)))
         # SRBD-MPC GRF feedforward on top of the (unchanged) position gait.
         # Runtime A/B: `ros2 param set /mpc_node tau_ff_enabled false` — the
         # global blend ramps it out over ~0.3 s, never a step.
@@ -465,7 +491,11 @@ class MPCNode(Node):
         kp = float(self.get_parameter("att_kp").value)
         kd = float(self.get_parameter("att_kd").value)
         ki = float(self.get_parameter("att_ki").value)
-        g = self._state_estimate[6:9]
+        g = _remove_mount_bias(
+            np.asarray(self._state_estimate[6:9], dtype=float),
+            float(self.get_parameter("att_roll_offset").value),
+            float(self.get_parameter("att_pitch_offset").value),
+        )
         g_norm = float(np.linalg.norm(g))
         fresh = (
             self._est_stamp is not None
@@ -535,8 +565,14 @@ class MPCNode(Node):
 
         tau_raw = [0.0] * 12
         if self._tau_blend > 1e-3:
+            est = np.asarray(self._state_estimate, dtype=float).copy()
+            est[6:9] = _remove_mount_bias(
+                est[6:9],
+                float(self.get_parameter("att_roll_offset").value),
+                float(self.get_parameter("att_pitch_offset").value),
+            )
             srbd_state = _state_from_estimate(
-                self._state_estimate, np.array([0.0, 0.0, stance_h])
+                est, np.array([0.0, 0.0, stance_h])
             )
             state_ref = np.array([
                 0.0, 0.0, 0.0,

@@ -473,3 +473,33 @@ def test_stance_gain_scale_crossfade():
     assert _stance_gain_scale(1.2, 0.6, 0.5) == pytest.approx(0.9)
     assert _stance_gain_scale(1.2, 0.6, 1.7) == pytest.approx(0.6)
     assert _stance_gain_scale(1.2, 0.6, -0.3) == pytest.approx(1.2)
+
+
+def test_remove_mount_bias_round_trip():
+    """IMU mounting-bias removal: corrected proj_g of a body at (roll, pitch)
+    with offsets (r_off, p_off) must equal proj_g at (roll−r_off, pitch−p_off),
+    zero offsets pass through untouched, and the norm is preserved."""
+    from legged_control.mpc.mpc_node import _remove_mount_bias, _state_from_estimate
+    from legged_control.mpc.srbd_mpc import _euler_to_R
+
+    def proj_g(roll, pitch):
+        R = _euler_to_R(np.array([roll, pitch, 0.0]))
+        return R.T @ np.array([0.0, 0.0, -1.0])
+
+    g = proj_g(0.05, -0.08)
+    assert np.allclose(_remove_mount_bias(g, 0.0, 0.0), g), "zero offsets: passthrough"
+
+    for roll, pitch, r_off, p_off in [
+        (0.0, 0.0, 0.01, -0.02), (0.06, -0.04, -0.03, 0.05), (-0.1, 0.12, 0.02, 0.02),
+    ]:
+        corrected = _remove_mount_bias(proj_g(roll, pitch), r_off, p_off)
+        expected = proj_g(roll - r_off, pitch - p_off)
+        assert np.allclose(corrected, expected, atol=1e-9), (roll, pitch, r_off, p_off)
+        assert np.linalg.norm(corrected) == pytest.approx(1.0, abs=1e-9)
+
+    # end-to-end: a body held exactly at the bias attitude reads as level
+    est = np.zeros(10)
+    est[6:9] = proj_g(0.03, -0.05)
+    est[6:9] = _remove_mount_bias(est[6:9], 0.03, -0.05)
+    state = _state_from_estimate(est, np.zeros(3))
+    assert abs(state[0]) < 1e-9 and abs(state[1]) < 1e-9
