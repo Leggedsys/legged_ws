@@ -523,6 +523,11 @@ class MPCNode(Node):
 
         self._pub = self.create_publisher(JointState, "/joint_commands", 10)
         self._pub_gains = self.create_publisher(Float32MultiArray, "/joint_gains", 10)
+        # MPC internals for scripts/mpc_debug_check.py — layout:
+        # [0] h_meas [1] vz_meas [2] z_err(clipped) [3] Σfz
+        # [4:8] fz FR,FL,RR,RL [8] tau_blend [9] roll [10] pitch
+        # [11] wx [12] wy (world) [13] stance_h ref
+        self._pub_debug = self.create_publisher(Float32MultiArray, "/mpc_debug", 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
@@ -747,6 +752,20 @@ class MPCNode(Node):
                 # projected solution through every contact flip.
                 grf = _project_vertical_grf(grf, foot_pos_world)
                 grf = _apply_load_ramp(grf, leg_scale, mu=self._mpc._mu)
+                fz = grf.reshape(4, 3)[:, 2]
+                dbg = Float32MultiArray()
+                dbg.data = [
+                    float(self._z_lp[0]) if self._z_lp is not None else 0.0,
+                    float(self._z_lp[1]) if self._z_lp is not None else 0.0,
+                    float(srbd_state[5] - stance_h),
+                    float(fz.sum()),
+                    float(fz[0]), float(fz[1]), float(fz[2]), float(fz[3]),
+                    float(self._tau_blend),
+                    float(srbd_state[0]), float(srbd_state[1]),
+                    float(srbd_state[6]), float(srbd_state[7]),
+                    float(stance_h),
+                ]
+                self._pub_debug.publish(dbg)
                 tau_raw = _build_stance_tau(
                     grf, joint_targets, {leg: 1.0 for leg in LEG_NAMES}, R_body
                 )
