@@ -78,6 +78,8 @@ try:
     from sensor_msgs.msg import Joy
     from geometry_msgs.msg import Twist
     from std_msgs.msg import Bool, Float32, Int8
+    from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+    from rcl_interfaces.srv import SetParameters
     from ament_index_python.packages import get_package_share_directory
 
     class TeleopNode(Node):
@@ -110,6 +112,16 @@ try:
             self._btn_step_rear = int(cfg.get("btn_step_rear", 3))
             self._prev_step_front = 0
             self._prev_step_rear = 0
+            # Gait-mode toggles: LB = stair mode, RB = hurdle mode (auto-
+            # enables stair when turned on). The buttons flip mpc_node's
+            # parameters through its set_parameters service — one source of
+            # truth, `ros2 param get/set` still agrees with the pad.
+            self._btn_stair = int(cfg.get("btn_stair_mode", 6))
+            self._btn_hurdle = int(cfg.get("btn_hurdle_mode", 7))
+            self._prev_stair_btn = 0
+            self._prev_hurdle_btn = 0
+            self._stair_on = False
+            self._hurdle_on = False
             self._axis_lt = int(cfg.get("axis_lt", 2))
             self._axis_rt = int(cfg.get("axis_rt", 5))
             self._max_dz = float(cfg.get("max_dz", 0.03))
@@ -130,6 +142,9 @@ try:
             # 3 = clear all levels. mpc_node consumes at each leg's next
             # lift-off — press timing is the operator's job.
             self._step_pub = self.create_publisher(Int8, "/step_command", 10)
+            self._mpc_param_cli = self.create_client(
+                SetParameters, "/mpc_node/set_parameters"
+            )
             self.create_subscription(Joy, "/joy", self._on_joy, 10)
             # Publish the height target on a timer too, so a fresh /height_command
             # keeps flowing even when the gamepad is idle (joy_node may go silent).
@@ -140,6 +155,26 @@ try:
                 f"max_yaw={self._max_yaw}, deadzone={self._deadzone}, "
                 f"btn_estop={self._btn_estop}, btn_posture_toggle={self._btn_posture_toggle})"
             )
+
+        def _send_mpc_bools(self, changes: dict) -> bool:
+            """Set boolean parameters on mpc_node. Returns False (and warns)
+            when the service isn't up yet, so callers don't flip their local
+            toggle state on a press that went nowhere."""
+            if not self._mpc_param_cli.service_is_ready():
+                self.get_logger().warn(
+                    "mpc_node parameter service not ready — mode button ignored"
+                )
+                return False
+            req = SetParameters.Request()
+            for name, val in changes.items():
+                p = Parameter()
+                p.name = name
+                p.value = ParameterValue(
+                    type=ParameterType.PARAMETER_BOOL, bool_value=bool(val)
+                )
+                req.parameters.append(p)
+            self._mpc_param_cli.call_async(req)
+            return True
 
         def _load_teleop_config(self) -> dict:
             share = get_package_share_directory("legged_control")
@@ -189,6 +224,43 @@ try:
                 self.get_logger().info("STEP: rear pair up one level")
             self._prev_step_front = step_front
             self._prev_step_rear = step_rear
+
+            stair_btn = (
+                buttons[self._btn_stair]
+                if 0 <= self._btn_stair < len(buttons) else 0
+            )
+            hurdle_btn = (
+                buttons[self._btn_hurdle]
+                if 0 <= self._btn_hurdle < len(buttons) else 0
+            )
+            if _button_is_rising_edge(self._prev_stair_btn, stair_btn):
+                if self._send_mpc_bools({"stair_mode": not self._stair_on}):
+                    self._stair_on = not self._stair_on
+                    self.get_logger().info(
+                        f"STAIR MODE -> {'ON' if self._stair_on else 'OFF'}"
+                        " (takes effect at standstill)"
+                    )
+            if _button_is_rising_edge(self._prev_hurdle_btn, hurdle_btn):
+                if not self._hurdle_on:
+                    # hurdle rides on the crawl — turning it on brings stair
+                    # mode with it so one button does the whole preparation
+                    if self._send_mpc_bools(
+                        {"stair_mode": True, "hurdle_mode": True}
+                    ):
+                        self._stair_on = True
+                        self._hurdle_on = True
+                        self.get_logger().info(
+                            "HURDLE MODE -> ON (+stair; takes effect at standstill)"
+                        )
+                else:
+                    # off only releases the hurdle; stair stays until LB
+                    if self._send_mpc_bools({"hurdle_mode": False}):
+                        self._hurdle_on = False
+                        self.get_logger().info(
+                            "HURDLE MODE -> OFF (stair mode still ON — LB to exit)"
+                        )
+            self._prev_stair_btn = stair_btn
+            self._prev_hurdle_btn = hurdle_btn
 
             estop_active = (
                 self._btn_estop >= 0
