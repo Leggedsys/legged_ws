@@ -996,3 +996,18 @@ def test_lateral_spread_relaxes_calf_fold():
     _, q0 = _knee_clearance("FR", 0.16, 0.0)
     _, q6 = _knee_clearance("FR", 0.16, 0.06)
     assert q6[2] > q0[2] + 0.2  # calf angle retreats ≥ 0.2 rad from the limit
+
+
+def test_gait_swing_ratio_runtime_sync():
+    """set_swing_ratio must move the contact boundary (runtime param sync)
+    and clamp at 0.49 — a trot needs stance overlap of the diagonal pairs."""
+    g = GaitScheduler(period=0.8, swing_ratio=0.4)
+    t0 = g._t0
+    # phase 0.45 for FR (trot offset 0): boundary moves with the ratio
+    t = t0 + 0.45 * 0.8
+    assert g.query(t)["FR"]["contact"]           # 0.45 >= 0.40 → stance
+    g.set_swing_ratio(0.47)
+    assert not g.query(t)["FR"]["contact"]       # 0.45 < 0.47 → swing
+    assert g.swing_ratio == pytest.approx(0.47)
+    g.set_swing_ratio(0.60)                      # out of range → clamp
+    assert g.swing_ratio == pytest.approx(0.49)

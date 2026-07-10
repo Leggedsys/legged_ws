@@ -1116,10 +1116,14 @@ class MPCNode(Node):
         """Run one gait-scheduler step and return a full JointCommand."""
         stance_h = self._stance_h
         step_h   = float(self.get_parameter("step_height").value)
-        # GaitScheduler.period is a plain attribute set once at construction —
-        # `ros2 param set gait_period` alone never reached it. Sync every tick
-        # so runtime changes actually take effect.
+        # GaitScheduler.period/swing_ratio are plain attributes set once at
+        # construction — `ros2 param set` alone never reached them. Sync both
+        # every tick so runtime changes actually take effect; swing_ratio
+        # especially, since the node reads its param per tick for the foot
+        # trajectory and an unsynced scheduler would flip contacts on a
+        # different clock than the trajectory it gates.
         self._gait.set_period(float(self.get_parameter("gait_period").value))
+        self._gait.set_swing_ratio(float(self.get_parameter("swing_ratio").value))
 
         if self._est_stamp is None or (now - self._est_stamp) > _EST_TIMEOUT:
             self.get_logger().warn(
@@ -1167,7 +1171,9 @@ class MPCNode(Node):
             self._vel_filt[:] = 0.0
             self._walking = False
             return self._balance_stance(stance_h)
-        swing_ratio = float(self.get_parameter("swing_ratio").value)
+        # Read back from the scheduler (post-clamp), not the raw parameter:
+        # trajectory and contact schedule must share one swing_ratio.
+        swing_ratio = self._gait.swing_ratio
         # Pure position control has no dynamics path from cmd_vel to actual
         # body motion (no tau_ff pushing the body), so the measured
         # state_estimate velocity stays ~0 even while walking is commanded.

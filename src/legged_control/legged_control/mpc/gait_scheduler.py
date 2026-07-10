@@ -45,9 +45,22 @@ class GaitScheduler:
     def set_period(self, period: float) -> None:
         self._period = max(0.1, period)
 
+    def set_swing_ratio(self, swing_ratio: float) -> None:
+        """Runtime sync, same contract as set_period: the node reads the
+        swing_ratio parameter every tick for the TRAJECTORY; if the
+        scheduler keeps its constructor value the contact schedule and the
+        foot trajectory disagree about when swing ends (foot commanded
+        mid-air at 'touchdown'). Clamped below 0.5 — a trot needs the
+        diagonal pairs to overlap in stance."""
+        self._swing_ratio = float(min(max(swing_ratio, 0.1), 0.49))
+
     @property
     def period(self) -> float:
         return self._period
+
+    @property
+    def swing_ratio(self) -> float:
+        return self._swing_ratio
 
     def query(self, t: float | None = None) -> dict:
         """Return current contact/swing state for each leg.
