@@ -48,10 +48,18 @@ def _build_Ab(
     inertia_body: np.ndarray,
     mass: float,
     foot_positions_world: np.ndarray,
-    contact_mask: list[bool],
+    contact_mask: list[bool | float],
     dt: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build discrete-time state matrix Ad (12×12) and input matrix Bd (12×12)."""
+    """Build discrete-time state matrix Ad (12×12) and input matrix Bd (12×12).
+
+    contact_mask entries may be fractional (0..1): the share of this
+    prediction step the foot spends in contact. The input block scales with
+    it, so a contact flip sliding across a step boundary changes the model
+    continuously instead of toggling a whole dt-wide bucket at once (which
+    showed up as a periodic ~3 Nm/tick torque step at every hand-off once
+    dt grew past the tick period). Booleans still work: True == 1.0.
+    """
     R = _euler_to_R(rpy)
     I_world = R @ inertia_body @ R.T
     I_world_inv = np.linalg.inv(I_world)
@@ -66,10 +74,11 @@ def _build_Ab(
 
     Bc = np.zeros((12, 12))
     for i, (in_contact, r_foot) in enumerate(zip(contact_mask, foot_positions_world)):
-        if not in_contact:
+        frac = float(in_contact)
+        if frac <= 1e-6:
             continue
-        Bc[6:9, 3*i:3*i+3] = I_world_inv @ _skew(r_foot)
-        Bc[9:12, 3*i:3*i+3] = np.eye(3) / mass
+        Bc[6:9, 3*i:3*i+3] = frac * (I_world_inv @ _skew(r_foot))
+        Bc[9:12, 3*i:3*i+3] = frac * np.eye(3) / mass
 
     # Forward Euler discretisation
     Ad = np.eye(12) + Ac * dt
@@ -103,6 +112,7 @@ class SRBDMPC:
         f_min: float = 10.0,
         f_max: float = 200.0,
         mu: float = 0.6,
+        slew_weight: float = 0.0,
     ) -> None:
         self._mass = mass
         self._I_body = np.asarray(inertia_body, dtype=float)
@@ -112,11 +122,20 @@ class SRBDMPC:
         self._f_min = f_min
         self._f_max = f_max
         self._mu = mu
+        # Δu continuity: cost slew_weight·‖u₀ − u_prev‖² tying the first-step
+        # force to the previously applied one. With a long horizon the QP
+        # otherwise concentrates its hand-off pre-load into the last few
+        # ticks before a contact flip (pump-then-drop, ~40 N/tick per leg);
+        # this makes late slamming expensive so the transfer starts earlier.
+        # Active only when solve() is given u_prev.
+        self._slew_weight = slew_weight
 
         if q_weights is None:
             # roll/pitch/yaw, x/y/z, wx/wy/wz, vx/vy/vz
             q_weights = [200, 200, 100,  0, 0, 200,  1, 1, 1,  5, 5, 10]
-        self._Q = np.diag(q_weights)
+        # float dtype is load-bearing: the node pokes _Q[i,i] at runtime and
+        # an int array would silently truncate fractional weights to 0.
+        self._Q = np.diag(np.asarray(q_weights, dtype=float))
         self._R = np.eye(12) * r_weight
 
     def solve(
@@ -125,6 +144,7 @@ class SRBDMPC:
         state_ref: np.ndarray,
         foot_positions_world: np.ndarray,
         contact_schedule: list[list[bool]],
+        u_prev: np.ndarray | None = None,
     ) -> np.ndarray:
         """Solve MPC and return optimal GRF for the first step.
 
@@ -132,7 +152,11 @@ class SRBDMPC:
             state:                 current 12-dim state [rpy, pos, ang_vel, lin_vel]
             state_ref:             desired 12-dim state (held constant over horizon)
             foot_positions_world:  4×3 foot positions in world frame (relative to CoM)
-            contact_schedule:      list of N lists of 4 booleans (per-step contact)
+            contact_schedule:      list of N lists of 4 contact shares — bool
+                                   or float 0..1 (fraction of the step in
+                                   contact); True == 1.0
+            u_prev:                previous solve's 12-dim GRF; enables the
+                                   Δu continuity cost (see slew_weight)
 
         Returns:
             12-element GRF vector [f0x,f0y,f0z, ..., f3x,f3y,f3z] for step 0
@@ -192,6 +216,18 @@ class SRBDMPC:
         H = Gamma.T @ Q_bar @ Gamma + R_bar
         f_vec = Gamma.T @ Q_bar @ e0
 
+        if u_prev is not None and self._slew_weight > 0.0:
+            # + slew_weight·‖u₀ − u_prev‖² → quadratic term on the first
+            # block, linear pull toward u_prev. Legs with no step-0 contact
+            # are excluded: their u₀ is zeroed by projection anyway and a
+            # pull toward stale force would bias the redistribution.
+            up = np.asarray(u_prev, dtype=float).copy()
+            for i, c in enumerate(contact_schedule[0]):
+                if float(c) <= 1e-6:
+                    up[3*i:3*i+3] = 0.0
+            H[:nu, :nu] += self._slew_weight * np.eye(nu)
+            f_vec[:nu] -= self._slew_weight * up
+
         # Make symmetric (numerical noise)
         H = (H + H.T) * 0.5
 
@@ -206,13 +242,17 @@ class SRBDMPC:
         # Project onto constraint set per step per leg:
         #   swing legs → zero force
         #   stance legs → fz ∈ [f_min, f_max], |fx|/|fy| ≤ μ*fz
+        # Fractional contact scales the force bounds with the contact share,
+        # so the feasible set (and thus the projected solution) shrinks to
+        # zero continuously as a foot leaves contact.
         for k in range(N):
             for i, in_contact in enumerate(contact_schedule[k]):
+                frac = float(in_contact)
                 base = k * nu + i * 3
-                if not in_contact:
+                if frac <= 1e-6:
                     u_opt[base:base + 3] = 0.0
                     continue
-                fz = float(np.clip(u_opt[base + 2], self._f_min, self._f_max))
+                fz = float(np.clip(u_opt[base + 2], frac * self._f_min, frac * self._f_max))
                 f_xy_max = self._mu * fz
                 fx = float(np.clip(u_opt[base],     -f_xy_max, f_xy_max))
                 fy = float(np.clip(u_opt[base + 1], -f_xy_max, f_xy_max))

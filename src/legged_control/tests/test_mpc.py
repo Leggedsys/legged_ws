@@ -653,3 +653,128 @@ def test_mpc_rate_feedback_damps_roll(mpc):
     assert right > left + 2.0, "falling side must be pushed up harder"
     # weight support must not be traded away for the damping moment
     assert rolling[:, 2].sum() == pytest.approx(still[:, 2].sum(), rel=0.05)
+
+
+def test_q_weights_stay_float_under_runtime_pokes():
+    """The node pokes _Q[i,i] with runtime param floats. An integer-dtype Q
+    would silently truncate them — rate_fb_weight 0.15 became 0 on hardware,
+    turning the damping channel fully off instead of merely weaker."""
+    from legged_control.mpc.srbd_mpc import SRBDMPC
+    m = SRBDMPC(mass=14.55, inertia_body=np.diag([0.02, 0.02, 0.02]))
+    assert np.issubdtype(m._Q.dtype, np.floating)
+    m._Q[6, 6] = 0.15
+    assert m._Q[6, 6] == pytest.approx(0.15)
+
+
+def _long_mpc(wz=800.0, wvz=5.0, wrate=1.0):
+    """MPC at the deployed long-lookahead config (robot.yaml mpc_dt/horizon)."""
+    from legged_control.mpc.srbd_mpc import SRBDMPC
+    inertia = np.diag([0.0196, 0.0228, 0.0169])
+    m = SRBDMPC(mass=13.6, inertia_body=inertia, dt=0.025, horizon=8)
+    m._Q[5, 5] = wz
+    m._Q[11, 11] = wvz
+    m._Q[6, 6] = m._Q[7, 7] = wrate
+    return m
+
+
+def test_long_lookahead_gain_equivalence():
+    """The robot.yaml weights for the 200 ms window must reproduce the
+    hardware-validated effective z stiffness of the old 60 ms window
+    (z_fb_weight 2000 @ dt 0.01 × N 6 ≈ 3200 N/m). Guards the calibration:
+    anyone changing mpc_dt/horizon/weights must keep these gains matched."""
+    m = _long_mpc()
+    ref = np.zeros(12); ref[5] = 0.27
+    schedule = [[True] * 4] * 8
+    feet = _spread_feet()
+
+    def sum_fz(state):
+        return m.solve(state, ref, feet, schedule).reshape(4, 3)[:, 2].sum()
+
+    base = sum_fz(ref.copy())
+    sag = ref.copy(); sag[5] -= 0.02
+    kz = (sum_fz(sag) - base) / 0.02
+    assert 2700.0 < kz < 3700.0, f"z stiffness {kz:.0f} N/m drifted from ~3200"
+
+    fall = ref.copy(); fall[11] = -0.2
+    kvz = (sum_fz(fall) - base) / 0.2
+    assert 300.0 < kvz < 600.0, f"vz damping {kvz:.0f} N/(m/s) drifted from ~440"
+
+
+def test_long_lookahead_preloads_before_contact_flip():
+    """The point of the long window: a lift-off scheduled mid-horizon must
+    change the force NOW. With FR+RL leaving at step 2 (50 ms ahead) the QP
+    should push harder in total — building upward momentum before support
+    thins out — versus the same instant with no flip in sight."""
+    m = _long_mpc()
+    ref = np.zeros(12); ref[5] = 0.27
+    feet = _spread_feet()
+
+    steady = [[True] * 4] * 8
+    flip = [[True] * 4] * 2 + [[True, False, False, True]] * 6  # FL+RR leave
+
+    fz_steady = m.solve(ref.copy(), ref, feet, steady).reshape(4, 3)[:, 2]
+    fz_flip = m.solve(ref.copy(), ref, feet, flip).reshape(4, 3)[:, 2]
+
+    assert fz_flip.sum() > fz_steady.sum() + 5.0, (
+        "QP must pre-load against the upcoming support loss"
+    )
+    # the legs that stay (FR idx 0, RL idx 3) should carry the increase
+    staying = fz_flip[0] + fz_flip[3]
+    steady_pair = fz_steady[0] + fz_steady[3]
+    assert staying > steady_pair, "extra force must go to the legs that remain"
+
+
+def test_fractional_contact_scales_continuously():
+    """Contact shares (0..1) must shrink a leg's force bounds with the share
+    and vanish at 0 — the schedule quantization fix: a flip time sliding
+    across a prediction-step boundary may not step the solution."""
+    m = _long_mpc()
+    ref = np.zeros(12); ref[5] = 0.27
+    feet = _spread_feet()
+
+    def solve_fr(share):
+        sched = [[share, 1.0, 1.0, 1.0]] + [[True] * 4] * 7
+        return m.solve(ref.copy(), ref, feet, sched).reshape(4, 3)
+
+    full = solve_fr(1.0)
+    half = solve_fr(0.5)
+    gone = solve_fr(0.0)
+    assert gone[0].sum() == 0.0, "zero share must zero the force"
+    assert half[0, 2] <= 0.5 * m._f_max + 1e-9, "bounds must scale with share"
+    # continuity across the boolean end of the range
+    near = solve_fr(0.999)
+    assert abs(near[0, 2] - full[0, 2]) < 2.0, "share→1 must approach bool result"
+
+
+def test_slew_anchor_pulls_solution_toward_previous():
+    """With slew_weight on, solve(u_prev=…) must move part-way from u_prev
+    toward the unanchored optimum and converge to it over repeated solves.
+    Default slew_weight=0.0 keeps solve() history-free."""
+    from legged_control.mpc.srbd_mpc import SRBDMPC
+    inertia = np.diag([0.0196, 0.0228, 0.0169])
+    ref = np.zeros(12); ref[5] = 0.27
+    feet = _spread_feet()
+    sched = [[True] * 4] * 8
+
+    m0 = SRBDMPC(mass=13.6, inertia_body=inertia, dt=0.025, horizon=8)
+    free = m0.solve(ref.copy(), ref, feet, sched)
+    anchored_off = m0.solve(ref.copy(), ref, feet, sched, u_prev=free * 2.0)
+    np.testing.assert_allclose(anchored_off, free, atol=1e-6)  # 0.0 → no-op
+
+    m = SRBDMPC(mass=13.6, inertia_body=inertia, dt=0.025, horizon=8,
+                slew_weight=1e-3)
+    sag = ref.copy(); sag[5] -= 0.02
+    target = m.solve(sag, ref, feet, sched).reshape(4, 3)[:, 2].sum()
+    base_u = m.solve(ref.copy(), ref, feet, sched)
+    base = base_u.reshape(4, 3)[:, 2].sum()
+
+    u = base_u.copy()
+    prev_fz = base
+    for _ in range(10):
+        u = m.solve(sag, ref, feet, sched, u_prev=u)
+        fz = u.reshape(4, 3)[:, 2].sum()
+        assert fz >= prev_fz - 1e-6, "anchored response must move monotonically"
+        prev_fz = fz
+    assert base + 0.6 * (target - base) < prev_fz <= target + 1.0, (
+        "must converge toward the unanchored optimum"
+    )

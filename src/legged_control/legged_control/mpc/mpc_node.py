@@ -126,6 +126,10 @@ _Z_ERR_CLIP = 0.05       # m — cap on the height error fed to the QP: a wrong
                          # contact set or an IK-failed leg can fake a large
                          # sag, and z weight 200 would turn it into a launch.
 _VZ_CLIP = 0.4           # m/s — same guard on the leg-odometry vertical rate.
+_SCHEDULE_SUBSAMPLES = 5 # per-bucket contact subsamples → fractional contact
+                         # shares. Quantizes flip times at mpc_dt/5 = 5 ms
+                         # instead of a full 25 ms bucket; keeps the per-tick
+                         # QP solution change under the torque-step budget.
 
 # Leg ordering used for stance IK loops: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -456,7 +460,26 @@ class MPCNode(Node):
             float(mpc_cfg.get("Izz", 0.0169)),
         ])
         horizon = int(mpc_cfg.get("horizon", 6))
-        self._mpc = SRBDMPC(mass=mass, inertia_body=inertia, dt=self._dt, horizon=horizon)
+        # MPC internal prediction step, decoupled from the tick period: the
+        # QP re-solves every tick regardless, but predicts mpc_dt·horizon
+        # ahead. At tick dt (10 ms) a horizon of 6 sees only 60 ms — less
+        # than one hand-off — so contact flips arrive unannounced and the
+        # load transfer is done entirely by the reactive ramp. 0.025×8 =
+        # 200 ms covers a full swing: the QP sees the upcoming touchdown /
+        # lift-off inside its window and starts migrating force beforehand.
+        # NOTE: effective gains scale with the window — z_fb_weight /
+        # vz_fb_weight / rate_fb_weight defaults are calibrated per
+        # (mpc_dt, horizon) pair; changing one means re-checking the others
+        # (sweep in tests/test_mpc.py::test_long_lookahead_gain_equivalence).
+        mpc_dt = float(mpc_cfg.get("mpc_dt", self._dt))
+        # grf_slew_weight: Δu continuity cost inside the QP (see srbd_mpc).
+        # Calibrated offline via check_tau_continuity: keeps the hand-off
+        # pre-load spread over the double-support window instead of slammed
+        # into the last ~40 ms before the flip.
+        slew_w = float(mpc_cfg.get("grf_slew_weight", 0.0))
+        self._mpc = SRBDMPC(mass=mass, inertia_body=inertia, dt=mpc_dt,
+                            horizon=horizon, slew_weight=slew_w)
+        self._grf_prev: np.ndarray | None = None  # last projected GRF (Δu anchor)
         self._tau_blend = 0.0            # global enable ramp state
         self._tau_lp = [0.0] * 12        # low-passed output torque
         self._rate_lp = np.zeros(3)      # low-passed world-frame body rate
@@ -755,13 +778,15 @@ class MPCNode(Node):
                 )
             try:
                 grf = self._mpc.solve(
-                    srbd_state, state_ref, foot_pos_world, contact_schedule
+                    srbd_state, state_ref, foot_pos_world, contact_schedule,
+                    u_prev=self._grf_prev,
                 )
                 # Vertical-only projection (weight + leveling moments kept,
                 # net horizontal push removed), then load ramp + hand-off at
                 # force level: total commanded force stays equal to the
                 # projected solution through every contact flip.
                 grf = _project_vertical_grf(grf, foot_pos_world)
+                self._grf_prev = grf.copy()
                 grf = _apply_load_ramp(grf, leg_scale, mu=self._mpc._mu)
                 fz = grf.reshape(4, 3)[:, 2]
                 dbg = Float32MultiArray()
@@ -786,6 +811,7 @@ class MPCNode(Node):
                     f"[mpc/tau] solver failed: {exc}", throttle_duration_sec=2.0
                 )
                 tau_raw = [t * 0.8 for t in self._tau_lp]
+                self._grf_prev = None  # don't pull the next solve toward stale force
 
         a_lp = min(1.0, self._dt / _TAU_LP_TAU)
         self._tau_lp = [p + a_lp * (t - p) for p, t in zip(self._tau_lp, tau_raw)]
@@ -1088,11 +1114,27 @@ class MPCNode(Node):
                   if gait_state[leg]["contact"] else 0.0)
             for leg in LEG_NAMES
         }
-        contact_schedule = [
-            [self._gait.query(now + k * self._dt)[leg]["contact"]
-             for leg in _MPC_LEG_ORDER]
-            for k in range(self._mpc._N)
-        ]
+        # Future contacts sampled at the MPC's own step, not the tick period
+        # — this is what gives the QP its lookahead. Each entry is the
+        # fraction of that prediction step spent in contact (subsampled),
+        # not a boolean: with mpc_dt > tick dt a flip time would otherwise
+        # jump a whole bucket between consecutive ticks and step the QP
+        # solution (~3 Nm/tick on the calves, verified offline). Foot
+        # positions are held at their current commanded targets across the
+        # window; a foot that touches down mid-horizon is a few cm off its
+        # true landing spot, a second-order moment-arm error we accept.
+        mdt = self._mpc._dt
+        contact_schedule = []
+        for k in range(self._mpc._N):
+            frac = [0.0] * 4
+            for j in range(_SCHEDULE_SUBSAMPLES):
+                gs_k = self._gait.query(
+                    now + (k + (j + 0.5) / _SCHEDULE_SUBSAMPLES) * mdt
+                )
+                for i, leg in enumerate(_MPC_LEG_ORDER):
+                    if gs_k[leg]["contact"]:
+                        frac[i] += 1.0 / _SCHEDULE_SUBSAMPLES
+            contact_schedule.append(frac)
         tau = self._tau_feedforward(
             joint_targets, leg_scale, contact_schedule,
             stance_h, vel_xy, yaw_rate,
@@ -1151,6 +1193,7 @@ class MPCNode(Node):
                     self._tau_lp = [0.0] * 12
                     self._rate_lp = np.zeros(3)
                     self._z_lp = None
+                    self._grf_prev = None
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1163,6 +1206,7 @@ class MPCNode(Node):
                 self._tau_lp = [0.0] * 12
                 self._rate_lp = np.zeros(3)
                 self._z_lp = None
+                self._grf_prev = None
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 
