@@ -79,17 +79,6 @@ class MotorCommandBridge(Node):
         dt = (now - self._last_time) if has_prev else 0.02
         self._last_time = now
 
-        # Upstream dq feedforward, if the publisher fills it (mpc_node does,
-        # policy_node doesn't). Prefer it over our own finite diff: upstream
-        # differentiates on its fixed tick grid, while (q - last)/arrival_dt
-        # rides the message-arrival jitter — and motor_bus uses dq both to
-        # extrapolate the 1 kHz position target and as rotor-side velocity
-        # feedforward (× gear ratio), so that jitter comes out as torque
-        # noise pulses whenever the legs move fast.
-        vel_map: dict[str, float] = {}
-        if len(msg.velocity) == len(msg.name):
-            vel_map = {n: float(v) for n, v in zip(msg.name, msg.velocity)}
-
         effort_map: dict[str, float] = {}
         if len(msg.effort) == len(msg.name):
             for _n, _e in zip(msg.name, msg.effort):
@@ -109,14 +98,11 @@ class MotorCommandBridge(Node):
                 max(float(cfg["q_min"]), min(float(cfg["q_max"]), q_urdf))
             )
             q_motor = direction * (q_urdf_clipped - zero_offset)
-            if name in vel_map:
-                # zero_offset is constant, so dq_motor = direction * dq_urdf
-                dq = direction * vel_map[name]
-            elif has_prev:
+            if has_prev:
                 dq = (q_motor - self._last_cmd[name]) / dt
+                dq = max(-self._max_joint_speed, min(self._max_joint_speed, dq))
             else:
                 dq = 0.0
-            dq = max(-self._max_joint_speed, min(self._max_joint_speed, dq))
             tau_urdf  = float(effort_map.get(name, 0.0))
             tau_motor = direction * tau_urdf / gear_ratio
             self._last_cmd[name] = q_motor
