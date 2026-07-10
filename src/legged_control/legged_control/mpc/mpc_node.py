@@ -833,7 +833,10 @@ class MPCNode(Node):
         if update_anchors:
             foot_body = {}
             for leg in LEG_NAMES:
-                if float(leg_scale.get(leg, 0.0)) > 0.5:
+                # 0.75: sample anchors near peak load only — late/early
+                # stance carries the most tracking-error and sag-phase
+                # noise (it was what stop-freezes used to capture).
+                if float(leg_scale.get(leg, 0.0)) > 0.75:
                     q = tuple(self._joint_pos[j] for j in _leg_joints(leg))
                     mx, my = _hip_mount_xy(leg)
                     p = np.asarray(forward_kinematics(leg, q), dtype=float)
@@ -868,6 +871,30 @@ class MPCNode(Node):
         r_ref, p_ref = self._terrain.ref_attitude()
         att_ref = (self._terrain_att_blend * r_ref, self._terrain_att_blend * p_ref)
         return plane, att_ref
+
+    def _terrain_snapshot(self) -> None:
+        """Re-anchor ALL four legs from measured FK in one shot.
+
+        Walking anchors are each leg's LAST loaded sample — four different
+        instants, four different body sag/pitch phases; freezing that mix at
+        a stop locks in whatever transient the stop happened to catch
+        (hardware 2026-07-10: standing lean after some stops, level after
+        others — a lottery). A simultaneous snapshot shares one body pose
+        across all four points, so common-mode sag/pitch cancels exactly:
+        on flat ground it freezes flat, on a slope it freezes the slope.
+        Callers must ensure all four feet are physically grounded (stop
+        transitions only fire inside an all-contact window; WALK entry
+        follows a completed standup)."""
+        R_body = self._R_body_est()
+        foot_body = {}
+        for leg in LEG_NAMES:
+            q = tuple(self._joint_pos[j] for j in _leg_joints(leg))
+            mx, my = _hip_mount_xy(leg)
+            p = np.asarray(forward_kinematics(leg, q), dtype=float)
+            foot_body[leg] = p + np.array([mx, my, 0.0])
+        self._terrain.update(
+            foot_body, {leg: 1.0 for leg in LEG_NAMES}, R_body, self._dt
+        )
 
     def _tau_feedforward(
         self,
@@ -1249,6 +1276,9 @@ class MPCNode(Node):
             self._prev_cmd_q = {n: None for n in _YAML_JOINTS}
             self._vel_filt[:] = 0.0
             self._walking = False
+            # Coherent re-anchor before the standing freeze — see
+            # _terrain_snapshot (all four feet grounded in this window).
+            self._terrain_snapshot()
             return self._balance_stance(stance_h)
         # Read back from the scheduler (post-clamp), not the raw parameter:
         # trajectory and contact schedule must share one swing_ratio.
@@ -1456,7 +1486,10 @@ class MPCNode(Node):
                     self._rate_lp = np.zeros(3)
                     self._z_lp = None
                     self._grf_prev = None
+                    # Snapshot, not flat reset: standing up ON a slope
+                    # should learn the real ground immediately.
                     self._terrain.reset(self._stance_h)
+                    self._terrain_snapshot()
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1471,6 +1504,7 @@ class MPCNode(Node):
                 self._z_lp = None
                 self._grf_prev = None
                 self._terrain.reset(self._stance_h)
+                self._terrain_snapshot()
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 
