@@ -58,6 +58,17 @@ from legged_control.mpc.swing_trajectory import (
 )
 
 
+def _sway_for(leg: str) -> np.ndarray:
+    """Crawl body-sway: FEET-target offset while `leg` swings, chosen so
+    the BODY shifts away from the lifting corner toward the centroid of the
+    three support feet (CoM inside the support triangle = the static
+    stability of the crawl). Feet are pinned, so commanding all targets
+    toward the lifted corner's quadrant moves the body the opposite way —
+    the two negations (away-from-corner, body-vs-feet) cancel."""
+    _, lat_sign, x_sign = _leg_signs(leg)
+    return np.array([x_sign * _SWAY_X, lat_sign * _SWAY_Y])
+
+
 def _leg_contact(joint_eff: dict[str, float], leg: str, thresh: float) -> bool:
     """Measured-contact proxy: calf torque magnitude. A swinging leg carries
     only its own link dynamics (~1 Nm at gait speeds); ground contact loads
@@ -186,6 +197,21 @@ _DETECT_BLEND_TAU = 0.08 # s — per-leg load-gate blend when measured contact
 _EFF_FRESH_S = 0.5       # s — effort telemetry older than this disables
                          # detection (old aggregator build / sim would read
                          # all-zero torque = "no leg ever touches ground")
+# Stair mode (crawl gait): the program owns the pace, the stick only points.
+_STAIR_MIN_PERIOD = 2.0  # s — crawl cycle floor. Sets the swing time
+                         # (0.24 × 2.0 = 0.48 s): with the 12 cm stair
+                         # clearance the foot's peak vertical speed is
+                         # ~0.8 m/s — twice normal walking, not the 4×
+                         # that a 1.2 s cycle produced (hardware verdict:
+                         # dangerous flailing).
+_STAIR_SWING_RATIO = 0.24 # one leg at a time, 3 always planted (max 0.24)
+_STAIR_SPEED_CAP = 0.08  # m/s — governed forward speed on stairs
+_STAIR_VY_CAP = 0.03     # m/s — lateral cap (alignment nudges only)
+_STAIR_YAW_CAP = 0.15    # rad/s — heading nudges only
+_STAIR_MIN_STEP_H = 0.12 # m — clearance floor over a 100 mm riser
+_SWAY_X = 0.015          # m — crawl body sway, fore-aft component
+_SWAY_Y = 0.03           # m — crawl body sway, lateral component
+_SWAY_TAU = 0.2          # s — sway low-pass (smooth weight shift)
 _ATT_DZ_MAX = 0.04       # m — clamp on per-foot attitude-leveling z correction
 _ATT_TILT_TAU = 0.10     # s — low-pass on the tilt (gravity) signal: keeps
                          # touchdown-impact noise out of the foot targets.
@@ -596,6 +622,9 @@ class MPCNode(Node):
         self.declare_parameter(
             "contact_detect_enabled", bool(mpc_cfg.get("contact_detect_enabled", False))
         )
+        # Stair mode: crawl gait + governed speed + full clearance + contact
+        # detection, one switch. Gait mode itself only flips while standing.
+        self.declare_parameter("stair_mode", bool(mpc_cfg.get("stair_mode", False)))
         self.declare_parameter(
             "contact_tau_thresh", float(mpc_cfg.get("contact_tau_thresh", 3.0))
         )
@@ -668,6 +697,8 @@ class MPCNode(Node):
         self._td_z: dict[str, float | None] = {leg: None for leg in LEG_NAMES}
         self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}       # ≤ 0, stance probe
         self._detect_blend = {leg: 1.0 for leg in LEG_NAMES}   # load gate
+        self._sway = np.zeros(2)          # LP'd crawl body-sway (x, y)
+        self._sway_target = np.zeros(2)
 
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
@@ -1250,6 +1281,10 @@ class MPCNode(Node):
             float(self.get_parameter("low_spread_max").value),
         )
         dz = self._attitude_dz()
+        # standing: sway decays to centered, still applied while nonzero so
+        # the stop transition never steps the body sideways
+        a_sw = min(1.0, self._dt / _SWAY_TAU)
+        self._sway += a_sw * (0.0 - self._sway)
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = nominal_foot_position(leg, stance_h)
@@ -1260,7 +1295,8 @@ class MPCNode(Node):
                 p_foot[0] + mx, p_foot[1] + y_sp + my,
             )
             p_foot = np.array([
-                p_foot[0], p_foot[1] + y_sp,
+                p_foot[0] + self._sway[0],
+                p_foot[1] + y_sp + self._sway[1],
                 # _leg_ground_dz: stopping on a staircase keeps each foot on
                 # the step it actually stands on, not the nominal plane
                 p_foot[2] + dz[leg] + dz_t + self._leg_ground_dz[leg],
@@ -1296,8 +1332,27 @@ class MPCNode(Node):
         # especially, since the node reads its param per tick for the foot
         # trajectory and an unsynced scheduler would flip contacts on a
         # different clock than the trajectory it gates.
-        self._gait.set_period(float(self.get_parameter("gait_period").value))
-        self._gait.set_swing_ratio(float(self.get_parameter("swing_ratio").value))
+        stair_req = bool(self.get_parameter("stair_mode").value)
+        if not self._walking:
+            # phase offsets jump on a gait switch — only flip while standing
+            self._gait.set_mode("crawl" if stair_req else "trot")
+        # EVERY stair override keys on the gait actually running, not the
+        # request: flipping the switch mid-walk previously changed swing
+        # ratio / clearance / period immediately while the trot kept its
+        # phase offsets — a trot flailing 12 cm arcs in 0.24 s swings
+        # (hardware 2026-07-10, the reason this feature was reverted once).
+        # Now a mid-walk flip does nothing until the robot stands.
+        stair = self._gait.mode == "crawl"
+        if stair:
+            step_h = max(step_h, _STAIR_MIN_STEP_H)
+        if stair:
+            self._gait.set_period(max(
+                float(self.get_parameter("gait_period").value), _STAIR_MIN_PERIOD
+            ))
+            self._gait.set_swing_ratio(_STAIR_SWING_RATIO)
+        else:
+            self._gait.set_period(float(self.get_parameter("gait_period").value))
+            self._gait.set_swing_ratio(float(self.get_parameter("swing_ratio").value))
 
         if self._est_stamp is None or (now - self._est_stamp) > _EST_TIMEOUT:
             self.get_logger().warn(
@@ -1363,12 +1418,20 @@ class MPCNode(Node):
         # get opposite fore-aft strokes, which is what turns the body.
         vel_xy = self._vel_filt[0:2]
         yaw_rate = float(self._vel_filt[2])
+        if stair:
+            # Speed governor: the program owns the pace on stairs — the
+            # stick chooses walk/stop/direction, not how fast.
+            vel_xy = np.clip(vel_xy, [-_STAIR_SPEED_CAP, -_STAIR_VY_CAP],
+                             [_STAIR_SPEED_CAP, _STAIR_VY_CAP])
+            yaw_rate = float(np.clip(yaw_rate, -_STAIR_YAW_CAP, _STAIR_YAW_CAP))
 
         # Measured contact (stairs): calf-torque proxy per leg. Gated on
         # fresh effort telemetry so an aggregator build without effort
         # forwarding degrades to schedule-only behavior instead of reading
         # "no leg ever touches the ground".
-        want_detect = bool(self.get_parameter("contact_detect_enabled").value)
+        want_detect = (
+            bool(self.get_parameter("contact_detect_enabled").value) or stair
+        )
         detect_on = (
             want_detect
             and self._eff_stamp is not None
@@ -1440,6 +1503,21 @@ class MPCNode(Node):
             float(self.get_parameter("low_spread_max").value),
         )
 
+        # Crawl body sway: lean toward the support triangle of whichever leg
+        # is (about to be) in the air. Slightly leads the swing so the
+        # weight shift is underway before the foot unloads.
+        if self._gait.mode == "crawl":
+            t_sw = max(swing_ratio * self._gait.period, 1e-6)
+            gs_lead = self._gait.query(now + 0.3 * t_sw)
+            for leg in LEG_NAMES:
+                if not gs_lead[leg]["contact"]:
+                    self._sway_target = _sway_for(leg)
+                    break
+        else:
+            self._sway_target = np.zeros(2)
+        a_sw = min(1.0, self._dt / _SWAY_TAU)
+        self._sway += a_sw * (self._sway_target - self._sway)
+
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
         att_dz = self._attitude_dz()
@@ -1488,7 +1566,12 @@ class MPCNode(Node):
                 p_land[2] += self._leg_ground_dz[leg]
                 # Clearance scales with leg speed so near-zero-stride steps
                 # (stride ramping in/out) stay near the ground.
-                step_scale = min(1.0, float(np.hypot(*v_leg)) / _STEP_VEL_REF)
+                # Stairs: full clearance always — the governed speed sits
+                # below _STEP_VEL_REF and would otherwise shrink the arc
+                # under the 100 mm riser it must clear.
+                step_scale = 1.0 if stair else min(
+                    1.0, float(np.hypot(*v_leg)) / _STEP_VEL_REF
+                )
                 # Endpoint slope −v·T_swing: zero ground-relative foot velocity
                 # at lift-off/touchdown. If body sag keeps the "swinging" foot
                 # loaded near those moments, it then pushes the body the same
@@ -1525,7 +1608,9 @@ class MPCNode(Node):
                 p_foot[0] + mx, p_foot[1] + y_sp + my,
             )
             p_foot = np.array([
-                p_foot[0], p_foot[1] + y_sp, p_foot[2] + att_dz[leg] + dz_t
+                p_foot[0] + self._sway[0],
+                p_foot[1] + y_sp + self._sway[1],
+                p_foot[2] + att_dz[leg] + dz_t,
             ])
 
             preferred = tuple(self._joint_pos[j] for j in _leg_joints(leg))
