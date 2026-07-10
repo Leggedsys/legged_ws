@@ -1300,16 +1300,16 @@ def test_shin_joint_limits_and_flat_contract():
             q1, q2, q3 = shin_stance_joints(s, off)
             assert q1 == 0.0
             assert q2 + q3 == pytest.approx(-np.pi / 2 + SHIN_PITCH, abs=1e-9)
-            assert abs(q2) <= 0.26
-            assert -2.35 <= q3 <= -0.9
+            assert abs(q2) <= 0.32
+            assert -2.40 <= q3 <= -0.9
             q1, q2, q3 = shin_swing_joints(s, off)
             assert q1 == 0.0
-            assert abs(q2) <= 0.26
-            assert -2.35 <= q3 <= -0.9
+            assert abs(q2) <= 0.32
+            assert -2.40 <= q3 <= -0.9
 
 
 def test_shin_body_height_bob_small():
-    """Body height variation over the stance sweep at max stride ≤ 6 mm —
+    """Body height variation over the stance sweep at max stride ≤ 10 mm —
     the knee-under-hip sweet spot (cos flat near q2=0)."""
     from legged_control.mpc.shin_gait import (
         shin_stance_joints, shin_body_height, KNEE_OFFSET_MAX,
@@ -1319,7 +1319,7 @@ def test_shin_body_height_bob_small():
         forward_kinematics("FR", shin_stance_joints(s, KNEE_OFFSET_MAX))[2]
         for s in np.linspace(0.0, 1.0, 41)
     ]
-    assert max(zs) - min(zs) < 0.006
+    assert max(zs) - min(zs) < 0.010
     # deepest foot target (= tallest body) is exactly mid-sweep, q2 = 0
     assert min(zs) == pytest.approx(-shin_body_height(), abs=1e-9)
 
@@ -1347,4 +1347,4 @@ def test_shin_default_speed_fits_stride_budget():
     from legged_control.mpc.mpc_node import _SHIN_MIN_PERIOD, _STAIR_SWING_RATIO
     from legged_control.mpc.shin_gait import KNEE_OFFSET_MAX
     t_stance = _SHIN_MIN_PERIOD * (1.0 - _STAIR_SWING_RATIO)
-    assert 0.04 * t_stance * 0.5 <= KNEE_OFFSET_MAX
+    assert 0.07 * t_stance * 0.5 <= KNEE_OFFSET_MAX

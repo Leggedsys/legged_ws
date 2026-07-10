@@ -41,9 +41,11 @@ SHIN_PITCH = 0.05
 # Extra calf fold at mid-swing: lifts the foot ~8.7 cm above the deck while
 # the knee arcs low. Keeps q3 ≥ −2.28, well off the −2.65 fold stop.
 SHIN_FOLD = 0.5
-# Knee stroke half-amplitude clamp (m). asin(0.045/L2) = 0.253 rad of thigh
-# keeps every joint far inside its limits and the body bob under 6 mm.
-KNEE_OFFSET_MAX = 0.045
+# Knee stroke half-amplitude clamp (m). asin(0.055/L2) = 0.311 rad of thigh
+# keeps every joint inside its limits (calf swing floor −2.33, stop −2.65)
+# at a body bob of ~9 mm per stride — hardware called the 0.045/6 mm
+# version "很稳" (2026-07-11), so the bob budget was spent on speed.
+KNEE_OFFSET_MAX = 0.055
 
 
 def _smoothstep(u: float) -> float:
