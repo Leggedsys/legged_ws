@@ -1177,3 +1177,87 @@ def test_renorm_levels_clear_drains_everything():
     for _ in range(500):
         _renorm_levels(dz, 0.01, clear=True)
     assert all(abs(v) < 1e-6 for v in dz.values())
+
+# ── Hurdle mode (cross a thin ~150 mm board) ─────────────────────────────────
+
+def test_hurdle_flat_top_holds_full_height():
+    """Trapezoid profile: full height across the whole centered flat window,
+    ground-level endpoints — the board is cleared anywhere in the window."""
+    from legged_control.mpc.swing_trajectory import swing_foot_position
+    p0 = np.array([0.0645, 0.1127, -0.29])
+    p1 = np.array([0.0645, 0.1127, -0.29])
+    H = 0.17
+    for s in (0.36, 0.5, 0.64):
+        z = swing_foot_position(s, p0, p1, H, flat_top=0.3)[2]
+        assert z == pytest.approx(-0.29 + H, abs=1e-9), s
+    for s in (0.0, 1.0):
+        z = swing_foot_position(s, p0, p1, H, flat_top=0.3)[2]
+        assert z == pytest.approx(-0.29, abs=1e-9), s
+    # >150 mm window must span a wide fraction of the swing (cosine arc
+    # with the same 0.17 peak only manages ~23%)
+    ss = np.linspace(0.0, 1.0, 1001)
+    zs = np.array([swing_foot_position(s, p0, p1, H, flat_top=0.3)[2] for s in ss])
+    assert float(np.mean(zs > -0.29 + 0.15)) > 0.40
+
+
+def test_hurdle_vertical_speed_in_validated_band():
+    """Peak vertical foot speed at the hurdle period floor must stay near the
+    stair-v2 hardware-validated level (~0.8 m/s), despite the taller lift."""
+    from legged_control.mpc.swing_trajectory import swing_foot_position
+    from legged_control.mpc.mpc_node import (
+        _HURDLE_MIN_PERIOD, _HURDLE_FLAT_TOP, _STAIR_SWING_RATIO,
+    )
+    t_sw = _HURDLE_MIN_PERIOD * _STAIR_SWING_RATIO
+    p0 = np.array([0.0645, 0.1127, -0.29])
+    ss = np.linspace(0.0, 1.0, 2001)
+    zs = np.array([
+        swing_foot_position(s, p0, p0, 0.17, flat_top=_HURDLE_FLAT_TOP)[2]
+        for s in ss
+    ])
+    vz = np.abs(np.diff(zs) / (np.diff(ss) * t_sw))
+    assert float(vz.max()) < 1.0
+
+
+def test_hurdle_swing_ik_feasible_within_limits():
+    """The whole hurdle swing (0.17 m lift, hurdle body height 0.29, stair
+    stride at 0.08 m/s, period 3.5) must be IK-reachable AND inside the
+    robot.yaml joint limits for a front and a rear leg."""
+    from legged_control.mpc.swing_trajectory import (
+        swing_foot_position, landing_target, stance_foot_position,
+    )
+    from legged_control.kinematics import inverse_kinematics
+    period, ratio, h, lift = 3.5, 0.24, 0.29, 0.17
+    v = np.array([0.08, 0.0])
+    t_sw = period * ratio
+    thigh_max = {"FR": 1.8, "RL": 2.0}
+    for leg in ("FR", "RL"):
+        p_lift = np.asarray(stance_foot_position(leg, 1.0, v, period, ratio, h))
+        p_land = np.asarray(landing_target(leg, v, period, ratio, h))
+        for s in np.linspace(0.0, 1.0, 41):
+            p = swing_foot_position(
+                s, p_lift, p_land, lift,
+                xy_end_slope=-v * t_sw, flat_top=0.3,
+            )
+            q = inverse_kinematics(leg, tuple(p))
+            assert q is not None, f"{leg} s={s:.3f} unreachable at {p}"
+            q1, q2, q3 = q
+            assert abs(q1) <= 0.4 + 1e-6, f"{leg} s={s:.3f} hip {q1:.3f}"
+            assert -0.5 - 1e-6 <= q2 <= thigh_max[leg] + 1e-6, \
+                f"{leg} s={s:.3f} thigh {q2:.3f}"
+            assert -2.60 <= q3 <= -0.9 + 1e-6, \
+                f"{leg} s={s:.3f} calf {q3:.3f} (fold margin 0.05)"
+
+
+def test_hurdle_plain_arc_unchanged():
+    """flat_top=0 (and the default) must reproduce the original raised-cosine
+    arc bit-for-bit — hurdle mode off is the hardware-validated baseline."""
+    from legged_control.mpc.swing_trajectory import swing_foot_position
+    import math as _m
+    p0 = np.array([0.05, 0.11, -0.235])
+    p1 = np.array([0.09, 0.11, -0.235])
+    for s in np.linspace(0.0, 1.0, 21):
+        z_default = swing_foot_position(s, p0, p1, 0.04)[2]
+        z_flat0 = swing_foot_position(s, p0, p1, 0.04, flat_top=0.0)[2]
+        z_ref = -0.235 + 0.04 * 0.5 * (1.0 - _m.cos(2.0 * _m.pi * s))
+        assert z_default == pytest.approx(z_ref, abs=1e-12)
+        assert z_flat0 == pytest.approx(z_ref, abs=1e-12)

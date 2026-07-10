@@ -35,12 +35,38 @@ def leg_velocity(body_vel_xy: np.ndarray, yaw_rate: float, leg: str) -> np.ndarr
     ])
 
 
+def _z_profile(s: float, flat_top: float) -> float:
+    """Vertical clearance profile in [0,1] over swing progress s.
+
+    flat_top = 0 keeps the raised-cosine arc (full height only at the
+    single instant s=0.5). flat_top > 0 turns it into a smoothstep
+    trapezoid that HOLDS full height over the centered flat_top fraction
+    of the swing — for stepping over an obstacle whose position along
+    the stride the operator cannot place precisely (hurdle mode: a thin
+    150 mm board is cleared anywhere inside the flat window instead of
+    only at exact mid-swing). Smoothstep edges keep zero slope at
+    lift-off, touchdown AND both flat-top junctions, so touchdown stays
+    as soft as the cosine arc's.
+    """
+    if flat_top <= 0.0:
+        return 0.5 * (1.0 - math.cos(2.0 * math.pi * s))
+    r = max((1.0 - float(flat_top)) / 2.0, 1e-6)
+    if s < r:
+        u = s / r
+    elif s > 1.0 - r:
+        u = (1.0 - s) / r
+    else:
+        return 1.0
+    return u * u * (3.0 - 2.0 * u)
+
+
 def swing_foot_position(
     s: float,
     p_lift: np.ndarray,
     p_land: np.ndarray,
     step_height: float = 0.06,
     xy_end_slope: np.ndarray | None = None,
+    flat_top: float = 0.0,
 ) -> np.ndarray:
     """Foot position at swing progress s ∈ [0,1].
 
@@ -55,6 +81,8 @@ def swing_foot_position(
                      still loaded there (body sag), it pushes the same way the
                      stance legs do instead of scuffing the body backward.
                      None keeps the plain linear interpolation.
+        flat_top:    fraction of the swing held at full step_height (see
+                     _z_profile); 0 keeps the plain arc.
 
     Returns:
         3-element array (x, y, z) in hip frame
@@ -71,10 +99,10 @@ def swing_foot_position(
         h01 = -2 * s**3 + 3 * s**2
         h11 = s**3 - s**2
         xy = h00 * p_lift[:2] + h01 * p_land[:2] + (h10 + h11) * m
-    # raised-cosine arc: 0 at endpoints, peak at s=0.5, and — unlike sin(πs) —
-    # zero vertical velocity at both endpoints, so touchdown is soft instead
-    # of descending at peak speed straight into the ground target.
-    z_arc = step_height * 0.5 * (1.0 - math.cos(2.0 * math.pi * s))
+    # raised-cosine arc (or smoothstep trapezoid when flat_top > 0): 0 at the
+    # endpoints with zero vertical velocity, so touchdown is soft instead of
+    # descending at peak speed straight into the ground target.
+    z_arc = step_height * _z_profile(s, flat_top)
     # z baseline interpolates between the endpoint heights (not min of them):
     # when the stance height changes mid-swing (/height_command), the lift and
     # land z differ, and pinning the baseline to one of them makes touchdown

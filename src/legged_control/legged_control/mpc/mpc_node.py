@@ -237,6 +237,18 @@ _LEVEL_RENORM_RATE = 0.04 # m/s — once ALL feet share a common level offset
                           # after the rear pair lands, bookkeeping resets
                           # itself and the next step starts from zero.
 _STEP_PENDING_TTL = 10.0  # s — an unconsumed step-up press expires
+# Hurdle mode (cross a thin ~150 mm board, on top of stair/crawl mode).
+# The lift budget is bounded by the calf fold limit (min hip→foot distance
+# ≈ 0.088 m), so most of the clearance comes from RAISING THE BODY, and the
+# rest from a taller, flat-topped swing. Hip abduction was measured (2026-
+# 07-11) to be a true mechanical ±0.4 rad limit — worth only ~7 mm, unused.
+_HURDLE_MIN_PERIOD = 3.5  # s — cycle floor while hurdling: swing 0.84 s
+                          # keeps the 0.17 m trapezoid's peak vertical foot
+                          # speed ~0.87 m/s, the stair-v2-validated band.
+_HURDLE_FLAT_TOP = 0.3    # fraction of swing held at FULL height: widens
+                          # the ">150 mm" window along the stride from ~4 cm
+                          # (cosine arc) to ~12 cm — clearing the board stops
+                          # depending on which centimeter it sits under.
 _RISE_CLEARANCE = 0.04    # m — extra swing clearance while a leg executes a
                           # level change (the arc must clear the riser EDGE,
                           # not just reach the tread height)
@@ -659,6 +671,16 @@ class MPCNode(Node):
         # Operator-triggered step-up: rise per /step_command press (the
         # 100 mm stair, plus a little for the foot to land flat on it).
         self.declare_parameter("stair_rise", float(mpc_cfg.get("stair_rise", 0.10)))
+        # Hurdle mode: raise the body + flat-topped 0.17 m swings to cross a
+        # thin ~150 mm board. Rides on stair mode (crawl gait + governed
+        # speed); latched only while standing, like every gait-level switch.
+        self.declare_parameter("hurdle_mode", bool(mpc_cfg.get("hurdle_mode", False)))
+        self.declare_parameter(
+            "hurdle_step_h", float(mpc_cfg.get("hurdle_step_h", 0.17))
+        )
+        self.declare_parameter(
+            "hurdle_body_h", float(mpc_cfg.get("hurdle_body_h", 0.29))
+        )
         self.declare_parameter(
             "contact_tau_thresh", float(mpc_cfg.get("contact_tau_thresh", 3.0))
         )
@@ -739,6 +761,8 @@ class MPCNode(Node):
         self._level_pending: dict[str, float] = {}
         self._level_clear = False
         self._rise_boost = {leg: False for leg in LEG_NAMES}
+        # hurdle_mode latched at standstill only (mid-walk flips are inert)
+        self._hurdle_latch = False
 
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
@@ -876,6 +900,13 @@ class MPCNode(Node):
         """
         target = self._height_cmd if self._height_cmd is not None \
             else float(self.get_parameter("stance_height").value)
+        if self._hurdle_latch:
+            # hurdle body-height floor: most of the extra foot clearance
+            # comes from the body — the calf fold budget stays untouched.
+            # Same slew path as LT/RT, so engaging/releasing never steps.
+            target = max(
+                target, float(self.get_parameter("hurdle_body_h").value)
+            )
         target = min(max(target, _HEIGHT_MIN), _HEIGHT_MAX)
         max_step = _HEIGHT_SLEW * self._dt
         self._stance_h += float(np.clip(target - self._stance_h, -max_step, max_step))
@@ -1399,11 +1430,29 @@ class MPCNode(Node):
         # (hardware 2026-07-10, the reason this feature was reverted once).
         # Now a mid-walk flip does nothing until the robot stands.
         stair = self._gait.mode == "crawl"
+        # Hurdle mode rides on the crawl and follows the same rule: latched
+        # only while standing, every override keyed on the latch — a mid-walk
+        # parameter flip changes nothing until the robot stands.
+        hurdle_req = bool(self.get_parameter("hurdle_mode").value)
+        if not self._walking:
+            self._hurdle_latch = hurdle_req and stair
+        if hurdle_req and not stair:
+            self.get_logger().warn(
+                "[mpc] hurdle_mode needs the crawl gait — set stair_mode true "
+                "first (while standing), then hurdle_mode",
+                throttle_duration_sec=5.0,
+            )
+        hurdle = self._hurdle_latch and stair
         if stair:
             step_h = max(step_h, _STAIR_MIN_STEP_H)
+            if hurdle:
+                step_h = max(
+                    step_h, float(self.get_parameter("hurdle_step_h").value)
+                )
         if stair:
             self._gait.set_period(max(
-                float(self.get_parameter("gait_period").value), _STAIR_MIN_PERIOD
+                float(self.get_parameter("gait_period").value),
+                _HURDLE_MIN_PERIOD if hurdle else _STAIR_MIN_PERIOD,
             ))
             self._gait.set_swing_ratio(_STAIR_SWING_RATIO)
         else:
@@ -1660,6 +1709,7 @@ class MPCNode(Node):
                 p_foot = np.asarray(swing_foot_position(
                     s, self._lift_pos[leg], p_land, step_h_leg,
                     xy_end_slope=-v_leg * t_swing,
+                    flat_top=_HURDLE_FLAT_TOP if hurdle else 0.0,
                 ), dtype=float)
                 # Early touchdown (stepping UP: ground arrives mid-descent):
                 # freeze the vertical target where contact fired — stop
