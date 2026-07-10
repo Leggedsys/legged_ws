@@ -118,10 +118,13 @@ try:
             # truth, `ros2 param get/set` still agrees with the pad.
             self._btn_stair = int(cfg.get("btn_stair_mode", 6))
             self._btn_hurdle = int(cfg.get("btn_hurdle_mode", 7))
+            self._btn_shin = int(cfg.get("btn_shin_mode", 8))
             self._prev_stair_btn = 0
             self._prev_hurdle_btn = 0
+            self._prev_shin_btn = 0
             self._stair_on = False
             self._hurdle_on = False
+            self._shin_on = False
             self._axis_lt = int(cfg.get("axis_lt", 2))
             self._axis_rt = int(cfg.get("axis_rt", 5))
             self._max_dz = float(cfg.get("max_dz", 0.03))
@@ -261,6 +264,19 @@ try:
                         )
             self._prev_stair_btn = stair_btn
             self._prev_hurdle_btn = hurdle_btn
+
+            shin_btn = (
+                buttons[self._btn_shin]
+                if 0 <= self._btn_shin < len(buttons) else 0
+            )
+            if _button_is_rising_edge(self._prev_shin_btn, shin_btn):
+                if self._send_mpc_bools({"shin_mode": not self._shin_on}):
+                    self._shin_on = not self._shin_on
+                    self.get_logger().info(
+                        f"SHIN (bridge) MODE -> {'ON' if self._shin_on else 'OFF'}"
+                        " (transition runs at standstill)"
+                    )
+            self._prev_shin_btn = shin_btn
 
             estop_active = (
                 self._btn_estop >= 0

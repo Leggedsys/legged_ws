@@ -24,6 +24,7 @@ toggle: `ros2 param set /mpc_node tau_ff_enabled false`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import os
 import time
 
@@ -55,6 +56,13 @@ from legged_control.mpc.swing_trajectory import (
     leg_velocity,
     _HIP_MOUNT_X,
     _HIP_MOUNT_Y,
+)
+from legged_control.mpc.shin_gait import (
+    shin_body_height,
+    shin_pose_joints,
+    shin_stance_joints,
+    shin_swing_joints,
+    KNEE_OFFSET_MAX,
 )
 
 
@@ -252,6 +260,14 @@ _HURDLE_FLAT_TOP = 0.3    # fraction of swing held at FULL height: widens
 _RISE_CLEARANCE = 0.04    # m — extra swing clearance while a leg executes a
                           # level change (the arc must clear the riser EDGE,
                           # not just reach the tread height)
+# Shin mode (断桥): kneel and walk on the shins — see shin_gait.py for the
+# geometry. Transitions are slow whole-body blends, phased one leg at a time
+# in the creep order; walking is the crawl schedule driven in joint space.
+_SHIN_LOWER_T = 2.5      # s — crouch from current height to shin height
+_SHIN_LAY_T = 1.5        # s — per-leg lay-down / stand-up blend
+_SHIN_MIN_PERIOD = 3.5   # s — crawl cycle floor while on shins
+_SHIN_WZ_CAP = 0.08      # rad/s — heading nudges only on the bridge
+_SHIN_LAY_ORDER = ["RL", "FL", "RR", "FR"]  # creep order, same as the crawl
 _SWAY_X = 0.015          # m — crawl body sway, fore-aft component
 _SWAY_Y = 0.03           # m — crawl body sway, lateral component
 _SWAY_TAU = 0.2          # s — sway low-pass (smooth weight shift)
@@ -681,6 +697,16 @@ class MPCNode(Node):
         self.declare_parameter(
             "hurdle_body_h", float(mpc_cfg.get("hurdle_body_h", 0.29))
         )
+        # Shin mode (断桥): kneel and crawl on the shins — line contact spans
+        # plank gaps. Engaged/released only while standing; the transition
+        # sequences run inside _shin_tick.
+        self.declare_parameter("shin_mode", bool(mpc_cfg.get("shin_mode", False)))
+        self.declare_parameter(
+            "shin_speed_cap", float(mpc_cfg.get("shin_speed_cap", 0.02))
+        )
+        self.declare_parameter(
+            "shin_pitch", float(mpc_cfg.get("shin_pitch", 0.05))
+        )
         self.declare_parameter(
             "contact_tau_thresh", float(mpc_cfg.get("contact_tau_thresh", 3.0))
         )
@@ -763,6 +789,14 @@ class MPCNode(Node):
         self._rise_boost = {leg: False for leg in LEG_NAMES}
         # hurdle_mode latched at standstill only (mid-walk flips are inert)
         self._hurdle_latch = False
+        # shin mode mini-FSM: off → lower → lay → on → unlay → off
+        self._shin_phase = "off"
+        self._shin_t0 = 0.0
+        self._shin_leg_i = 0
+        self._shin_q_start: list[float] | None = None
+        self._shin_q_low: dict[str, float] | None = None
+        self._shin_walking = False
+        self._shin_prev_q: dict[str, float | None] = {n: None for n in _YAML_JOINTS}
 
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
@@ -900,7 +934,12 @@ class MPCNode(Node):
         """
         target = self._height_cmd if self._height_cmd is not None \
             else float(self.get_parameter("stance_height").value)
-        if self._hurdle_latch:
+        if self._shin_phase != "off":
+            # shin mode pins the height bookkeeping to the shin geometry so
+            # the exit hand-off back to balance_stance is continuous; the
+            # teleop target resumes (via this same slew) once phase is off.
+            target = shin_body_height(self._shin_pitch())
+        elif self._hurdle_latch:
             # hurdle body-height floor: most of the extra foot clearance
             # comes from the body — the calf fold budget stays untouched.
             # Same slew path as LT/RT, so engaging/releasing never steps.
@@ -1350,6 +1389,224 @@ class MPCNode(Node):
         kp, kd = self._walk_gains({leg: 1.0 for leg in LEG_NAMES})
         return JointCommand(q=q, dq=[0.0]*12, tau=tau, kp=kp, kd=kd), elapsed >= dur
 
+    # ── Shin mode (断桥): kneel and crawl on the shins ────────────────────
+
+    def _shin_pose_targets(self) -> dict[str, float]:
+        q1, q2, q3 = shin_pose_joints(
+            self._shin_pitch()
+        )
+        targets: dict[str, float] = {}
+        for leg in LEG_NAMES:
+            names = _leg_joints(leg)
+            targets[names[0]] = q1
+            targets[names[1]] = q2
+            targets[names[2]] = q3
+        return targets
+
+    def _shin_pitch(self) -> float:
+        return float(self.get_parameter("shin_pitch").value)
+
+    def _shin_low_targets(self) -> dict[str, float]:
+        """Point-foot crouch at the shin body height, matching the
+        balance_stance geometry (including the low-height lateral spread) —
+        the shared endpoint between normal standing and the lay-down
+        sequence, so both transitions are continuous at both ends."""
+        h = shin_body_height(self._shin_pitch())
+        spread = _lateral_spread(
+            h,
+            float(self.get_parameter("low_spread_start").value),
+            float(self.get_parameter("low_spread_max").value),
+        )
+        targets: dict[str, float] = {}
+        for leg in _MPC_LEG_ORDER:
+            p = np.asarray(nominal_foot_position(leg, h), dtype=float).copy()
+            p[1] += _leg_signs(leg)[1] * spread
+            preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
+            q_leg = inverse_kinematics(leg, tuple(p), preferred_joints=preferred)
+            if q_leg is None:
+                q_leg = tuple(_DEFAULT_Q[j] for j in _leg_joints(leg))
+            for jname, qval in zip(_leg_joints(leg), q_leg):
+                targets[jname] = float(qval)
+        return targets
+
+    def _shin_cmd(self, targets: dict[str, float], with_dq: bool = False) -> JointCommand:
+        q = [float(targets[n]) for n in _YAML_JOINTS]
+        dq = [0.0] * 12
+        for i, n in enumerate(_YAML_JOINTS):
+            prev = self._shin_prev_q.get(n)
+            if with_dq and prev is not None:
+                dq[i] = float(np.clip((q[i] - prev) / self._dt, -12.0, 12.0))
+            self._shin_prev_q[n] = q[i]
+        kp, kd = self._fixed_gains()
+        return JointCommand(q=q, dq=dq, tau=[0.0] * 12, kp=kp, kd=kd)
+
+    def _shin_lay_fold(self, u: float) -> float:
+        """Extra calf fold during a lay-down/stand-up blend: lifts the foot
+        mid-move so the shin swings clear instead of dragging, zero at both
+        ends (the blend endpoints are exact)."""
+        from legged_control.mpc.shin_gait import SHIN_FOLD
+        return SHIN_FOLD * 0.5 * (1.0 - math.cos(2.0 * math.pi * float(np.clip(u, 0.0, 1.0))))
+
+    def _shin_tick(self, now: float) -> JointCommand | None:
+        """Shin-mode mini-FSM. Returns the command to publish while the mode
+        owns the legs, or None when it's off (normal control continues).
+
+        off → lower (whole-body joint blend down to shin height)
+            → lay   (one leg at a time, creep order: fold, reach forward,
+                     lay the shin down)
+            → on    (stand on shins / crawl in joint space, speed-capped)
+            → unlay (reverse creep order, back to point feet)
+            → off   (normal stance at shin height; body height slews back up)
+
+        Engaged and released only while standing, like every gait-level
+        mode. Force feedforward is blended out for the whole episode —
+        shin contact invalidates the point-foot Jacobian the QP assumes.
+        """
+        req = bool(self.get_parameter("shin_mode").value)
+        if self._shin_phase == "off":
+            if not (req and not self._walking):
+                return None
+            self._shin_phase = "lower"
+            self._shin_t0 = now
+            self._shin_q_start = list(self._current_pos())
+            self._shin_q_low = self._shin_low_targets()
+            self._shin_prev_q = {n: None for n in _YAML_JOINTS}
+            self._gait.set_mode("crawl")
+            self._tau_lp = [0.0] * 12
+            self.get_logger().info(
+                "[shin] engaging — crouching to shin height, then laying legs "
+                "down one by one (~9 s total)"
+            )
+
+        # pure PD for the whole episode: shin contact breaks the point-foot
+        # Jacobian assumption of the QP. Blend (not cut) both ways.
+        a_b = min(1.0, self._dt / _TAU_BLEND_TAU)
+        self._tau_blend += a_b * (0.0 - self._tau_blend)
+
+        if self._shin_phase == "lower":
+            s = _smoothstep((now - self._shin_t0) / _SHIN_LOWER_T)
+            targets = {
+                n: self._shin_q_start[i] * (1.0 - s) + self._shin_q_low[n] * s
+                for i, n in enumerate(_YAML_JOINTS)
+            }
+            if (now - self._shin_t0) >= _SHIN_LOWER_T:
+                self._shin_phase = "lay"
+                self._shin_leg_i = 0
+                self._shin_t0 = now
+                self.get_logger().info("[shin] at shin height — laying legs down")
+            return self._shin_cmd(targets)
+
+        if self._shin_phase == "lay":
+            pose = self._shin_pose_targets()
+            targets = dict(self._shin_q_low)
+            for k in range(self._shin_leg_i):
+                for j in _leg_joints(_SHIN_LAY_ORDER[k]):
+                    targets[j] = pose[j]
+            leg = _SHIN_LAY_ORDER[self._shin_leg_i]
+            u = (now - self._shin_t0) / _SHIN_LAY_T
+            b = _smoothstep(u)
+            names = _leg_joints(leg)
+            for j in names:
+                targets[j] = self._shin_q_low[j] * (1.0 - b) + pose[j] * b
+            targets[names[2]] -= self._shin_lay_fold(u)
+            if u >= 1.0:
+                self._shin_leg_i += 1
+                self._shin_t0 = now
+                if self._shin_leg_i >= len(_SHIN_LAY_ORDER):
+                    self._shin_phase = "on"
+                    self._shin_walking = False
+                    self.get_logger().info(
+                        "[shin] ACTIVE — crawl on shins, speed capped; "
+                        "release the switch while standing to exit"
+                    )
+            return self._shin_cmd(targets)
+
+        if self._shin_phase == "unlay":
+            pose = self._shin_pose_targets()
+            order = list(reversed(_SHIN_LAY_ORDER))
+            targets = self._shin_pose_targets()
+            for k in range(self._shin_leg_i):
+                for j in _leg_joints(order[k]):
+                    targets[j] = self._shin_q_low[j]
+            leg = order[self._shin_leg_i]
+            u = (now - self._shin_t0) / _SHIN_LAY_T
+            b = _smoothstep(u)
+            names = _leg_joints(leg)
+            for j in names:
+                targets[j] = pose[j] * (1.0 - b) + self._shin_q_low[j] * b
+            targets[names[2]] -= self._shin_lay_fold(u)
+            if u >= 1.0:
+                self._shin_leg_i += 1
+                self._shin_t0 = now
+                if self._shin_leg_i >= len(order):
+                    self._shin_phase = "off"
+                    self.get_logger().info(
+                        "[shin] exited — point-foot stance; body height "
+                        "slews back to the commanded target"
+                    )
+            return self._shin_cmd(targets)
+
+        # phase == "on"
+        if not req and not self._shin_walking:
+            self._shin_phase = "unlay"
+            self._shin_leg_i = 0
+            self._shin_t0 = now
+            self._shin_q_low = self._shin_low_targets()
+            self.get_logger().info("[shin] releasing — standing legs back up")
+            return self._shin_cmd(self._shin_pose_targets())
+        return self._shin_walk(now)
+
+    def _shin_walk(self, now: float) -> JointCommand:
+        """Crawl on the shins: the crawl contact schedule drives per-leg
+        joint-space stance/swing profiles. Tightly speed-governed — the
+        stride budget of a single-link (L2) leg is centimeters."""
+        alpha = min(1.0, self._dt / _VEL_FILTER_TAU)
+        self._vel_filt += alpha * (self._cmd_vel - self._vel_filt)
+        cap = float(self.get_parameter("shin_speed_cap").value)
+        vx = float(np.clip(self._vel_filt[0], -cap, cap))
+        wz = float(np.clip(self._vel_filt[2], -_SHIN_WZ_CAP, _SHIN_WZ_CAP))
+        moving = (
+            float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
+            or float(np.max(np.abs(self._vel_filt))) >= _WALK_VEL_THRESH
+        )
+        self._gait.set_period(max(
+            float(self.get_parameter("gait_period").value), _SHIN_MIN_PERIOD
+        ))
+        self._gait.set_swing_ratio(_STAIR_SWING_RATIO)
+
+        if not self._shin_walking:
+            if not moving:
+                return self._shin_cmd(self._shin_pose_targets())
+            self._gait.reset()
+            self._shin_walking = True
+        gait_state = self._gait.query(now)
+        if not moving and all(gait_state[leg]["contact"] for leg in LEG_NAMES):
+            self._gait.reset()
+            self._vel_filt[:] = 0.0
+            self._shin_walking = False
+            return self._shin_cmd(self._shin_pose_targets())
+
+        t_stance = self._gait.period * (1.0 - self._gait.swing_ratio)
+        pitch = self._shin_pitch()
+        targets: dict[str, float] = {}
+        for leg in LEG_NAMES:
+            v_leg = leg_velocity(np.array([vx, 0.0]), wz, leg)
+            off = float(np.clip(
+                float(v_leg[0]) * t_stance * 0.5,
+                -KNEE_OFFSET_MAX, KNEE_OFFSET_MAX,
+            ))
+            if gait_state[leg]["contact"]:
+                q = shin_stance_joints(
+                    self._gait.stance_phase(leg, now), off, pitch
+                )
+            else:
+                q = shin_swing_joints(
+                    self._gait.swing_phase(leg, now), off, pitch
+                )
+            for jname, qval in zip(_leg_joints(leg), q):
+                targets[jname] = float(qval)
+        return self._shin_cmd(targets, with_dq=True)
+
     def _balance_stance(self, stance_h: float) -> JointCommand:
         """Four-foot stance: nominal IK pose + attitude leveling + MPC tau_ff.
         Terrain adaptation stays live here too — standing on a slope keeps
@@ -1411,6 +1668,11 @@ class MPCNode(Node):
 
     def _compute_mpc_joints(self, now: float) -> JointCommand:
         """Run one gait-scheduler step and return a full JointCommand."""
+        # Shin mode owns the legs entirely while engaged (its own joint-space
+        # crawl + transitions); everything below is point-foot control.
+        shin_cmd = self._shin_tick(now)
+        if shin_cmd is not None:
+            return shin_cmd
         stance_h = self._stance_h
         step_h   = float(self.get_parameter("step_height").value)
         # GaitScheduler.period/swing_ratio are plain attributes set once at
@@ -1858,6 +2120,10 @@ class MPCNode(Node):
                     self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}
                     self._td_z = {leg: None for leg in LEG_NAMES}
                     self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
+                    # a lie-down mid-shin-mode must not resume "on" from a
+                    # standing pose — re-enter through the transitions
+                    self._shin_phase = "off"
+                    self._shin_walking = False
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1876,6 +2142,8 @@ class MPCNode(Node):
                 self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}
                 self._td_z = {leg: None for leg in LEG_NAMES}
                 self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
+                self._shin_phase = "off"
+                self._shin_walking = False
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 

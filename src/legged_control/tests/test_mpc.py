@@ -1261,3 +1261,81 @@ def test_hurdle_plain_arc_unchanged():
         z_ref = -0.235 + 0.04 * 0.5 * (1.0 - _m.cos(2.0 * _m.pi * s))
         assert z_default == pytest.approx(z_ref, abs=1e-12)
         assert z_flat0 == pytest.approx(z_ref, abs=1e-12)
+
+# ── Shin mode (断桥: kneel and crawl on the shins) ───────────────────────────
+
+def test_shin_geometry_all_legs():
+    """Shin pose FK: foot on the deck at shin body height, foot forward of
+    the knee by ~L3, knee riding L3·sin(pitch) above the deck — identical
+    planar geometry for all four legs (joint-space contract)."""
+    from legged_control.mpc.shin_gait import (
+        shin_pose_joints, shin_body_height, SHIN_PITCH,
+    )
+    from legged_control.kinematics import forward_kinematics, L2, L3, L_HIP_X
+    q = shin_pose_joints()
+    h = shin_body_height()
+    assert h == pytest.approx(L2 + L3 * np.sin(SHIN_PITCH), abs=1e-12)
+    for leg in LEG_NAMES:
+        x, y, z = forward_kinematics(leg, q)
+        assert z == pytest.approx(-h, abs=1e-9), leg           # foot on deck
+        x_sign = 1.0 if leg in ("FR", "FL") else -1.0
+        # foot ≈ L3 ahead of the knee (knee under hip at q2=0)
+        assert x - x_sign * L_HIP_X == pytest.approx(
+            L3 * np.cos(SHIN_PITCH), abs=1e-9
+        ), leg
+    # knee clearance above deck = L3·sin(pitch) ≈ 9 mm
+    knee_z = -L2  # q2 = 0
+    assert (-h) - knee_z == pytest.approx(-L3 * np.sin(SHIN_PITCH), abs=1e-12)
+
+
+def test_shin_joint_limits_and_flat_contract():
+    """Across the full stride and swing: hip 0, thigh far inside ±limits,
+    calf inside [−2.65, −0.9] with ≥ 0.3 rad fold margin; stance keeps the
+    shin-tilt identity q2 + q3 = −π/2 + pitch exactly."""
+    from legged_control.mpc.shin_gait import (
+        shin_stance_joints, shin_swing_joints, KNEE_OFFSET_MAX, SHIN_PITCH,
+    )
+    for off in (-KNEE_OFFSET_MAX, 0.0, KNEE_OFFSET_MAX):
+        for s in np.linspace(0.0, 1.0, 41):
+            q1, q2, q3 = shin_stance_joints(s, off)
+            assert q1 == 0.0
+            assert q2 + q3 == pytest.approx(-np.pi / 2 + SHIN_PITCH, abs=1e-9)
+            assert abs(q2) <= 0.26
+            assert -2.35 <= q3 <= -0.9
+            q1, q2, q3 = shin_swing_joints(s, off)
+            assert q1 == 0.0
+            assert abs(q2) <= 0.26
+            assert -2.35 <= q3 <= -0.9
+
+
+def test_shin_body_height_bob_small():
+    """Body height variation over the stance sweep at max stride ≤ 6 mm —
+    the knee-under-hip sweet spot (cos flat near q2=0)."""
+    from legged_control.mpc.shin_gait import (
+        shin_stance_joints, shin_body_height, KNEE_OFFSET_MAX,
+    )
+    from legged_control.kinematics import forward_kinematics
+    zs = [
+        forward_kinematics("FR", shin_stance_joints(s, KNEE_OFFSET_MAX))[2]
+        for s in np.linspace(0.0, 1.0, 41)
+    ]
+    assert max(zs) - min(zs) < 0.006
+    # deepest foot target (= tallest body) is exactly mid-sweep, q2 = 0
+    assert min(zs) == pytest.approx(-shin_body_height(), abs=1e-9)
+
+
+def test_shin_swing_lifts_foot_and_is_continuous():
+    """Mid-swing foot clearance ≥ 4 cm above the deck; the stance↔swing
+    hand-offs match bit-for-bit so phase flips never step the command."""
+    from legged_control.mpc.shin_gait import (
+        shin_stance_joints, shin_swing_joints, shin_body_height,
+    )
+    from legged_control.kinematics import forward_kinematics
+    off = 0.03
+    z_mid = forward_kinematics("FR", shin_swing_joints(0.5, off))[2]
+    assert z_mid - (-shin_body_height()) > 0.04
+    for a, b in (
+        (shin_stance_joints(1.0, off), shin_swing_joints(0.0, off)),
+        (shin_swing_joints(1.0, off), shin_stance_joints(0.0, off)),
+    ):
+        assert np.allclose(a, b, atol=1e-9)
