@@ -778,3 +778,169 @@ def test_slew_anchor_pulls_solution_toward_previous():
     assert base + 0.6 * (target - base) < prev_fz <= target + 1.0, (
         "must converge toward the unanchored optimum"
     )
+
+
+# ── TerrainEstimator ─────────────────────────────────────────────────────────
+
+def _body_xy(leg, stance_h=0.27):
+    """Nominal foot xy in the BODY frame (hip-frame nominal + hip mount),
+    matching what mpc_node feeds the estimator."""
+    from legged_control.mpc.swing_trajectory import _HIP_MOUNT_X, _HIP_MOUNT_Y
+    from legged_control.kinematics import _leg_signs
+    _, lat_sign, x_sign = _leg_signs(leg)
+    nom = nominal_foot_position(leg, stance_h)
+    return float(nom[0]) + x_sign * _HIP_MOUNT_X, float(nom[1]) + lat_sign * _HIP_MOUNT_Y
+
+
+def _make_terrain(stance_h=0.27, lp_tau=0.4):
+    from legged_control.mpc.terrain_estimator import TerrainEstimator
+    foot_xy = {leg: _body_xy(leg, stance_h) for leg in LEG_NAMES}
+    return TerrainEstimator(foot_xy, stance_height=stance_h, lp_tau=lp_tau)
+
+
+def _feed(te, foot_body, R, seconds=8.0, dt=0.01):
+    w = {leg: 1.0 for leg in LEG_NAMES}
+    for _ in range(int(seconds / dt)):
+        te.update(foot_body, w, R, dt)
+
+
+def test_terrain_flat_is_noop():
+    """Flat ground must reproduce the hardware-validated baseline exactly:
+    zero slope, zero foot offsets, level attitude reference."""
+    te = _make_terrain()
+    flat = {
+        leg: np.array([*_body_xy(leg), -0.27]) for leg in LEG_NAMES
+    }
+    _feed(te, flat, np.eye(3))
+    assert np.allclose(te.world_slope, 0.0, atol=1e-9)
+    assert te.dz(0.19, 0.12, np.eye(3)) == pytest.approx(0.0, abs=1e-9)
+    r, p = te.ref_attitude()
+    assert abs(r) < 1e-9 and abs(p) < 1e-9
+
+
+def test_terrain_recovers_15deg_slope():
+    """Body level, feet on a 15° x-slope → fit reports tan(15°) along x."""
+    te = _make_terrain()
+    a_true = np.tan(np.radians(15.0))
+    feet = {}
+    for leg in LEG_NAMES:
+        x, y = _body_xy(leg)
+        feet[leg] = np.array([x, y, -0.27 + a_true * x])
+    _feed(te, feet, np.eye(3))
+    assert te.world_slope[0] == pytest.approx(a_true, rel=0.02)
+    assert te.world_slope[1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_terrain_ref_attitude_aligns_body_z_with_normal():
+    """R(ref_attitude)·ẑ must equal the terrain normal — the geometric
+    definition of 'body parallel to slope', valid for any slope direction."""
+    from legged_control.mpc.srbd_mpc import _euler_to_R
+    te = _make_terrain()
+    a, b = 0.2, -0.15  # oblique slope
+    feet = {}
+    for leg in LEG_NAMES:
+        x, y = _body_xy(leg)
+        feet[leg] = np.array([x, y, -0.27 + a * x + b * y])
+    _feed(te, feet, np.eye(3))
+    roll, pitch = te.ref_attitude()
+    n = np.array([-a, -b, 1.0]); n /= np.linalg.norm(n)
+    body_z = _euler_to_R(np.array([roll, pitch, 0.0])) @ np.array([0.0, 0.0, 1.0])
+    assert np.allclose(body_z, n, atol=1e-6)
+    # uphill along +x must reference nose-up, which is pitch < 0 in this
+    # Euler convention (body x-axis world-z component = −sin(pitch))
+    assert pitch < 0.0
+
+
+def test_terrain_dz_vanishes_when_body_parallel():
+    """THE steady-state invariant: body already riding parallel to the
+    slope → feet are coplanar in the body frame → dz ≈ 0 (flat-ground
+    behavior recovered on the slope itself)."""
+    from legged_control.mpc.srbd_mpc import _euler_to_R
+    te = _make_terrain()
+    pitch = -np.radians(15.0)  # nose-up on an uphill
+    R = _euler_to_R(np.array([0.0, pitch, 0.0]))
+    # feet at constant extension in the BODY frame (equal leg lengths)
+    feet = {
+        leg: np.array([*_body_xy(leg), -0.27]) for leg in LEG_NAMES
+    }
+    _feed(te, feet, R)
+    # world fit sees the 15° slope…
+    assert te.world_slope[0] == pytest.approx(np.tan(np.radians(15.0)), rel=0.05)
+    # …but body-frame offsets are ~zero: nothing changes for the gait
+    a_b, b_b = te.body_plane(R)
+    assert abs(a_b) < 1e-5 and abs(b_b) < 1e-5
+    assert abs(te.dz(0.19, 0.12, R)) < 1e-5
+
+
+def test_terrain_transition_raises_uphill_feet():
+    """Body still level but front feet already on the incline (walking onto
+    a ramp): front targets must rise, rear must drop — before touchdown."""
+    te = _make_terrain()
+    a_true = np.tan(np.radians(15.0))
+    feet = {}
+    for leg in LEG_NAMES:
+        x, y = _body_xy(leg)
+        z = -0.27 + (a_true * x if x > 0 else 0.0)  # only fronts on the ramp
+        feet[leg] = np.array([x, y, z])
+    _feed(te, feet, np.eye(3))
+    front_x, _ = _body_xy("FR")
+    assert te.dz(front_x, 0.0, np.eye(3)) > 0.01     # front foot raised
+    assert te.dz(-front_x, 0.0, np.eye(3)) < -0.01   # rear foot lowered
+
+
+def test_terrain_slope_and_dz_clamped():
+    """A pathological fit (kinematic error, slipping foot) must saturate at
+    the 20° slope clamp and the ±7 cm dz clamp instead of steering feet."""
+    te = _make_terrain()
+    feet = {}
+    for leg in LEG_NAMES:
+        x, y = _body_xy(leg)
+        feet[leg] = np.array([x, y, -0.27 + 2.0 * x])  # "63° slope"
+    _feed(te, feet, np.eye(3), seconds=10.0)
+    assert abs(te.world_slope[0]) <= 0.364 + 1e-9
+    assert abs(te.dz(1.0, 0.0, np.eye(3))) <= 0.07 + 1e-12
+
+
+def test_terrain_lp_no_step():
+    """Anchors jumping a full slope in one tick must not step the output:
+    the LP bounds the per-tick change."""
+    te = _make_terrain()
+    a_true = np.tan(np.radians(15.0))
+    feet = {}
+    for leg in LEG_NAMES:
+        x, y = _body_xy(leg)
+        feet[leg] = np.array([x, y, -0.27 + a_true * x])
+    w = {leg: 1.0 for leg in LEG_NAMES}
+    prev = 0.0
+    for _ in range(300):
+        te.update(feet, w, np.eye(3), 0.01)
+        cur = float(te.world_slope[0])
+        assert abs(cur - prev) < a_true * (0.01 / 0.4) * 1.1
+        prev = cur
+    assert prev == pytest.approx(a_true, rel=0.05)
+
+
+def test_terrain_untrusted_feet_do_not_move_anchors():
+    """Legs below the load-trust threshold (swinging / barely touching)
+    must not write anchors — a swing foot is not ground."""
+    te = _make_terrain()
+    bogus = {
+        leg: np.array([*_body_xy(leg), 0.5]) for leg in LEG_NAMES
+    }
+    w = {leg: 0.3 for leg in LEG_NAMES}  # below trust threshold
+    for _ in range(200):
+        te.update(bogus, w, np.eye(3), 0.01)
+    assert np.allclose(te.world_slope, 0.0, atol=1e-9)
+
+
+def test_terrain_reset_returns_to_flat():
+    te = _make_terrain()
+    feet = {}
+    for leg in LEG_NAMES:
+        x, y = _body_xy(leg)
+        feet[leg] = np.array([x, y, -0.27 + 0.2 * x])
+    _feed(te, feet, np.eye(3))
+    assert abs(te.world_slope[0]) > 0.1
+    te.reset(0.27)
+    _feed(te, {}, np.eye(3), seconds=3.0)  # no updates, LP decays on flat anchors
+    assert np.allclose(te.world_slope, 0.0, atol=2e-3)

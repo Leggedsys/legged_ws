@@ -46,13 +46,26 @@ from legged_control.kinematics import (
 )
 from legged_control.mpc.gait_scheduler import GaitScheduler, LEG_NAMES
 from legged_control.mpc.srbd_mpc import SRBDMPC, _euler_to_R
+from legged_control.mpc.terrain_estimator import TerrainEstimator, dz_on_plane
 from legged_control.mpc.swing_trajectory import (
     swing_foot_position,
     stance_foot_position,
     nominal_foot_position,
     landing_target,
     leg_velocity,
+    _HIP_MOUNT_X,
+    _HIP_MOUNT_Y,
 )
+
+
+def _hip_mount_xy(leg: str) -> tuple[float, float]:
+    """Hip-frame → body-frame xy offset for a leg. forward_kinematics and
+    the foot targets live in per-leg HIP frames whose origins sit at the
+    hip mounts; anything comparing feet ACROSS legs (the terrain plane
+    fit and its dz evaluation) needs the shared body frame, or the
+    fore-aft lever arm shrinks ~3× (0.207 m → 0.065 m)."""
+    _, lat_sign, x_sign = _leg_signs(leg)
+    return x_sign * _HIP_MOUNT_X, lat_sign * _HIP_MOUNT_Y
 
 
 # YAML joint order (robot.yaml / /joint_commands convention)
@@ -108,6 +121,9 @@ _ATT_I_MAX = 0.03        # m — clamp on the integral trim (windup guard). The
                          # a static tilt; the integrator trims the remainder.
 _ATT_I_LEAK_TAU = 1.0    # s — integral decays to zero when the estimate is
                          # stale or leveling is disabled, same as the P path.
+_TERRAIN_BLEND_TAU = 0.3 # s — enable/disable ramp on the terrain adaptation
+                         # outputs (foot dz + attitude reference), so a runtime
+                         # toggle can never step the foot targets or the QP ref.
 # tau_ff smoothing — three layers so the feedforward torque can never step
 # (the phase-transition snaps that plagued the original force controller):
 _TAU_BLEND_TAU = 0.3     # s — global ramp on WALK entry / runtime enable-disable
@@ -452,6 +468,21 @@ class MPCNode(Node):
         # is still too small for z_fb_weight to matter.
         self.declare_parameter("tau_ramp_frac", float(mpc_cfg.get("tau_ramp_frac", _TAU_RAMP_FRAC)))
         self.declare_parameter("vz_fb_weight",  float(mpc_cfg.get("vz_fb_weight", 10.0)))
+        # Terrain adaptation (slopes ≤ ~15°, omnidirectional). Two layers,
+        # independently runtime-toggleable, each ramped over 0.3 s so a
+        # toggle never steps anything. Both are ≈ no-ops on flat ground.
+        #   terrain_adapt_enabled  — per-foot z offsets put swing landings
+        #     and stance targets on the estimated ground plane (position
+        #     level; THE fix for slope-transition early/late touchdown).
+        #   terrain_att_ref_enabled — MPC attitude reference follows the
+        #     slope instead of level, so the QP stops torquing the body
+        #     back to horizontal on an incline (force level, weak gains).
+        self.declare_parameter(
+            "terrain_adapt_enabled", bool(mpc_cfg.get("terrain_adapt_enabled", True))
+        )
+        self.declare_parameter(
+            "terrain_att_ref_enabled", bool(mpc_cfg.get("terrain_att_ref_enabled", True))
+        )
 
         mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
@@ -526,6 +557,20 @@ class MPCNode(Node):
         self._att_ix = 0.0                    # integral trim, fore-aft
         self._att_iy = 0.0                    # integral trim, lateral
         self._att_dz = {leg: 0.0 for leg in LEG_NAMES}  # slew-limited output
+        # Ground-plane estimate from loaded-foot FK (see terrain_estimator).
+        # Anchor pattern in the BODY frame: nominal hip-frame stance xy plus
+        # the hip-mount offsets (see _hip_mount_xy).
+        def _body_xy(leg: str) -> tuple[float, float]:
+            mx, my = _hip_mount_xy(leg)
+            nom = nominal_foot_position(leg, 0.27)
+            return float(nom[0]) + mx, float(nom[1]) + my
+
+        self._terrain = TerrainEstimator(
+            foot_xy={leg: _body_xy(leg) for leg in LEG_NAMES},
+            stance_height=float(self.get_parameter("stance_height").value),
+        )
+        self._terrain_dz_blend = 0.0   # enable ramp, foot-offset layer
+        self._terrain_att_blend = 0.0  # enable ramp, attitude-reference layer
         # Live stance height: follows /height_command (LT/RT) slew-limited;
         # falls back to the stance_height parameter until a command arrives.
         self._stance_h = float(self.get_parameter("stance_height").value)
@@ -560,6 +605,7 @@ class MPCNode(Node):
         # [0] h_meas [1] vz_meas [2] z_err(clipped) [3] Σfz
         # [4:8] fz FR,FL,RR,RL [8] tau_blend [9] roll [10] pitch
         # [11] wx [12] wy (world) [13] stance_h ref
+        # [14:16] terrain world slope [a, b]
         self._pub_debug = self.create_publisher(Float32MultiArray, "/mpc_debug", 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
@@ -675,6 +721,52 @@ class MPCNode(Node):
             out[leg] = val
         return out
 
+    def _R_body_est(self) -> np.ndarray:
+        """Body→world rotation (yaw-free) from the bias-corrected gravity
+        estimate — the same attitude the QP sees."""
+        est = np.asarray(self._state_estimate, dtype=float).copy()
+        est[6:9] = _remove_mount_bias(
+            est[6:9],
+            float(self.get_parameter("att_roll_offset").value),
+            float(self.get_parameter("att_pitch_offset").value),
+        )
+        rpy = _state_from_estimate(est, np.zeros(3))[:3]
+        return _euler_to_R(rpy)
+
+    def _terrain_tick(
+        self, leg_scale: dict[str, float], R_body: np.ndarray
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Update the ground-plane estimate from measured foot FK and return
+        (body-frame terrain plane coefficients (a, b), MPC attitude ref).
+        Foot targets evaluate dz = a·x + b·y at their OWN xy — the landing
+        spot's terrain height, not the nominal stance point's.
+
+        Anchors come from MEASURED joints — where the feet actually are —
+        weighted by the stance load ramp, so a foot is trusted exactly while
+        it is planted. Both output layers ride their own 0.3 s enable blend;
+        on flat ground the plane fit is level and everything here is ≈ 0.
+        """
+        foot_body = {}
+        for leg in LEG_NAMES:
+            if float(leg_scale.get(leg, 0.0)) > 0.5:
+                q = tuple(self._joint_pos[j] for j in _leg_joints(leg))
+                mx, my = _hip_mount_xy(leg)
+                p = np.asarray(forward_kinematics(leg, q), dtype=float)
+                foot_body[leg] = p + np.array([mx, my, 0.0])
+        self._terrain.update(foot_body, leg_scale, R_body, self._dt)
+
+        a_b = min(1.0, self._dt / _TERRAIN_BLEND_TAU)
+        dz_on = 1.0 if bool(self.get_parameter("terrain_adapt_enabled").value) else 0.0
+        att_on = 1.0 if bool(self.get_parameter("terrain_att_ref_enabled").value) else 0.0
+        self._terrain_dz_blend += a_b * (dz_on - self._terrain_dz_blend)
+        self._terrain_att_blend += a_b * (att_on - self._terrain_att_blend)
+
+        a_p, b_p = self._terrain.body_plane(R_body)
+        plane = (self._terrain_dz_blend * a_p, self._terrain_dz_blend * b_p)
+        r_ref, p_ref = self._terrain.ref_attitude()
+        att_ref = (self._terrain_att_blend * r_ref, self._terrain_att_blend * p_ref)
+        return plane, att_ref
+
     def _tau_feedforward(
         self,
         joint_targets: dict[str, float],
@@ -683,6 +775,7 @@ class MPCNode(Node):
         stance_h: float,
         vel_ref: np.ndarray,
         yaw_ref: float,
+        att_ref: tuple[float, float] = (0.0, 0.0),
     ) -> list[float]:
         """SRBD-MPC GRF → J^T·f feedforward torque, smooth by construction.
 
@@ -711,8 +804,12 @@ class MPCNode(Node):
             srbd_state = _state_from_estimate(
                 est, np.array([0.0, 0.0, stance_h])
             )
+            # Attitude reference: terrain-parallel on a slope (att_ref from
+            # the ground-plane fit, ≈ 0 on flat ground). Referencing level
+            # on an incline makes the QP torque the body back to horizontal
+            # forever, shifting weight onto the downhill legs.
             state_ref = np.array([
-                0.0, 0.0, 0.0,
+                float(att_ref[0]), float(att_ref[1]), 0.0,
                 0.0, 0.0, stance_h,
                 0.0, 0.0, yaw_ref,
                 float(vel_ref[0]), float(vel_ref[1]), 0.0,
@@ -800,6 +897,10 @@ class MPCNode(Node):
                     float(srbd_state[0]), float(srbd_state[1]),
                     float(srbd_state[6]), float(srbd_state[7]),
                     float(stance_h),
+                    # [14:16] world-frame terrain slope [a, b] (LP'd fit,
+                    # pre-blend) — sanity: ≈0 on flat, ≈±0.27 on a 15° ramp.
+                    float(self._terrain.world_slope[0]),
+                    float(self._terrain.world_slope[1]),
                 ]
                 self._pub_debug.publish(dbg)
                 tau_raw = _build_stance_tau(
@@ -940,19 +1041,28 @@ class MPCNode(Node):
         return JointCommand(q=q, dq=[0.0]*12, tau=tau, kp=kp, kd=kd), elapsed >= dur
 
     def _balance_stance(self, stance_h: float) -> JointCommand:
-        """Four-foot stance: nominal IK pose + attitude leveling + MPC tau_ff."""
+        """Four-foot stance: nominal IK pose + attitude leveling + MPC tau_ff.
+        Terrain adaptation stays live here too — standing on a slope keeps
+        the feet on the incline plane instead of forcing them coplanar with
+        the (level-referenced) body."""
+        leg_scale = {leg: 1.0 for leg in LEG_NAMES}
+        R_body = self._R_body_est()
+        terrain_plane, att_ref = self._terrain_tick(leg_scale, R_body)
         dz = self._attitude_dz()
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = nominal_foot_position(leg, stance_h)
-            p_foot = np.array([p_foot[0], p_foot[1], p_foot[2] + dz[leg]])
+            mx, my = _hip_mount_xy(leg)
+            dz_t = dz_on_plane(
+                terrain_plane[0], terrain_plane[1], p_foot[0] + mx, p_foot[1] + my
+            )
+            p_foot = np.array([p_foot[0], p_foot[1], p_foot[2] + dz[leg] + dz_t])
             preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
             if q_leg is None:
                 q_leg = tuple(_DEFAULT_Q[j] for j in _leg_joints(leg))
             for jname, qval in zip(_leg_joints(leg), q_leg):
                 targets[jname] = float(qval)
-        leg_scale = {leg: 1.0 for leg in LEG_NAMES}
         tau = self._tau_feedforward(
             targets,
             leg_scale=leg_scale,
@@ -960,6 +1070,7 @@ class MPCNode(Node):
             stance_h=stance_h,
             vel_ref=np.zeros(2),
             yaw_ref=0.0,
+            att_ref=att_ref,
         )
         kp, kd = self._walk_gains(leg_scale)
         return JointCommand(
@@ -1046,6 +1157,18 @@ class MPCNode(Node):
                     self._lift_pos[leg] = np.array(forward_kinematics(leg, joints_leg))
             self._prev_contact[leg] = in_contact
 
+        # Per-leg load ramp: zero commanded force at touchdown and lift-off.
+        # Computed before the target loop because it doubles as the anchor
+        # trust weighting for the terrain estimate the targets depend on.
+        ramp_frac = float(self.get_parameter("tau_ramp_frac").value)
+        leg_scale = {
+            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now), ramp_frac)
+                  if gait_state[leg]["contact"] else 0.0)
+            for leg in LEG_NAMES
+        }
+        R_body = self._R_body_est()
+        terrain_plane, att_ref = self._terrain_tick(leg_scale, R_body)
+
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
         att_dz = self._attitude_dz()
@@ -1080,17 +1203,33 @@ class MPCNode(Node):
                     s, self._lift_pos[leg], p_land, step_h * step_scale,
                     xy_end_slope=-v_leg * t_swing,
                 )
-            # Lift-pos capture stays in the un-leveled frame; the leveling
-            # offset is added after, to stance and swing alike, so phase
-            # transitions stay continuous and dz never double-counts.
+            # Lift-pos capture stays in the un-leveled, un-terrained frame;
+            # leveling and terrain offsets are added after, to stance and
+            # swing alike, so phase transitions stay continuous and neither
+            # dz ever double-counts. Terrain dz is evaluated at the target's
+            # own xy: mid-swing the offset slides along the plane and the
+            # touchdown lands on the terrain height of the actual landing
+            # spot — this is what removes the slope-transition early/late
+            # touchdown.
             self._last_p_foot[leg] = np.array(p_foot)
-            p_foot = np.array([p_foot[0], p_foot[1], p_foot[2] + att_dz[leg]])
+            mx, my = _hip_mount_xy(leg)
+            dz_t = dz_on_plane(
+                terrain_plane[0], terrain_plane[1], p_foot[0] + mx, p_foot[1] + my
+            )
+            p_foot = np.array([p_foot[0], p_foot[1], p_foot[2] + att_dz[leg] + dz_t])
 
             preferred = tuple(self._joint_pos[j] for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
             if q_leg is None:
                 # Hold the previous commanded angles rather than snapping to
                 # the default pose — an IK miss must not step the command.
+                # Repeated misses freeze-then-jump the foot; on slopes the
+                # usual cause is terrain dz stretching the downhill leg past
+                # its workspace edge.
+                self.get_logger().warn(
+                    f"IK miss {leg} target={np.round(p_foot, 3).tolist()}",
+                    throttle_duration_sec=1.0,
+                )
                 q_leg = tuple(
                     self._prev_cmd_q[j] if self._prev_cmd_q[j] is not None else _DEFAULT_Q[j]
                     for j in _leg_joints(leg)
@@ -1107,13 +1246,6 @@ class MPCNode(Node):
                 ) if prev is not None else 0.0
                 self._prev_cmd_q[jname] = qval
 
-        # Per-leg load ramp: zero commanded force at touchdown and lift-off.
-        ramp_frac = float(self.get_parameter("tau_ramp_frac").value)
-        leg_scale = {
-            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now), ramp_frac)
-                  if gait_state[leg]["contact"] else 0.0)
-            for leg in LEG_NAMES
-        }
         # Future contacts sampled at the MPC's own step, not the tick period
         # — this is what gives the QP its lookahead. Each entry is the
         # fraction of that prediction step spent in contact (subsampled),
@@ -1137,7 +1269,7 @@ class MPCNode(Node):
             contact_schedule.append(frac)
         tau = self._tau_feedforward(
             joint_targets, leg_scale, contact_schedule,
-            stance_h, vel_xy, yaw_rate,
+            stance_h, vel_xy, yaw_rate, att_ref=att_ref,
         )
 
         kp, kd = self._walk_gains(leg_scale)
@@ -1194,6 +1326,7 @@ class MPCNode(Node):
                     self._rate_lp = np.zeros(3)
                     self._z_lp = None
                     self._grf_prev = None
+                    self._terrain.reset(self._stance_h)
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1207,6 +1340,7 @@ class MPCNode(Node):
                 self._rate_lp = np.zeros(3)
                 self._z_lp = None
                 self._grf_prev = None
+                self._terrain.reset(self._stance_h)
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 

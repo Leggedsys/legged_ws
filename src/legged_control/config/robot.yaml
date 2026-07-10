@@ -319,6 +319,24 @@ mpc:
   # (49%)。别超 1e-3——那等于给反馈环再加一级 40ms 低通,4Hz 塌陷瞬态的
   # 相位余量直接减半,离线已验证(2026-07-10)。改后需重启节点(构造参数)。
   grf_slew_weight: 0.0
+  # 地形自适应（2026-07-10,目标 ≤15° 全向坡,平地自动退化为原行为）。
+  # 原理:支撑腿实测 FK 点（按受力渐变加权信任）→ 拟合地面平面（0.4s 低通,
+  # 20° 坡度限幅）→ 两层输出,各自独立开关、0.3s 渐变切换（切换不产生阶跃）:
+  # terrain_adapt_enabled —— 位置级:落脚/支撑目标的 z 按平面逐点偏移
+  #   （±7cm 限幅）。这是"上坡第一步提前触地砸腿 / 下坡第一步踩空前栽"
+  #   的正解:脚落在真实坡面高度上。已在坡上、身体已顺坡后偏移自动归零
+  #   （体坐标系里坡面是平的）,稳态 = 平地行为。
+  # terrain_att_ref_enabled —— 力级:QP 姿态基准从"水平"改为"平行坡面",
+  #   不再持续把身体往水平扳（否则重量被挤向坡下腿）。增益本就弱
+  #   （~9 Nm/rad）,风险低。
+  # 排查:ros2 topic echo /mpc_debug 的 [14:15] = 世界系坡度 [a,b],
+  #   平地 ≈0,15° 坡 ≈ ±0.27。平地走突然发飘/脚乱抬 → 先关位置层:
+  #   ros2 param set /mpc_node terrain_adapt_enabled false
+  # 【上坡注意】过渡段坡下腿要多伸最多 7cm:走坡时 stance_height 保持
+  #   ≤0.27（0.27+0.07=0.34 < 腿全长 0.361,再高 IK 无解会刷 "IK miss"）。
+  #   step_height 建议临时提到 0.04 防上坡蹭脚尖。
+  terrain_adapt_enabled: true
+  terrain_att_ref_enabled: true
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
