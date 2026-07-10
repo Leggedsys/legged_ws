@@ -1,14 +1,11 @@
-"""gait_scheduler — phase-based gait contact schedule (trot / crawl).
+"""gait_scheduler — phase-based trot gait contact schedule.
 
+Trot: diagonal pairs (FL+RR) and (FR+RL) alternate.
 Each leg goes through a full cycle of period T seconds:
   [0, swing_ratio*T)   → swing (foot in air)
   [swing_ratio*T, T)   → stance (foot on ground)
 
-trot:  diagonal pairs (FR+RL at offset 0, FL+RR at 0.5), swing_ratio ≤ 0.49.
-crawl: one leg at a time in the classic creep order RL → FL → RR → FR
-       (hind leg, then the front on the same side), swing_ratio ≤ 0.24 so
-       three feet are ALWAYS planted — statically stable, can pause at any
-       instant. The stair gait.
+FL and RR are offset by 0 phase; FR and RL by 0.5 (half period).
 """
 
 from __future__ import annotations
@@ -20,16 +17,13 @@ import time
 LEG_NAMES = ["FR", "FL", "RR", "RL"]
 LEG_IDX = {name: i for i, name in enumerate(LEG_NAMES)}
 
-# Phase offsets per gait. A leg starts its swing when (t/T + offset) wraps
-# past 0, i.e. at t/T = (1 − offset): crawl swings RL at 0, FL at 0.25,
-# RR at 0.5, FR at 0.75.
-_GAIT_OFFSETS = {
-    "trot": {"FR": 0.0, "FL": 0.5, "RR": 0.5, "RL": 0.0},
-    "crawl": {"RL": 0.0, "FL": 0.75, "RR": 0.5, "FR": 0.25},
+# Trot phase offsets: FR+RL in phase, FL+RR offset by 0.5
+_TROT_OFFSETS = {
+    "FR": 0.0,
+    "FL": 0.5,
+    "RR": 0.5,
+    "RL": 0.0,
 }
-# swing_ratio ceiling per gait: trot needs diagonal stance overlap; crawl
-# needs the four swings to never overlap (< 0.25 keeps 3 feet down).
-_MAX_SWING_RATIO = {"trot": 0.49, "crawl": 0.24}
 
 
 class GaitScheduler:
@@ -42,7 +36,6 @@ class GaitScheduler:
 
     def __init__(self, period: float = 0.6, swing_ratio: float = 0.4) -> None:
         self._period = period
-        self._mode = "trot"
         self._swing_ratio = swing_ratio
         self._t0: float = time.monotonic()
 
@@ -57,22 +50,9 @@ class GaitScheduler:
         swing_ratio parameter every tick for the TRAJECTORY; if the
         scheduler keeps its constructor value the contact schedule and the
         foot trajectory disagree about when swing ends (foot commanded
-        mid-air at 'touchdown'). Clamped per gait — trot needs diagonal
-        stance overlap, crawl needs three feet always planted."""
-        self._swing_ratio = float(
-            min(max(swing_ratio, 0.1), _MAX_SWING_RATIO[self._mode])
-        )
-
-    def set_mode(self, mode: str) -> None:
-        """Switch gait ("trot"/"crawl"). Phases jump on a switch — the node
-        only applies it while the robot is standing (gait not running)."""
-        if mode in _GAIT_OFFSETS and mode != self._mode:
-            self._mode = mode
-            self.set_swing_ratio(self._swing_ratio)  # re-clamp for new gait
-
-    @property
-    def mode(self) -> str:
-        return self._mode
+        mid-air at 'touchdown'). Clamped below 0.5 — a trot needs the
+        diagonal pairs to overlap in stance."""
+        self._swing_ratio = float(min(max(swing_ratio, 0.1), 0.49))
 
     @property
     def period(self) -> float:
@@ -95,7 +75,7 @@ class GaitScheduler:
         elapsed = t - self._t0
         result = {}
         for leg in LEG_NAMES:
-            offset = _GAIT_OFFSETS[self._mode][leg]
+            offset = _TROT_OFFSETS[leg]
             phase = ((elapsed / self._period) + offset) % 1.0
             in_contact = phase >= self._swing_ratio
             result[leg] = {"contact": in_contact, "phase": phase}
