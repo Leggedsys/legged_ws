@@ -170,7 +170,7 @@ teleop:
   # drags the standing height toward its own initial value.
   height_min:  0.15
   height_max:  0.30
-  height_init: 0.27
+  height_init: 0.235   # 与 mpc.stance_height 同步（2026-07-10 降高度）
 
 mpc:
   # tick_hz: mpc_node's own solve/publish rate — deliberately separate from
@@ -235,7 +235,10 @@ mpc:
   gait_period:   0.8    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
   step_height:   0.04   # m — foot clearance at mid-swing
-  stance_height: 0.27   # m — nominal body height above feet
+  # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
+  # 无跳变;LT/RT 仍可 0.15~0.30 现场调。注意 0.22 以下自动进低姿态外撇。
+  # 与 teleop.height_init 必须一致。
+  stance_height: 0.235  # m — nominal body height above feet
   # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
   # for the whole gait cycle (no stance/swing gain switching). See
   # dev/mpc-purepos branch — removed SRBD-MPC + J^T·f torque path entirely
