@@ -70,10 +70,17 @@ class TerrainEstimator:
         self.reset(stance_height)
 
     def reset(self, stance_height: float) -> None:
-        """Back to flat ground at the given height; slope decays via the LP
-        (outputs are continuous through a reset, not stepped)."""
+        """Back to flat ground: anchors to nominal AND slope coefficients to
+        zero. The coefficients must not survive a reset — reset happens at
+        WALK entry, where the offsets were NOT being applied during the
+        preceding standup ramp; carrying old coefficients across it made
+        the first post-standup tick STEP the foot targets into the previous
+        session's lean (hardware 2026-07-10: crouch-and-stand after a tilted
+        walk snapped back into the tilt). Zero here is the continuous
+        choice; the caller re-seeds real ground with a snapshot update."""
         for leg, (x, y) in self._foot_xy.items():
             self._anchors[leg] = np.array([x, y, -float(stance_height)])
+        self._coeff[:] = 0.0
 
     def update(
         self,

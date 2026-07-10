@@ -942,8 +942,9 @@ def test_terrain_reset_returns_to_flat():
     _feed(te, feet, np.eye(3))
     assert abs(te.world_slope[0]) > 0.1
     te.reset(0.27)
-    _feed(te, {}, np.eye(3), seconds=3.0)  # no updates, LP decays on flat anchors
-    assert np.allclose(te.world_slope, 0.0, atol=2e-3)
+    # reset zeros the coefficients outright — carrying them across a
+    # standup made the first WALK tick step into the previous lean
+    assert np.allclose(te.world_slope, 0.0, atol=1e-12)
 
 
 # ── Low-posture lateral spread ───────────────────────────────────────────────

@@ -895,6 +895,12 @@ class MPCNode(Node):
         self._terrain.update(
             foot_body, {leg: 1.0 for leg in LEG_NAMES}, R_body, self._dt
         )
+        # Re-seed the slow conversion attitude too — stale roll/pitch from a
+        # previous session must not tilt the first post-snapshot offsets.
+        self._terrain_rpy_slow[:] = [
+            float(np.arctan2(R_body[2, 1], R_body[2, 2])),
+            float(-np.arcsin(np.clip(R_body[2, 0], -1.0, 1.0))),
+        ]
 
     def _tau_feedforward(
         self,

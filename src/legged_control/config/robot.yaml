@@ -347,8 +347,16 @@ mpc:
   # 【上坡注意】过渡段坡下腿要多伸最多 7cm:走坡时 stance_height 保持
   #   ≤0.27（0.27+0.07=0.34 < 腿全长 0.361,再高 IK 无解会刷 "IK miss"）。
   #   step_height 建议临时提到 0.04 防上坡蹭脚尖。
-  terrain_adapt_enabled: true
-  terrain_att_ref_enabled: true
+  # 【2026-07-10 晚,默认改关】平地实测:一走就歪、停步/起立后保持歪斜。
+  # 机制:估计器分不清"地面形状"和"支撑力误差引起的腿压缩差"——com_x 是
+  # 力臂修正前标的,前后腿前馈支撑不准 → 前后 PD 压缩差几毫米 → 拟合成
+  # 假坡 → 姿态基准+落脚偏移把身体真掰歪(自我实现)。启用前置条件:
+  # 先重标 com_x(站立开 tau 跑 height_check,四腿 Δ 相等),假坡源头消掉
+  # 后再开这两个开关上坡试。斜坡session:
+  #   ros2 param set /mpc_node terrain_adapt_enabled true
+  #   ros2 param set /mpc_node terrain_att_ref_enabled true
+  terrain_adapt_enabled: false
+  terrain_att_ref_enabled: false
   # 低姿态外撇（2026-07-10）：站高压到 low_spread_start 以下后,髋外展、
   # 脚按 1:1 随高度下降往外撇（上限 low_spread_max),"蜥蜴式"低姿态。
   # 动机:低姿态下腿折叠太狠,膝盖敲地——h=0.16 时膝离地仅 ~8cm 且小腿角
