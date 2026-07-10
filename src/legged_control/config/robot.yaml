@@ -199,6 +199,12 @@ mpc:
   # 前馈给前腿少、后腿多,即真实质心偏前。站立开 tau_ff,每次 +0.01 上调
   # com_x（ros2 param set /mpc_node com_x 0.02）,直到 height_check 四腿
   # Δ 大致相等；左右不均则同法调 com_y。
+  # 【2026-07-10 力臂修正后必须重标】QP 此前用髋系 FK 当力臂（前后 ±0.065m,
+  # 真实 ±0.207m,少了 3 倍）——com_x 0.05 是在错误力臂下标出来的补偿值:
+  # 实测平地水平站立 前 113N/后 24N（5:1!,正确物理应约 85/52),后腿长期
+  # 欠支撑靠 PD 硬扛 = 站立"昂头"的静态底子。力臂修正后 0.05 变回真实质心
+  # 偏移的含义,数值先沿用,开 tau 站立跑 height_check 重新按"四腿 Δ 相等"
+  # 微调（预期最终值仍在 0.03~0.07 邻域）。
   com_x:   0.05
   com_y:   0.0
   Ixx:     0.0196
@@ -226,9 +232,9 @@ mpc:
   #   ros2 param set /mpc_node tau_ff_enabled false   # 0.3s 内平滑退出
   # tau_ff 验证有效后可逐步下调 kp_scale（2.0 → 1.0），让力矩承重、PD 提供柔顺。
   tau_ff_enabled: true
-  gait_period:   0.5    # s — full stance+swing cycle per leg (trot)
+  gait_period:   0.8    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
-  step_height:   0.03   # m — foot clearance at mid-swing
+  step_height:   0.04   # m — foot clearance at mid-swing
   stance_height: 0.27   # m — nominal body height above feet
   # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
   # for the whole gait cycle (no stance/swing gain switching). See

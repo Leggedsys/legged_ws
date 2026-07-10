@@ -1011,3 +1011,51 @@ def test_gait_swing_ratio_runtime_sync():
     assert g.swing_ratio == pytest.approx(0.47)
     g.set_swing_ratio(0.60)                      # out of range → clamp
     assert g.swing_ratio == pytest.approx(0.49)
+
+
+# ── QP moment arms (hip mounts) & standing terrain freeze ────────────────────
+
+def test_foot_positions_world_uses_body_frame_arms():
+    """The QP's fore-aft lever arms must be ~±0.21 m (hip mounts included),
+    not the ±0.065 m hip-frame values — the 3× understated arm made the QP
+    load the front pair 113/24 N on flat level ground (hardware 2026-07-10)."""
+    from legged_control.mpc.mpc_node import (
+        _foot_positions_world, _DEFAULT_Q, _MPC_LEG_ORDER,
+    )
+    fp = _foot_positions_world(_DEFAULT_Q, np.eye(3), np.zeros(3))
+    x = dict(zip(_MPC_LEG_ORDER, fp[:, 0]))
+    assert x["FR"] > 0.14 and x["FL"] > 0.14, x
+    assert x["RR"] < -0.14 and x["RL"] < -0.14, x
+    # lateral arms too: D_LAT + hip mount ≈ ±0.21
+    y = dict(zip(_MPC_LEG_ORDER, fp[:, 1]))
+    assert y["FL"] > 0.15 and y["FR"] < -0.15, y
+
+
+def test_standing_fz_split_with_correct_arms(mpc):
+    """Static QP split on flat ground with com_x forward must be moderately
+    front-biased (arm ratio), nowhere near the 5:1 the wrong arms produced."""
+    from legged_control.mpc.mpc_node import _project_vertical_grf
+    state = np.zeros(12); state[5] = 0.27
+    ref = state.copy()
+    feet = _spread_feet() - np.array([0.05, 0.0, 0.0])  # com_x 0.05
+    grf = mpc.solve(state, ref, feet, [[True] * 4] * 6)
+    grf = _project_vertical_grf(grf, feet)
+    fz = grf.reshape(4, 3)[:, 2]
+    front, rear = fz[0] + fz[1], fz[2] + fz[3]
+    # arms 0.157 vs 0.257 → front/rear ≈ 1.64; allow slack for Q weighting
+    assert 1.2 < front / rear < 2.3, (front, rear)
+
+
+def test_terrain_hold_without_updates_decays_after_reset():
+    """update() with no trusted feet must keep converging toward the stored
+    anchors' fit — a standing robot after reset() decays to flat instead of
+    holding a stale slope."""
+    te = _make_terrain()
+    feet = {leg: np.array([*_body_xy(leg), -0.27 + 0.2 * _body_xy(leg)[0]])
+            for leg in LEG_NAMES}
+    _feed(te, feet, np.eye(3))
+    assert abs(te.world_slope[0]) > 0.15
+    te.reset(0.27)
+    for _ in range(800):           # standing: no trusted feet, LP still runs
+        te.update({}, {}, np.eye(3), 0.01)
+    assert abs(te.world_slope[0]) < 2e-3

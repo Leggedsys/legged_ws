@@ -58,6 +58,35 @@ from legged_control.mpc.swing_trajectory import (
 )
 
 
+def _foot_positions_world(
+    joint_targets: dict[str, float],
+    R_body: np.ndarray,
+    com: np.ndarray,
+) -> np.ndarray:
+    """4×3 foot positions about the CoM in the world frame, for the QP.
+
+    forward_kinematics returns per-leg HIP-frame positions; the hip mounts
+    (±0.1426, ±0.0465) must be added to get body-frame lever arms. They
+    were missing until 2026-07-10: the QP balanced pitch moments with
+    fore-aft arms of ±0.065 m instead of ±0.207 m — a 3× understated
+    lever. Measured standing on flat ground, level, com_x 0.05: fz split
+    FR+FL 113 N vs RR+RL 24 N (predicted 120/16 with the wrong arms;
+    correct physics is ~85/52). The rear pair ran chronically
+    under-supported, sagging on PD — the standing nose-up bias, and the
+    asymmetry seed the terrain estimator amplified.
+
+    NOTE: com_x was calibrated (height_check) against the wrong arms;
+    re-run that calibration after this change.
+    """
+    out = np.zeros((4, 3))
+    for i, leg in enumerate(_MPC_LEG_ORDER):
+        joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
+        mx, my = _hip_mount_xy(leg)
+        p = np.array(forward_kinematics(leg, joints_leg)) + np.array([mx, my, 0.0])
+        out[i] = R_body @ (p - com)
+    return out
+
+
 def _lateral_spread(stance_h: float, start: float, s_max: float) -> float:
     """Low-posture lateral stance spread (m): 0 at/above `start`, growing
     1:1 as the body drops below it, capped at `s_max`.
@@ -759,7 +788,10 @@ class MPCNode(Node):
         return _euler_to_R(rpy)
 
     def _terrain_tick(
-        self, leg_scale: dict[str, float], R_body: np.ndarray
+        self,
+        leg_scale: dict[str, float],
+        R_body: np.ndarray,
+        update_anchors: bool = True,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
         """Update the ground-plane estimate from measured foot FK and return
         (body-frame terrain plane coefficients (a, b), MPC attitude ref).
@@ -771,14 +803,27 @@ class MPCNode(Node):
         it is planted. Both output layers ride their own 0.3 s enable blend;
         on flat ground the plane fit is level and everything here is ≈ 0.
         """
-        foot_body = {}
-        for leg in LEG_NAMES:
-            if float(leg_scale.get(leg, 0.0)) > 0.5:
-                q = tuple(self._joint_pos[j] for j in _leg_joints(leg))
-                mx, my = _hip_mount_xy(leg)
-                p = np.asarray(forward_kinematics(leg, q), dtype=float)
-                foot_body[leg] = p + np.array([mx, my, 0.0])
-        self._terrain.update(foot_body, leg_scale, R_body, self._dt)
+        # Anchors update only while WALKING (update_anchors): every touchdown
+        # re-grounds the foot at a gait-commanded spot, so measured FK is
+        # anchored to real terrain. Standing has no re-grounding — commands
+        # follow measurements follow commands, and any front/rear asymmetry
+        # self-amplifies until the slope clamp (hardware 2026-07-10: nose
+        # rising to the 20° cap on enabling tau_ff). Standing HOLDS the last
+        # plane and keeps applying it, so posture on a learned slope stays.
+        if update_anchors:
+            foot_body = {}
+            for leg in LEG_NAMES:
+                if float(leg_scale.get(leg, 0.0)) > 0.5:
+                    q = tuple(self._joint_pos[j] for j in _leg_joints(leg))
+                    mx, my = _hip_mount_xy(leg)
+                    p = np.asarray(forward_kinematics(leg, q), dtype=float)
+                    foot_body[leg] = p + np.array([mx, my, 0.0])
+            self._terrain.update(foot_body, leg_scale, R_body, self._dt)
+        else:
+            # Keep the LP converging toward the FROZEN anchors' fit: after a
+            # reset() the held plane must still decay to flat while standing,
+            # not stay pinned at whatever the coefficients were pre-reset.
+            self._terrain.update({}, {}, R_body, self._dt)
 
         a_b = min(1.0, self._dt / _TERRAIN_BLEND_TAU)
         dz_on = 1.0 if bool(self.get_parameter("terrain_adapt_enabled").value) else 0.0
@@ -892,12 +937,7 @@ class MPCNode(Node):
                 float(self.get_parameter("com_y").value),
                 0.0,
             ])
-            foot_pos_world = np.zeros((4, 3))
-            for i, leg in enumerate(_MPC_LEG_ORDER):
-                joints_leg = tuple(joint_targets[j] for j in _leg_joints(leg))
-                foot_pos_world[i] = R_body @ (
-                    np.array(forward_kinematics(leg, joints_leg)) - com
-                )
+            foot_pos_world = _foot_positions_world(joint_targets, R_body, com)
             try:
                 grf = self._mpc.solve(
                     srbd_state, state_ref, foot_pos_world, contact_schedule,
@@ -1072,7 +1112,11 @@ class MPCNode(Node):
         the (level-referenced) body."""
         leg_scale = {leg: 1.0 for leg in LEG_NAMES}
         R_body = self._R_body_est()
-        terrain_plane, att_ref = self._terrain_tick(leg_scale, R_body)
+        # update_anchors=False: no re-grounding while standing — see
+        # _terrain_tick. The last walked/reset plane is held and applied.
+        terrain_plane, att_ref = self._terrain_tick(
+            leg_scale, R_body, update_anchors=False
+        )
         spread = _lateral_spread(
             stance_h,
             float(self.get_parameter("low_spread_start").value),
