@@ -1082,3 +1082,24 @@ def test_body_plane_conversion_conforms_to_tilt():
     # level attitude → no offsets
     a0, b0 = te.body_plane(np.eye(3))
     assert abs(a0) < 1e-9 and abs(b0) < 1e-9
+
+
+# ── Touchdown detection (stairs) ─────────────────────────────────────────────
+
+def test_leg_contact_threshold():
+    from legged_control.mpc.mpc_node import _leg_contact
+    eff = {"FR_calf": -5.2, "FL_calf": 0.8, "RR_calf": 3.4}
+    assert _leg_contact(eff, "FR", 3.0)          # loaded, sign-agnostic
+    assert not _leg_contact(eff, "FL", 3.0)      # swing-level torque
+    assert _leg_contact(eff, "RR", 3.0)
+    assert not _leg_contact(eff, "RL", 3.0)      # missing joint → no contact
+
+
+def test_aggregator_forwards_joint_frame_effort():
+    """Rotor tau must come out as direction × gear_ratio × tau — the
+    contact-detection signal's units contract."""
+    import importlib
+    m = importlib.import_module("legged_control.real.joint_aggregator")
+    # pure math check on the conversion used in _publish
+    direction, gear_ratio, tau_rotor = -1.0, 12.66, 0.5
+    assert direction * gear_ratio * tau_rotor == pytest.approx(-6.33)

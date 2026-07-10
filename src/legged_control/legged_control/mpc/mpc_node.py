@@ -58,6 +58,14 @@ from legged_control.mpc.swing_trajectory import (
 )
 
 
+def _leg_contact(joint_eff: dict[str, float], leg: str, thresh: float) -> bool:
+    """Measured-contact proxy: calf torque magnitude. A swinging leg carries
+    only its own link dynamics (~1 Nm at gait speeds); ground contact loads
+    the calf with several Nm immediately. Threshold is a runtime parameter
+    (contact_tau_thresh) — tune on hardware by watching a slow walk."""
+    return abs(float(joint_eff.get(f"{leg}_calf", 0.0))) > thresh
+
+
 def _foot_positions_world(
     joint_targets: dict[str, float],
     R_body: np.ndarray,
@@ -165,6 +173,19 @@ _STEP_VEL_REF = 0.15     # m/s — leg speed at which swing clearance reaches fu
                          # step_height. Below it clearance shrinks proportionally,
                          # so the shrinking-stride steps before a stop stay near
                          # the ground instead of lifting the full 6 cm.
+# Touchdown detection / accommodation (stairs: 100 mm risers make the
+# clock-scheduled touchdown height wrong by ±50 mm+ per foot):
+_PROBE_RATE = 0.15       # m/s — downward probe speed when the scheduled
+                         # touchdown finds air (stepping DOWN off a riser)
+_PROBE_MAX = 0.08        # m — probe depth limit; past this the leg holds and
+                         # stays force-unloaded rather than reaching further
+_GROUND_DZ_CLAMP = 0.12  # m — per-foot learned ground offset clamp (a 100 mm
+                         # step plus margin; also the landing prior clamp)
+_DETECT_BLEND_TAU = 0.08 # s — per-leg load-gate blend when measured contact
+                         # confirms/loses ground (no force steps on detection)
+_EFF_FRESH_S = 0.5       # s — effort telemetry older than this disables
+                         # detection (old aggregator build / sim would read
+                         # all-zero torque = "no leg ever touches ground")
 _ATT_DZ_MAX = 0.04       # m — clamp on per-foot attitude-leveling z correction
 _ATT_TILT_TAU = 0.10     # s — low-pass on the tilt (gravity) signal: keeps
                          # touchdown-impact noise out of the foot targets.
@@ -569,6 +590,15 @@ class MPCNode(Node):
         self.declare_parameter(
             "low_spread_max", float(mpc_cfg.get("low_spread_max", 0.06))
         )
+        # Touchdown detection (stairs). Needs the effort-forwarding
+        # joint_aggregator build; if effort telemetry is absent/stale the
+        # gate below falls back to disabled automatically.
+        self.declare_parameter(
+            "contact_detect_enabled", bool(mpc_cfg.get("contact_detect_enabled", False))
+        )
+        self.declare_parameter(
+            "contact_tau_thresh", float(mpc_cfg.get("contact_tau_thresh", 3.0))
+        )
 
         mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
@@ -631,6 +661,13 @@ class MPCNode(Node):
         )
         self._joint_pos: dict[str, float] = {n: _DEFAULT_Q[n] for n in _YAML_JOINTS}
         self._joint_vel: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
+        self._joint_eff: dict[str, float] = {n: 0.0 for n in _YAML_JOINTS}
+        self._eff_stamp: float | None = None  # last nonzero effort telemetry
+        # Touchdown accommodation state (all zero/None on flat ground):
+        self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}  # learned per-foot
+        self._td_z: dict[str, float | None] = {leg: None for leg in LEG_NAMES}
+        self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}       # ≤ 0, stance probe
+        self._detect_blend = {leg: 1.0 for leg in LEG_NAMES}   # load gate
 
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
@@ -719,6 +756,14 @@ class MPCNode(Node):
             if name in self._joint_pos:
                 self._joint_pos[name] = float(pos)
                 self._joint_vel[name] = float(vel)
+        if len(msg.effort) == len(msg.name):
+            any_eff = False
+            for name, eff in zip(msg.name, msg.effort):
+                if name in self._joint_eff:
+                    self._joint_eff[name] = float(eff)
+                    any_eff = any_eff or abs(float(eff)) > 0.2
+            if any_eff:
+                self._eff_stamp = time.monotonic()
 
     def _on_state(self, msg: Float32MultiArray) -> None:
         self._state_estimate = np.array(msg.data[:10], dtype=float)
@@ -1215,7 +1260,10 @@ class MPCNode(Node):
                 p_foot[0] + mx, p_foot[1] + y_sp + my,
             )
             p_foot = np.array([
-                p_foot[0], p_foot[1] + y_sp, p_foot[2] + dz[leg] + dz_t
+                p_foot[0], p_foot[1] + y_sp,
+                # _leg_ground_dz: stopping on a staircase keeps each foot on
+                # the step it actually stands on, not the nominal plane
+                p_foot[2] + dz[leg] + dz_t + self._leg_ground_dz[leg],
             ])
             preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
@@ -1278,6 +1326,10 @@ class MPCNode(Node):
             }
             self._last_p_foot = {leg: None for leg in LEG_NAMES}
             self._prev_cmd_q = {n: None for n in _YAML_JOINTS}
+            # transient touchdown state resets; _leg_ground_dz persists —
+            # restarting mid-staircase, the feet are still on their steps
+            self._td_z = {leg: None for leg in LEG_NAMES}
+            self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
             self._walking = True
 
         gait_state = self._gait.query(now)
@@ -1312,6 +1364,33 @@ class MPCNode(Node):
         vel_xy = self._vel_filt[0:2]
         yaw_rate = float(self._vel_filt[2])
 
+        # Measured contact (stairs): calf-torque proxy per leg. Gated on
+        # fresh effort telemetry so an aggregator build without effort
+        # forwarding degrades to schedule-only behavior instead of reading
+        # "no leg ever touches the ground".
+        want_detect = bool(self.get_parameter("contact_detect_enabled").value)
+        detect_on = (
+            want_detect
+            and self._eff_stamp is not None
+            and (now - self._eff_stamp) < _EFF_FRESH_S
+        )
+        if want_detect and not detect_on:
+            self.get_logger().warn(
+                "[mpc] contact detection requested but effort telemetry is "
+                "absent/stale — rebuild+restart joint_aggregator; detection inactive",
+                throttle_duration_sec=5.0,
+            )
+        thresh = float(self.get_parameter("contact_tau_thresh").value)
+        contact_meas = {
+            leg: _leg_contact(self._joint_eff, leg, thresh) for leg in LEG_NAMES
+        }
+        a_d = min(1.0, self._dt / _DETECT_BLEND_TAU)
+        for leg in LEG_NAMES:
+            tgt = 1.0
+            if detect_on and gait_state[leg]["contact"]:
+                tgt = 1.0 if contact_meas[leg] else 0.0
+            self._detect_blend[leg] += a_d * (tgt - self._detect_blend[leg])
+
         for leg in LEG_NAMES:
             in_contact = gait_state[leg]["contact"]
             if self._prev_contact[leg] and not in_contact:
@@ -1324,14 +1403,32 @@ class MPCNode(Node):
                 else:
                     joints_leg = tuple(self._joint_pos[j] for j in _leg_joints(leg))
                     self._lift_pos[leg] = np.array(forward_kinematics(leg, joints_leg))
+                # probe ends at lift-off; the learned ground offset persists
+                # as this foot's landing prior (300 mm treads: the next
+                # footfall usually lands on the same step)
+                self._probe_dz[leg] = 0.0
+            elif not self._prev_contact[leg] and in_contact:
+                # Touchdown flip: fold an early-touchdown hold (swing found
+                # ground above nominal — stepping UP) into the foot's offset.
+                if self._td_z[leg] is not None:
+                    self._leg_ground_dz[leg] = float(np.clip(
+                        self._td_z[leg] + stance_h,
+                        -_GROUND_DZ_CLAMP, _GROUND_DZ_CLAMP,
+                    ))
+                self._td_z[leg] = None
+                self._probe_dz[leg] = 0.0
             self._prev_contact[leg] = in_contact
 
         # Per-leg load ramp: zero commanded force at touchdown and lift-off.
         # Computed before the target loop because it doubles as the anchor
         # trust weighting for the terrain estimate the targets depend on.
+        # The detect blend gates it on MEASURED contact: a probing foot that
+        # has not found ground carries no feedforward force and no estimator
+        # trust, however sure the schedule is.
         ramp_frac = float(self.get_parameter("tau_ramp_frac").value)
         leg_scale = {
             leg: (_stance_load_ramp(self._gait.stance_phase(leg, now), ramp_frac)
+                  * self._detect_blend[leg]
                   if gait_state[leg]["contact"] else 0.0)
             for leg in LEG_NAMES
         }
@@ -1357,14 +1454,38 @@ class MPCNode(Node):
                 # (where the next swing starts). The backward sweep is what
                 # propels the body in position control.
                 s_st = self._gait.stance_phase(leg, now)
-                p_foot = stance_foot_position(
+                p_foot = np.asarray(stance_foot_position(
                     leg, s_st, v_leg, self._gait.period, swing_ratio, stance_h
-                )
+                ), dtype=float)
+                if detect_on:
+                    if contact_meas[leg]:
+                        if self._probe_dz[leg] != 0.0:
+                            # probe found ground below nominal (stepping DOWN)
+                            # — fold the depth into this foot's offset
+                            self._leg_ground_dz[leg] = float(np.clip(
+                                self._leg_ground_dz[leg] + self._probe_dz[leg],
+                                -_GROUND_DZ_CLAMP, _GROUND_DZ_CLAMP,
+                            ))
+                            self._probe_dz[leg] = 0.0
+                    else:
+                        # scheduled stance but no measured load: the foot is
+                        # in the air (stepped off a riser) — probe downward;
+                        # leg_scale is gated 0 meanwhile, so no feedforward
+                        # pushes on a leg that has nothing to push against
+                        self._probe_dz[leg] = max(
+                            self._probe_dz[leg] - _PROBE_RATE * self._dt,
+                            -_PROBE_MAX,
+                        )
+                p_foot[2] += self._leg_ground_dz[leg] + self._probe_dz[leg]
             else:
                 s = self._gait.swing_phase(leg, now)
                 p_land = landing_target(
                     leg, v_leg, self._gait.period, swing_ratio, stance_h
                 )
+                # Per-foot ground prior: aim the touchdown at the height this
+                # foot last found real ground (steps), not the nominal plane.
+                p_land = np.asarray(p_land, dtype=float).copy()
+                p_land[2] += self._leg_ground_dz[leg]
                 # Clearance scales with leg speed so near-zero-stride steps
                 # (stride ramping in/out) stay near the ground.
                 step_scale = min(1.0, float(np.hypot(*v_leg)) / _STEP_VEL_REF)
@@ -1373,10 +1494,19 @@ class MPCNode(Node):
                 # loaded near those moments, it then pushes the body the same
                 # way the stance legs do instead of dragging it backward.
                 t_swing = max(swing_ratio * self._gait.period, 1e-6)
-                p_foot = swing_foot_position(
+                p_foot = np.asarray(swing_foot_position(
                     s, self._lift_pos[leg], p_land, step_h * step_scale,
                     xy_end_slope=-v_leg * t_swing,
-                )
+                ), dtype=float)
+                # Early touchdown (stepping UP: ground arrives mid-descent):
+                # freeze the vertical target where contact fired — stop
+                # pressing into the step — while xy finishes the arc (its
+                # ground-relative speed is already ~0 near touchdown).
+                if detect_on and s >= 0.5:
+                    if self._td_z[leg] is None and contact_meas[leg]:
+                        self._td_z[leg] = float(p_foot[2])
+                if self._td_z[leg] is not None:
+                    p_foot[2] = self._td_z[leg]
             # Lift-pos capture stays in the un-leveled, un-terrained frame;
             # leveling and terrain offsets are added after, to stance and
             # swing alike, so phase transitions stay continuous and neither
@@ -1510,6 +1640,9 @@ class MPCNode(Node):
                     # should learn the real ground immediately.
                     self._terrain.reset(self._stance_h)
                     self._terrain_snapshot()
+                    self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}
+                    self._td_z = {leg: None for leg in LEG_NAMES}
+                    self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
@@ -1525,6 +1658,9 @@ class MPCNode(Node):
                 self._grf_prev = None
                 self._terrain.reset(self._stance_h)
                 self._terrain_snapshot()
+                self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}
+                self._td_z = {leg: None for leg in LEG_NAMES}
+                self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return
 

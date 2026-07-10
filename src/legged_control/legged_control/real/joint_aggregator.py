@@ -8,7 +8,8 @@ and merges them into a single /joint_states_aggregated message.
 Published at a fixed rate via timer (aggregator_hz in robot.yaml, default 200 Hz).
 Joint order matches robot.yaml joints list (FR_hip ... RL_calf, index 0-11).
 
-Effort field is intentionally not forwarded — downstream consumers use only position and velocity.
+Effort is forwarded as JOINT-frame torque (rotor tau × gear_ratio,
+direction-corrected) — the contact-detection signal for stair climbing.
 """
 
 import os
@@ -50,7 +51,7 @@ class JointAggregatorNode(Node):
         self._names = [j["name"] for j in cfg["joints"]]
         self._joint_cfg = {j["name"]: j for j in cfg["joints"]}
         self._latest: dict = {
-            name: {"position": 0.0, "velocity": 0.0, "stamp": None}
+            name: {"position": 0.0, "velocity": 0.0, "effort": 0.0, "stamp": None}
             for name in self._names
         }
 
@@ -84,6 +85,7 @@ class JointAggregatorNode(Node):
             self._latest[name] = {
                 "position": msg.position[0] if msg.position else 0.0,
                 "velocity": msg.velocity[0] if msg.velocity else 0.0,
+                "effort": msg.effort[0] if msg.effort else 0.0,
                 "stamp": time.monotonic(),
             }
 
@@ -109,15 +111,19 @@ class JointAggregatorNode(Node):
         out.name = list(self._names)
         out.position = []
         out.velocity = []
-        # effort not forwarded — gait_node uses only position and velocity
+        out.effort = []
 
         for name in self._names:
             entry = self._latest[name]
             cfg = self._joint_cfg[name]
             direction = float(cfg["direction"])
             zero_offset = float(cfg["zero_offset"])
+            gear_ratio = float(cfg.get("gear_ratio", 1.0))
             out.position.append(direction * float(entry["position"]) + zero_offset)
             out.velocity.append(direction * float(entry["velocity"]))
+            # motor_bus reports ROTOR torque; joint torque scales with the
+            # gear ratio and flips with the direction convention.
+            out.effort.append(direction * gear_ratio * float(entry["effort"]))
 
         self._pub.publish(out)
 
