@@ -265,7 +265,14 @@ _RISE_CLEARANCE = 0.04    # m — extra swing clearance while a leg executes a
 # in the creep order; walking is the crawl schedule driven in joint space.
 _SHIN_LOWER_T = 2.5      # s — crouch from current height to shin height
 _SHIN_LAY_T = 1.5        # s — per-leg lay-down / stand-up blend
-_SHIN_MIN_PERIOD = 3.5   # s — crawl cycle floor while on shins
+_SHIN_MIN_PERIOD = 2.4   # s — crawl cycle floor while on shins. Together
+                         # with the 0.04 m/s default speed cap this uses
+                         # ~90% of the single-link stride budget
+                         # (v·T_stance/2 = 0.036 of the 0.045 knee stroke);
+                         # swing is 0.58 s → foot lift peaks ~0.47 m/s,
+                         # still half the stair-v2 validated band.
+                         # (3.5 s / 0.02 m/s was the first-hardware pace —
+                         # "太慢", 2026-07-11.)
 _SHIN_WZ_CAP = 0.08      # rad/s — heading nudges only on the bridge
 _SHIN_LAY_ORDER = ["RL", "FL", "RR", "FR"]  # creep order, same as the crawl
 _SWAY_X = 0.015          # m — crawl body sway, fore-aft component
@@ -702,7 +709,7 @@ class MPCNode(Node):
         # sequences run inside _shin_tick.
         self.declare_parameter("shin_mode", bool(mpc_cfg.get("shin_mode", False)))
         self.declare_parameter(
-            "shin_speed_cap", float(mpc_cfg.get("shin_speed_cap", 0.02))
+            "shin_speed_cap", float(mpc_cfg.get("shin_speed_cap", 0.04))
         )
         self.declare_parameter(
             "shin_pitch", float(mpc_cfg.get("shin_pitch", 0.05))

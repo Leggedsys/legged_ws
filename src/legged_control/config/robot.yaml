@@ -191,9 +191,8 @@ teleop:
   #   看按下时哪一位变 1(从 0 数),改这里再重建。
   btn_stair_mode:  6
   btn_hurdle_mode: 7
-  # 断桥(跪走)模式开/关,见 mpc: shin_mode 注释。键位 8 是猜的
-  # (常见是 LT 数字键/back 键),同样用 ros2 topic echo /joy 校准。
-  btn_shin_mode:   8
+  # 断桥(跪走)模式开/关,见 mpc: shin_mode 注释。11 = 本手柄实测键位。
+  btn_shin_mode:   11
   axis_lt: 4
   axis_rt: 5
   max_dz:  0.03  # m/s height rate limit
@@ -462,7 +461,10 @@ mpc:
   # 上桥建议:上桥前站定进模式,跪走上桥;桥上随时可停;X/Y/跨栏在
   #   跪走中一律无效。
   shin_mode: false
-  shin_speed_cap: 0.02  # m/s — 跪走前进速度上限(步幅=速度×3.5s 周期)
+  # 速度上限(2026-07-11 提速:0.02/周期3.5s 太慢 → 0.04/周期2.4s,约3倍)。
+  # 物理天花板:膝行程 ±4.5cm ⇒ 速度×支撑时长≤9cm,0.045 就是饱和点——
+  # 再调大只会指令超前、腿跟不上打滑,不会更快。
+  shin_speed_cap: 0.04  # m/s — 跪走前进速度上限
   shin_pitch: 0.05      # rad — 小腿前倾角:调大→膝盖通过余量大但接触
                         # 更偏脚端;调小→贴得更平但摆动膝盖易蹭桥面
 

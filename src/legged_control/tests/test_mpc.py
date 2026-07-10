@@ -1339,3 +1339,12 @@ def test_shin_swing_lifts_foot_and_is_continuous():
         (shin_swing_joints(1.0, off), shin_stance_joints(0.0, off)),
     ):
         assert np.allclose(a, b, atol=1e-9)
+
+
+def test_shin_default_speed_fits_stride_budget():
+    """Default speed cap at the shin period floor must stay inside the
+    single-link knee stroke (saturating the clip = commanded slip)."""
+    from legged_control.mpc.mpc_node import _SHIN_MIN_PERIOD, _STAIR_SWING_RATIO
+    from legged_control.mpc.shin_gait import KNEE_OFFSET_MAX
+    t_stance = _SHIN_MIN_PERIOD * (1.0 - _STAIR_SWING_RATIO)
+    assert 0.04 * t_stance * 0.5 <= KNEE_OFFSET_MAX
