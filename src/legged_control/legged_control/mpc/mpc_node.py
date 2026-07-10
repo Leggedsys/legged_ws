@@ -130,6 +130,17 @@ _SCHEDULE_SUBSAMPLES = 5 # per-bucket contact subsamples → fractional contact
                          # shares. Quantizes flip times at mpc_dt/5 = 5 ms
                          # instead of a full 25 ms bucket; keeps the per-tick
                          # QP solution change under the torque-step budget.
+_VMEAS_LP_TAU = 0.08     # s — LP on the leg-odometry horizontal velocity:
+                         # J·q̇ amplifies encoder-velocity noise, and foot
+                         # placement only needs the ~stride-scale trend.
+_RAIBERT_CLAMP = 0.06    # m — cap on the capture-point landing offset.
+_BRAKE_VEL_STOP = 0.08   # m/s — measured speed below which the gait may
+                         # stop once cmd_vel is zero: brake with steps first,
+                         # then stand, instead of freezing the feet under a
+                         # body that still carries momentum (tips forward).
+_BRAKE_MAX_S = 2.0       # s — hard cap on braking-step time after cmd → 0,
+                         # so a noisy velocity estimate can't keep the robot
+                         # stepping in place forever.
 
 # Leg ordering used for stance IK loops: FR=0, FL=1, RR=2, RL=3
 _MPC_LEG_ORDER = ["FR", "FL", "RR", "RL"]
@@ -215,20 +226,23 @@ def _state_from_estimate(est: np.ndarray, pos: np.ndarray) -> np.ndarray:
     ], dtype=float)
 
 
-def _measured_body_z(
+def _measured_body_state(
     joint_pos: dict[str, float],
     joint_vel: dict[str, float],
     weights: dict[str, float],
     R_body: np.ndarray,
-) -> tuple[float, float] | None:
-    """Body height + vertical velocity from stance-leg FK (leg odometry, z only).
+) -> tuple[float, np.ndarray] | None:
+    """Body height + 3D velocity from stance-leg FK (leg odometry).
 
     A planted foot is pinned to the ground, so the body sits −(R·p_foot)_z
-    above it and moves at (R·(−J·q̇))_z. Averaged over legs weighted by their
+    above it and moves at R·(−J·q̇). Averaged over legs weighted by their
     stance load ramp: a foot at touchdown/lift-off carries ~zero weight in the
-    estimate exactly when its contact is least trustworthy. Returns None when
-    no leg carries load (full flight — never happens in trot)."""
-    num_h = num_v = den = 0.0
+    estimate exactly when its contact is least trustworthy. R_body carries no
+    yaw (IMU can't observe it), so the velocity comes out in the heading
+    frame — the same frame cmd_vel and the foot targets live in. Returns
+    None when no leg carries load (full flight — never happens in trot)."""
+    num_h = den = 0.0
+    num_v = np.zeros(3)
     for leg in _MPC_LEG_ORDER:
         w = float(weights.get(leg, 0.0))
         if w <= 1e-6:
@@ -238,11 +252,26 @@ def _measured_body_z(
         p_w = R_body @ np.asarray(forward_kinematics(leg, q), dtype=float)
         v_w = R_body @ leg_kinematic_velocity(leg, q, dq)
         num_h += w * -p_w[2]
-        num_v += w * v_w[2]
+        num_v += w * v_w
         den += w
     if den <= 1e-6:
         return None
     return num_h / den, num_v / den
+
+
+def _landing_correction(
+    v_meas: np.ndarray, v_cmd: np.ndarray, k: float, clamp: float = _RAIBERT_CLAMP
+) -> np.ndarray:
+    """Raibert-style capture offset for the landing target (xy, heading frame).
+
+    offset = k·(v_meas − v_cmd): the foot lands further along wherever the
+    body is actually going beyond what was commanded, so ground friction
+    decelerates the excess instead of the body running past its feet. k has
+    units of seconds; the pure capture point would be √(h/g) ≈ 0.17 s, we
+    correct incrementally with a fraction of that. Clamped so a bad velocity
+    estimate can at worst mis-place a step, not fold a leg."""
+    off = k * (np.asarray(v_meas, dtype=float) - np.asarray(v_cmd, dtype=float))
+    return np.clip(off, -clamp, clamp)
 
 
 def _project_vertical_grf(grf: np.ndarray, foot_pos: np.ndarray) -> np.ndarray:
@@ -452,6 +481,9 @@ class MPCNode(Node):
         # is still too small for z_fb_weight to matter.
         self.declare_parameter("tau_ramp_frac", float(mpc_cfg.get("tau_ramp_frac", _TAU_RAMP_FRAC)))
         self.declare_parameter("vz_fb_weight",  float(mpc_cfg.get("vz_fb_weight", 10.0)))
+        # Capture-point landing correction gain (s): foot placement reacts to
+        # the leg-odometry velocity error. 0 disables (old open-loop feet).
+        self.declare_parameter("k_raibert", float(mpc_cfg.get("k_raibert", 0.06)))
 
         mass = float(self.get_parameter("mass").value)
         inertia = np.diag([
@@ -484,6 +516,8 @@ class MPCNode(Node):
         self._tau_lp = [0.0] * 12        # low-passed output torque
         self._rate_lp = np.zeros(3)      # low-passed world-frame body rate
         self._z_lp: np.ndarray | None = None  # low-passed (height, vz) leg odometry
+        self._vmeas_lp: np.ndarray | None = None  # low-passed [vx, vy, wz] leg odometry
+        self._brake_until: float | None = None    # braking-step deadline after cmd → 0
 
         # Per-joint base kp/kd (motor side, same basis as motor_bus_node)
         _ctrl = control
@@ -744,14 +778,15 @@ class MPCNode(Node):
             # lift, instead of relying on the mass feedforward being exact.
             # Load-ramp-weighted so a barely-touching foot barely counts;
             # same 30 ms LP as the gyro to smooth contact-set changes.
-            zm = _measured_body_z(
+            zm = _measured_body_state(
                 self._joint_pos, self._joint_vel, leg_scale, R_body
             )
             if zm is not None:
+                z_sample = np.array([zm[0], zm[1][2]])
                 if self._z_lp is None:
-                    self._z_lp = np.array(zm)
+                    self._z_lp = z_sample
                 else:
-                    self._z_lp += a_r * (np.array(zm) - self._z_lp)
+                    self._z_lp += a_r * (z_sample - self._z_lp)
             if zm is not None and bool(self.get_parameter("z_fb_enabled").value):
                 srbd_state[5] = stance_h + float(np.clip(
                     self._z_lp[0] - stance_h, -_Z_ERR_CLIP, _Z_ERR_CLIP
@@ -992,6 +1027,10 @@ class MPCNode(Node):
             float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
             or float(np.max(np.abs(self._vel_filt))) >= _WALK_VEL_THRESH
         )
+        if moving:
+            self._brake_until = None
+        elif self._brake_until is None:
+            self._brake_until = now + _BRAKE_MAX_S
 
         if not self._walking:
             if not moving:
@@ -1007,7 +1046,44 @@ class MPCNode(Node):
 
         gait_state = self._gait.query(now)
 
-        if not moving and all(gait_state[leg]["contact"] for leg in LEG_NAMES):
+        # Per-leg load ramp (also the trust weights for leg odometry):
+        # zero commanded force at touchdown and lift-off.
+        ramp_frac = float(self.get_parameter("tau_ramp_frac").value)
+        leg_scale = {
+            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now), ramp_frac)
+                  if gait_state[leg]["contact"] else 0.0)
+            for leg in LEG_NAMES
+        }
+
+        # Leg-odometry horizontal state [vx, vy, wz] (heading frame): the
+        # only place the controller learns where the body ACTUALLY goes —
+        # cmd_vel alone steers the feet otherwise. Drives the capture-point
+        # landing correction and the braking-step stop condition below.
+        est = np.asarray(self._state_estimate, dtype=float)
+        R_body = _euler_to_R(_state_from_estimate(est, np.zeros(3))[:3])
+        bm = _measured_body_state(self._joint_pos, self._joint_vel, leg_scale, R_body)
+        if bm is not None:
+            v_sample = np.array([bm[1][0], bm[1][1], float(est[5])])
+            if self._vmeas_lp is None:
+                self._vmeas_lp = v_sample
+            else:
+                a_v = min(1.0, self._dt / _VMEAS_LP_TAU)
+                self._vmeas_lp += a_v * (v_sample - self._vmeas_lp)
+
+        # Braking steps: with cmd at zero but the body still moving, keep
+        # walking (capture-point offsets now brake it) instead of freezing
+        # the feet under a body that would pitch over them. Time-capped so
+        # estimate noise can't turn into stepping-in-place forever.
+        braking = (
+            self._vmeas_lp is not None
+            and float(np.hypot(self._vmeas_lp[0], self._vmeas_lp[1])) > _BRAKE_VEL_STOP
+            and self._brake_until is not None
+            and now < self._brake_until
+        )
+
+        if not moving and not braking and all(
+            gait_state[leg]["contact"] for leg in LEG_NAMES
+        ):
             # Stop only inside an all-contact window: cutting a mid-air swing
             # would snap that leg straight to the stance pose. With
             # swing_ratio < 0.5 the trot has two such windows per period, so
@@ -1049,6 +1125,7 @@ class MPCNode(Node):
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
         att_dz = self._attitude_dz()
+        k_raibert = float(self.get_parameter("k_raibert").value)
 
         for leg in LEG_NAMES:
             in_contact = gait_state[leg]["contact"]
@@ -1068,9 +1145,26 @@ class MPCNode(Node):
                 p_land = landing_target(
                     leg, v_leg, self._gait.period, swing_ratio, stance_h
                 )
+                if k_raibert > 0.0 and self._vmeas_lp is not None:
+                    # Capture-point correction: land further along the
+                    # measured-minus-commanded velocity (per leg, so a yaw
+                    # rate error becomes opposite fore-aft offsets on the
+                    # two sides — heading holds without stick trimming).
+                    v_meas_leg = leg_velocity(
+                        self._vmeas_lp[0:2], float(self._vmeas_lp[2]), leg
+                    )
+                    p_land = np.asarray(p_land, dtype=float).copy()
+                    p_land[0:2] += _landing_correction(v_meas_leg, v_leg, k_raibert)
                 # Clearance scales with leg speed so near-zero-stride steps
-                # (stride ramping in/out) stay near the ground.
-                step_scale = min(1.0, float(np.hypot(*v_leg)) / _STEP_VEL_REF)
+                # (stride ramping in/out) stay near the ground. Measured
+                # speed counts too: braking steps (cmd 0, body moving) must
+                # clear the ground, not drag along it.
+                speed_ref = float(np.hypot(*v_leg))
+                if self._vmeas_lp is not None:
+                    speed_ref = max(speed_ref, float(
+                        np.hypot(self._vmeas_lp[0], self._vmeas_lp[1])
+                    ))
+                step_scale = min(1.0, speed_ref / _STEP_VEL_REF)
                 # Endpoint slope −v·T_swing: zero ground-relative foot velocity
                 # at lift-off/touchdown. If body sag keeps the "swinging" foot
                 # loaded near those moments, it then pushes the body the same
@@ -1107,13 +1201,6 @@ class MPCNode(Node):
                 ) if prev is not None else 0.0
                 self._prev_cmd_q[jname] = qval
 
-        # Per-leg load ramp: zero commanded force at touchdown and lift-off.
-        ramp_frac = float(self.get_parameter("tau_ramp_frac").value)
-        leg_scale = {
-            leg: (_stance_load_ramp(self._gait.stance_phase(leg, now), ramp_frac)
-                  if gait_state[leg]["contact"] else 0.0)
-            for leg in LEG_NAMES
-        }
         # Future contacts sampled at the MPC's own step, not the tick period
         # — this is what gives the QP its lookahead. Each entry is the
         # fraction of that prediction step spent in contact (subsampled),
@@ -1193,6 +1280,8 @@ class MPCNode(Node):
                     self._tau_lp = [0.0] * 12
                     self._rate_lp = np.zeros(3)
                     self._z_lp = None
+                    self._vmeas_lp = None
+                    self._brake_until = None
                     self._grf_prev = None
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
@@ -1206,6 +1295,8 @@ class MPCNode(Node):
                 self._tau_lp = [0.0] * 12
                 self._rate_lp = np.zeros(3)
                 self._z_lp = None
+                self._vmeas_lp = None
+                self._brake_until = None
                 self._grf_prev = None
                 self.get_logger().warn("[mpc] standup timeout → WALK")
             return

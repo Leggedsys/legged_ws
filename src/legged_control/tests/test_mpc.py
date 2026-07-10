@@ -550,11 +550,11 @@ def test_stance_load_ramp_frac_param():
     assert _stance_load_ramp(1.0, 0.1) == 0.0
 
 
-def test_measured_body_z_matches_fk():
+def test_measured_body_state_matches_fk():
     """Load-weighted stance FK height: matches plain FK, ignores unloaded
     legs, returns None with no load anywhere."""
     from legged_control.kinematics import forward_kinematics
-    from legged_control.mpc.mpc_node import _measured_body_z
+    from legged_control.mpc.mpc_node import _measured_body_state
 
     q_leg = (0.0, 0.8, -1.6)
     joint_pos = {f"{leg}_{j}": v for leg in ["FR", "FL", "RR", "RL"]
@@ -563,25 +563,26 @@ def test_measured_body_z_matches_fk():
     R = np.eye(3)
 
     h_fk = -forward_kinematics("FR", q_leg)[2]
-    out = _measured_body_z(joint_pos, joint_vel, {l: 1.0 for l in ["FR", "FL", "RR", "RL"]}, R)
+    out = _measured_body_state(joint_pos, joint_vel, {l: 1.0 for l in ["FR", "FL", "RR", "RL"]}, R)
     assert out is not None
     assert out[0] == pytest.approx(h_fk, abs=1e-9)
-    assert out[1] == pytest.approx(0.0, abs=1e-9)
+    np.testing.assert_allclose(out[1], 0.0, atol=1e-9)
 
     # a zero-weight leg is excluded: garbage joints there must not matter
     joint_pos["RL_calf"] = 2.5
-    out2 = _measured_body_z(
+    out2 = _measured_body_state(
         joint_pos, joint_vel, {"FR": 1.0, "FL": 1.0, "RR": 1.0, "RL": 0.0}, R
     )
     assert out2[0] == pytest.approx(h_fk, abs=1e-9)
 
-    assert _measured_body_z(joint_pos, joint_vel, {}, R) is None
+    assert _measured_body_state(joint_pos, joint_vel, {}, R) is None
 
 
-def test_measured_body_z_vz_finite_diff():
-    """Vertical rate must equal the finite-difference of the FK height."""
+def test_measured_body_state_vel_finite_diff():
+    """The 3D body velocity must equal the finite-difference of the FK foot
+    position (negated: the foot is pinned, the body moves)."""
     from legged_control.kinematics import forward_kinematics
-    from legged_control.mpc.mpc_node import _measured_body_z
+    from legged_control.mpc.mpc_node import _measured_body_state
 
     q = (0.05, 0.9, -1.7)
     dq = (0.1, -0.4, 0.6)
@@ -593,14 +594,34 @@ def test_measured_body_z_vz_finite_diff():
         for j, v in zip(["hip", "thigh", "calf"], q):
             joint_pos[f"{leg}_{j}"] = v
             joint_vel[f"{leg}_{j}"] = 0.0
-    out = _measured_body_z(
+    out = _measured_body_state(
         joint_pos, joint_vel,
         {"FR": 1.0, "FL": 0.0, "RR": 0.0, "RL": 0.0}, np.eye(3),
     )
     q2 = tuple(qi + di * dt for qi, di in zip(q, dq))
-    h1 = -forward_kinematics("FR", q)[2]
-    h2 = -forward_kinematics("FR", q2)[2]
-    assert out[1] == pytest.approx((h2 - h1) / dt, rel=1e-2)
+    p1 = np.array(forward_kinematics("FR", q))
+    p2 = np.array(forward_kinematics("FR", q2))
+    v_body = -(p2 - p1) / dt   # foot pinned → body velocity is minus foot velocity
+    np.testing.assert_allclose(out[1], v_body, rtol=1e-2)
+
+
+def test_landing_correction_sign_and_clamp():
+    """Body faster than commanded → foot lands further ahead (brakes the
+    excess); offset clamps so a bad estimate can't fold a leg."""
+    from legged_control.mpc.mpc_node import _landing_correction, _RAIBERT_CLAMP
+
+    # overspeed forward → positive x offset, proportional to k
+    off = _landing_correction(np.array([0.3, 0.0]), np.array([0.1, 0.0]), k=0.1)
+    assert off[0] == pytest.approx(0.02)
+    assert off[1] == pytest.approx(0.0)
+    # matching velocities → no correction
+    np.testing.assert_allclose(
+        _landing_correction(np.array([0.2, -0.1]), np.array([0.2, -0.1]), k=0.1), 0.0
+    )
+    # huge error → clamp, never beyond workspace guard
+    off = _landing_correction(np.array([5.0, -5.0]), np.zeros(2), k=0.2)
+    assert off[0] == pytest.approx(_RAIBERT_CLAMP)
+    assert off[1] == pytest.approx(-_RAIBERT_CLAMP)
 
 
 def test_mpc_z_feedback_lifts_sagging_body(mpc):
