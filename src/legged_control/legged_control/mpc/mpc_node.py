@@ -594,6 +594,7 @@ class MPCNode(Node):
         # [0] h_meas [1] vz_meas [2] z_err(clipped) [3] Σfz
         # [4:8] fz FR,FL,RR,RL [8] tau_blend [9] roll [10] pitch
         # [11] wx [12] wy (world) [13] stance_h ref
+        # [14:17] leg-odometry v_meas [vx, vy, wz] (heading frame)
         self._pub_debug = self.create_publisher(Float32MultiArray, "/mpc_debug", 10)
         self.create_subscription(JointState, "/joint_states_aggregated", self._on_joints, 10)
         self.create_subscription(Float32MultiArray, "/state_estimate", self._on_state, 10)
@@ -835,6 +836,13 @@ class MPCNode(Node):
                     float(srbd_state[0]), float(srbd_state[1]),
                     float(srbd_state[6]), float(srbd_state[7]),
                     float(stance_h),
+                    # [14:17] leg-odometry velocity estimate [vx, vy, wz] —
+                    # feeds the capture-point landing offset and the braking
+                    # steps; ~0 while walking means those features are inert
+                    # (and the landing offset actively pulls feet backward).
+                    float(self._vmeas_lp[0]) if self._vmeas_lp is not None else 0.0,
+                    float(self._vmeas_lp[1]) if self._vmeas_lp is not None else 0.0,
+                    float(self._vmeas_lp[2]) if self._vmeas_lp is not None else 0.0,
                 ]
                 self._pub_debug.publish(dbg)
                 tau_raw = _build_stance_tau(
