@@ -1185,6 +1185,13 @@ class MPCNode(Node):
             if q_leg is None:
                 # Hold the previous commanded angles rather than snapping to
                 # the default pose — an IK miss must not step the command.
+                # Repeated misses freeze-then-jump the foot (reads as stutter);
+                # the usual cause is the Raibert/landing offset pushing p_land
+                # past the leg workspace edge.
+                self.get_logger().warn(
+                    f"IK miss {leg} target={np.round(p_foot, 3).tolist()}",
+                    throttle_duration_sec=1.0,
+                )
                 q_leg = tuple(
                     self._prev_cmd_q[j] if self._prev_cmd_q[j] is not None else _DEFAULT_Q[j]
                     for j in _leg_joints(leg)
