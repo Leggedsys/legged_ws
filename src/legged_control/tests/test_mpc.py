@@ -1059,3 +1059,21 @@ def test_terrain_hold_without_updates_decays_after_reset():
     for _ in range(800):           # standing: no trusted feet, LP still runs
         te.update({}, {}, np.eye(3), 0.01)
     assert abs(te.world_slope[0]) < 2e-3
+
+
+def test_body_plane_conversion_conforms_to_tilt():
+    """Documents the disturbance-transparency mechanism the node must
+    filter: converting a world-flat plane through a rolled attitude yields
+    dz that CONFORMS the feet to the roll (kills PD leveling stiffness if
+    fed the instant attitude — that's why _terrain_tick uses a 0.5 s slow
+    attitude for this conversion, while anchors keep the instant one)."""
+    from legged_control.mpc.srbd_mpc import _euler_to_R
+    te = _make_terrain()  # world plane stays flat (reset state)
+    R_rolled = _euler_to_R(np.array([np.radians(5.0), 0.0, 0.0]))
+    a_b, b_b = te.body_plane(R_rolled)
+    y = _body_xy("FL")[1]
+    # flat world plane + 5° roll → body-frame dz ≈ ±1.4 cm at the foot span
+    assert abs(b_b * y) > 0.012
+    # level attitude → no offsets
+    a0, b0 = te.body_plane(np.eye(3))
+    assert abs(a0) < 1e-9 and abs(b0) < 1e-9

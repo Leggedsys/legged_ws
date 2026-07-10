@@ -170,6 +170,18 @@ _ATT_I_LEAK_TAU = 1.0    # s — integral decays to zero when the estimate is
 _TERRAIN_BLEND_TAU = 0.3 # s — enable/disable ramp on the terrain adaptation
                          # outputs (foot dz + attitude reference), so a runtime
                          # toggle can never step the foot targets or the QP ref.
+_TERRAIN_ATT_TAU = 0.5   # s — slow filter on the attitude used to convert the
+                         # world plane into body-frame foot offsets. With the
+                         # INSTANT attitude the dz layer conforms feet to any
+                         # tilt — a hand pressing the body down reads as
+                         # "ground is higher on that side", the targets yield
+                         # (~1.8 cm per 5° at the foot span) and PD leveling
+                         # stiffness vanishes; walking's 2.5-4 Hz roll wobble
+                         # pumps the same path against the QP moments (jerky
+                         # "two levelers fighting", hardware 2026-07-10).
+                         # Terrain is slow; disturbances are fast. Filter at
+                         # the plane-LP timescale: real slopes still conform,
+                         # presses and gait wobble meet full PD stiffness.
 # tau_ff smoothing — three layers so the feedforward torque can never step
 # (the phase-transition snaps that plagued the original force controller):
 _TAU_BLEND_TAU = 0.3     # s — global ramp on WALK entry / runtime enable-disable
@@ -498,6 +510,12 @@ class MPCNode(Node):
         # to the roll/pitch weight of 200: damping strength knob.
         self.declare_parameter("rate_fb_enabled", bool(mpc_cfg.get("rate_fb_enabled", True)))
         self.declare_parameter("rate_fb_weight",  float(mpc_cfg.get("rate_fb_weight", 1.0)))
+        # QP roll/pitch ANGLE cost (was hardcoded 200 in srbd_mpc defaults).
+        # The 2026-07-10 moment-arm fix tripled the lever the QP levels with,
+        # so the same weight now corrects ~3× harder — expose it so the
+        # pre-fix feel is one `ros2 param set` away (~65 ≈ old effective
+        # stiffness; rate_fb_weight 0.35 likewise ≈ its old damping).
+        self.declare_parameter("angle_fb_weight", float(mpc_cfg.get("angle_fb_weight", 200.0)))
         # Height loop closure: measured body z (+ vertical rate) from
         # stance-leg FK fed into the QP. Sag → z error → extra lift, so total
         # force no longer relies on the mass parameter being exact — set mass
@@ -625,6 +643,8 @@ class MPCNode(Node):
         )
         self._terrain_dz_blend = 0.0   # enable ramp, foot-offset layer
         self._terrain_att_blend = 0.0  # enable ramp, attitude-reference layer
+        self._terrain_rpy_slow = np.zeros(2)  # slow-filtered roll/pitch for
+                                              # the plane→body conversion
         # Live stance height: follows /height_command (LT/RT) slew-limited;
         # falls back to the stance_height parameter until a command arrives.
         self._stance_h = float(self.get_parameter("stance_height").value)
@@ -831,7 +851,19 @@ class MPCNode(Node):
         self._terrain_dz_blend += a_b * (dz_on - self._terrain_dz_blend)
         self._terrain_att_blend += a_b * (att_on - self._terrain_att_blend)
 
-        a_p, b_p = self._terrain.body_plane(R_body)
+        # Plane→body conversion through a SLOW attitude (see _TERRAIN_ATT_TAU):
+        # anchors above use the instant R_body (measurement side); the foot
+        # offsets below must not chase fast tilts.
+        roll_m = float(np.arctan2(R_body[2, 1], R_body[2, 2]))
+        pitch_m = float(-np.arcsin(np.clip(R_body[2, 0], -1.0, 1.0)))
+        a_s = min(1.0, self._dt / _TERRAIN_ATT_TAU)
+        self._terrain_rpy_slow += a_s * (
+            np.array([roll_m, pitch_m]) - self._terrain_rpy_slow
+        )
+        R_slow = _euler_to_R(
+            np.array([self._terrain_rpy_slow[0], self._terrain_rpy_slow[1], 0.0])
+        )
+        a_p, b_p = self._terrain.body_plane(R_slow)
         plane = (self._terrain_dz_blend * a_p, self._terrain_dz_blend * b_p)
         r_ref, p_ref = self._terrain.ref_attitude()
         att_ref = (self._terrain_att_blend * r_ref, self._terrain_att_blend * p_ref)
@@ -905,6 +937,9 @@ class MPCNode(Node):
                 srbd_state[6:8] = state_ref[6:8]
             self._mpc._Q[6, 6] = self._mpc._Q[7, 7] = float(
                 self.get_parameter("rate_fb_weight").value
+            )
+            self._mpc._Q[0, 0] = self._mpc._Q[1, 1] = float(
+                self.get_parameter("angle_fb_weight").value
             )
             # z feedback: measured height + vertical rate from stance-leg FK
             # closes the height loop — sag becomes a z error becomes extra
