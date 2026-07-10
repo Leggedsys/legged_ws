@@ -944,3 +944,55 @@ def test_terrain_reset_returns_to_flat():
     te.reset(0.27)
     _feed(te, {}, np.eye(3), seconds=3.0)  # no updates, LP decays on flat anchors
     assert np.allclose(te.world_slope, 0.0, atol=2e-3)
+
+
+# ── Low-posture lateral spread ───────────────────────────────────────────────
+
+def _knee_clearance(leg, h, spread):
+    """Knee (thigh-calf joint) height above ground for a foot planted at
+    (nominal x, D_LAT + spread, −h)."""
+    from legged_control.kinematics import (
+        inverse_kinematics, _leg_signs, D_LAT, L_HIP_X, L2,
+    )
+    hip_sign, lat_sign, x_sign = _leg_signs(leg)
+    q = inverse_kinematics(leg, (x_sign * L_HIP_X, lat_sign * (D_LAT + spread), -h))
+    assert q is not None
+    hip = hip_sign * q[0]
+    z_knee = lat_sign * D_LAT * np.sin(hip) - L2 * np.cos(q[1]) * np.cos(hip)
+    return h + z_knee, q
+
+
+def test_lateral_spread_schedule():
+    from legged_control.mpc.mpc_node import _lateral_spread
+    assert _lateral_spread(0.27, 0.22, 0.06) == 0.0   # normal height: no-op
+    assert _lateral_spread(0.22, 0.22, 0.06) == 0.0
+    assert _lateral_spread(0.20, 0.22, 0.06) == pytest.approx(0.02)
+    assert _lateral_spread(0.16, 0.22, 0.06) == pytest.approx(0.06)  # capped
+    assert _lateral_spread(0.10, 0.22, 0.06) == pytest.approx(0.06)
+
+
+def test_lateral_spread_raises_knee_clearance():
+    """The point of the feature: at crouch heights the spread posture must
+    measurably lift the knee off the ground, on front and rear legs."""
+    for leg in ("FR", "RL"):
+        c0, _ = _knee_clearance(leg, 0.17, 0.0)
+        c6, _ = _knee_clearance(leg, 0.17, 0.06)
+        assert c6 > c0 + 0.012, f"{leg}: {c0:.3f} → {c6:.3f}"
+
+
+def test_lateral_spread_respects_hip_limit():
+    """Full spread at the lowest reachable heights must stay inside the
+    ±0.4 rad hip limit (robot.yaml q_min/q_max) with margin for attitude
+    corrections — otherwise the bridge clips and feet land inboard."""
+    for leg in LEG_NAMES:
+        for h in (0.16, 0.18, 0.20):
+            _, q = _knee_clearance(leg, h, 0.06)
+            assert abs(q[0]) < 0.35, f"{leg} h={h}: q1={q[0]:.3f}"
+
+
+def test_lateral_spread_relaxes_calf_fold():
+    """Spread must also back the calf away from its −2.65 rad limit — the
+    swing-phase fold margin that keeps low-height stepping feasible."""
+    _, q0 = _knee_clearance("FR", 0.16, 0.0)
+    _, q6 = _knee_clearance("FR", 0.16, 0.06)
+    assert q6[2] > q0[2] + 0.2  # calf angle retreats ≥ 0.2 rad from the limit

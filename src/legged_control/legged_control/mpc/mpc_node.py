@@ -58,6 +58,23 @@ from legged_control.mpc.swing_trajectory import (
 )
 
 
+def _lateral_spread(stance_h: float, start: float, s_max: float) -> float:
+    """Low-posture lateral stance spread (m): 0 at/above `start`, growing
+    1:1 as the body drops below it, capped at `s_max`.
+
+    Crouching with the feet at the nominal lateral offset folds the leg
+    hard — the knee drops toward the ground (h=0.16: clearance 8 cm and
+    the calf sits at −2.22 rad, 0.4 from its −2.65 limit; mid-swing folds
+    eat most of what's left → knees knock the floor). Abducting the hips
+    and planting the feet wider keeps the same body height with less fold:
+    +6 cm spread at h=0.16 buys ~2 cm knee clearance and moves the calf
+    to −1.92 rad. Capped at 0.06 m because the hips saturate at ±0.4 rad
+    (q1 = 0.32 at h=0.16, s=0.06 — leaves margin for attitude offsets).
+    Zero at normal heights: the validated baseline is untouched.
+    """
+    return float(np.clip(start - stance_h, 0.0, s_max))
+
+
 def _hip_mount_xy(leg: str) -> tuple[float, float]:
     """Hip-frame → body-frame xy offset for a leg. forward_kinematics and
     the foot targets live in per-leg HIP frames whose origins sit at the
@@ -482,6 +499,14 @@ class MPCNode(Node):
         )
         self.declare_parameter(
             "terrain_att_ref_enabled", bool(mpc_cfg.get("terrain_att_ref_enabled", True))
+        )
+        # Low-posture stance spread (see _lateral_spread): below
+        # low_spread_start the feet plant wider, up to low_spread_max.
+        self.declare_parameter(
+            "low_spread_start", float(mpc_cfg.get("low_spread_start", 0.22))
+        )
+        self.declare_parameter(
+            "low_spread_max", float(mpc_cfg.get("low_spread_max", 0.06))
         )
 
         mass = float(self.get_parameter("mass").value)
@@ -1048,15 +1073,24 @@ class MPCNode(Node):
         leg_scale = {leg: 1.0 for leg in LEG_NAMES}
         R_body = self._R_body_est()
         terrain_plane, att_ref = self._terrain_tick(leg_scale, R_body)
+        spread = _lateral_spread(
+            stance_h,
+            float(self.get_parameter("low_spread_start").value),
+            float(self.get_parameter("low_spread_max").value),
+        )
         dz = self._attitude_dz()
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = nominal_foot_position(leg, stance_h)
+            y_sp = _leg_signs(leg)[1] * spread
             mx, my = _hip_mount_xy(leg)
             dz_t = dz_on_plane(
-                terrain_plane[0], terrain_plane[1], p_foot[0] + mx, p_foot[1] + my
+                terrain_plane[0], terrain_plane[1],
+                p_foot[0] + mx, p_foot[1] + y_sp + my,
             )
-            p_foot = np.array([p_foot[0], p_foot[1], p_foot[2] + dz[leg] + dz_t])
+            p_foot = np.array([
+                p_foot[0], p_foot[1] + y_sp, p_foot[2] + dz[leg] + dz_t
+            ])
             preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
             if q_leg is None:
@@ -1168,6 +1202,11 @@ class MPCNode(Node):
         }
         R_body = self._R_body_est()
         terrain_plane, att_ref = self._terrain_tick(leg_scale, R_body)
+        spread = _lateral_spread(
+            stance_h,
+            float(self.get_parameter("low_spread_start").value),
+            float(self.get_parameter("low_spread_max").value),
+        )
 
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
@@ -1212,11 +1251,17 @@ class MPCNode(Node):
             # spot — this is what removes the slope-transition early/late
             # touchdown.
             self._last_p_foot[leg] = np.array(p_foot)
+            # Low-posture spread first (lateral), then terrain dz evaluated
+            # at the xy the foot will actually occupy.
+            y_sp = _leg_signs(leg)[1] * spread
             mx, my = _hip_mount_xy(leg)
             dz_t = dz_on_plane(
-                terrain_plane[0], terrain_plane[1], p_foot[0] + mx, p_foot[1] + my
+                terrain_plane[0], terrain_plane[1],
+                p_foot[0] + mx, p_foot[1] + y_sp + my,
             )
-            p_foot = np.array([p_foot[0], p_foot[1], p_foot[2] + att_dz[leg] + dz_t])
+            p_foot = np.array([
+                p_foot[0], p_foot[1] + y_sp, p_foot[2] + att_dz[leg] + dz_t
+            ])
 
             preferred = tuple(self._joint_pos[j] for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)

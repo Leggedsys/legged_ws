@@ -337,6 +337,16 @@ mpc:
   #   step_height 建议临时提到 0.04 防上坡蹭脚尖。
   terrain_adapt_enabled: true
   terrain_att_ref_enabled: true
+  # 低姿态外撇（2026-07-10）：站高压到 low_spread_start 以下后,髋外展、
+  # 脚按 1:1 随高度下降往外撇（上限 low_spread_max),"蜥蜴式"低姿态。
+  # 动机:低姿态下腿折叠太狠,膝盖敲地——h=0.16 时膝离地仅 ~8cm 且小腿角
+  # −2.22 rad 离 −2.65 限位只剩 0.4,摆动再折就见底。外撇 6cm 等效腿伸展
+  # 变长:膝盖 +2cm、小腿角退到 −1.92。上限 0.06 是髋限位 ±0.4 rad 决定的
+  # （h=0.16/s=0.06 时 q1=0.32,给姿态修正留余量;再大会被限位夹住导致
+  # 落脚偏内）。正常站高（>0.22）外撇为 0,基线行为不变。
+  # 运行时:ros2 param set /mpc_node low_spread_max 0.08（慎,见上）
+  low_spread_start: 0.22
+  low_spread_max:   0.06
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
