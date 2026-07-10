@@ -33,7 +33,7 @@ from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float32, Float32MultiArray
+from std_msgs.msg import Bool, Float32, Float32MultiArray, Int8
 from geometry_msgs.msg import Twist
 
 from legged_control.kinematics import (
@@ -56,6 +56,27 @@ from legged_control.mpc.swing_trajectory import (
     _HIP_MOUNT_X,
     _HIP_MOUNT_Y,
 )
+
+
+def _renorm_levels(dz: dict[str, float], dt: float, clear: bool = False) -> None:
+    """Slew the COMMON part of the per-leg level offsets toward zero (the
+    body climbs to nominal height over the new step); with clear=True every
+    offset slews to zero independently (manual exit — flat ground only).
+    Mutates dz in place, rate-limited so it can never step the targets."""
+    step = _LEVEL_RENORM_RATE * dt
+    if clear:
+        for leg in dz:
+            dz[leg] -= float(np.clip(dz[leg], -step, step))
+        return
+    lo, hi = min(dz.values()), max(dz.values())
+    shift = 0.0
+    if lo > 1e-4:
+        shift = min(lo, step)
+    elif hi < -1e-4:
+        shift = max(hi, -step)
+    if shift:
+        for leg in dz:
+            dz[leg] -= shift
 
 
 def _sway_for(leg: str) -> np.ndarray:
@@ -209,6 +230,16 @@ _STAIR_SPEED_CAP = 0.08  # m/s — governed forward speed on stairs
 _STAIR_VY_CAP = 0.03     # m/s — lateral cap (alignment nudges only)
 _STAIR_YAW_CAP = 0.15    # rad/s — heading nudges only
 _STAIR_MIN_STEP_H = 0.12 # m — clearance floor over a 100 mm riser
+_LEVEL_RENORM_RATE = 0.04 # m/s — once ALL feet share a common level offset
+                          # (both pairs climbed the step), the common part
+                          # slews to zero: the body rises to nominal height
+                          # over the new step. This IS the exit mechanism —
+                          # after the rear pair lands, bookkeeping resets
+                          # itself and the next step starts from zero.
+_STEP_PENDING_TTL = 10.0  # s — an unconsumed step-up press expires
+_RISE_CLEARANCE = 0.04    # m — extra swing clearance while a leg executes a
+                          # level change (the arc must clear the riser EDGE,
+                          # not just reach the tread height)
 _SWAY_X = 0.015          # m — crawl body sway, fore-aft component
 _SWAY_Y = 0.03           # m — crawl body sway, lateral component
 _SWAY_TAU = 0.2          # s — sway low-pass (smooth weight shift)
@@ -625,6 +656,9 @@ class MPCNode(Node):
         # Stair mode: crawl gait + governed speed + full clearance + contact
         # detection, one switch. Gait mode itself only flips while standing.
         self.declare_parameter("stair_mode", bool(mpc_cfg.get("stair_mode", False)))
+        # Operator-triggered step-up: rise per /step_command press (the
+        # 100 mm stair, plus a little for the foot to land flat on it).
+        self.declare_parameter("stair_rise", float(mpc_cfg.get("stair_rise", 0.10)))
         self.declare_parameter(
             "contact_tau_thresh", float(mpc_cfg.get("contact_tau_thresh", 3.0))
         )
@@ -699,6 +733,12 @@ class MPCNode(Node):
         self._detect_blend = {leg: 1.0 for leg in LEG_NAMES}   # load gate
         self._sway = np.zeros(2)          # LP'd crawl body-sway (x, y)
         self._sway_target = np.zeros(2)
+        # /step_command: per-leg pending level rise (timestamp for expiry),
+        # consumed at that leg's next lift-off; clear flag slews all levels
+        # to zero (manual exit).
+        self._level_pending: dict[str, float] = {}
+        self._level_clear = False
+        self._rise_boost = {leg: False for leg in LEG_NAMES}
 
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
@@ -768,6 +808,7 @@ class MPCNode(Node):
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_subscription(Bool, "/posture_command", self._on_posture, 10)
         self.create_subscription(Float32, "/height_command", self._on_height, 10)
+        self.create_subscription(Int8, "/step_command", self._on_step, 10)
 
         self.create_timer(self._dt, self._tick)
         self.get_logger().info(
@@ -806,6 +847,21 @@ class MPCNode(Node):
             float(msg.linear.y),
             float(msg.angular.z),
         ])
+
+    def _on_step(self, msg: Int8) -> None:
+        now = time.monotonic()
+        if msg.data == 1:
+            for leg in ("FR", "FL"):
+                self._level_pending[leg] = now
+            self.get_logger().info("[step] front pair queued +rise at next lift-off")
+        elif msg.data == 2:
+            for leg in ("RR", "RL"):
+                self._level_pending[leg] = now
+            self.get_logger().info("[step] rear pair queued +rise at next lift-off")
+        elif msg.data == 3:
+            self._level_pending.clear()
+            self._level_clear = True
+            self.get_logger().info("[step] clearing all leg levels")
 
     def _on_height(self, msg: Float32) -> None:
         self._height_cmd = float(msg.data)
@@ -1470,6 +1526,17 @@ class MPCNode(Node):
                 # as this foot's landing prior (300 mm treads: the next
                 # footfall usually lands on the same step)
                 self._probe_dz[leg] = 0.0
+                # operator step-up: consume a pending level rise — this
+                # swing lands one stair level higher, with extra clearance
+                # for the riser edge
+                t_press = self._level_pending.pop(leg, None)
+                if t_press is not None and now - t_press < _STEP_PENDING_TTL:
+                    self._leg_ground_dz[leg] = float(np.clip(
+                        self._leg_ground_dz[leg]
+                        + float(self.get_parameter("stair_rise").value),
+                        -_GROUND_DZ_CLAMP, _GROUND_DZ_CLAMP,
+                    ))
+                    self._rise_boost[leg] = True
             elif not self._prev_contact[leg] and in_contact:
                 # Touchdown flip: fold an early-touchdown hold (swing found
                 # ground above nominal — stepping UP) into the foot's offset.
@@ -1480,6 +1547,7 @@ class MPCNode(Node):
                     ))
                 self._td_z[leg] = None
                 self._probe_dz[leg] = 0.0
+                self._rise_boost[leg] = False
             self._prev_contact[leg] = in_contact
 
         # Per-leg load ramp: zero commanded force at touchdown and lift-off.
@@ -1517,6 +1585,14 @@ class MPCNode(Node):
             self._sway_target = np.zeros(2)
         a_sw = min(1.0, self._dt / _SWAY_TAU)
         self._sway += a_sw * (self._sway_target - self._sway)
+
+        # Level bookkeeping: common offset slews to zero (body climbs onto
+        # the new step = automatic exit); clear flag drains everything.
+        _renorm_levels(self._leg_ground_dz, self._dt, clear=self._level_clear)
+        if self._level_clear and all(
+            abs(v) < 1e-4 for v in self._leg_ground_dz.values()
+        ):
+            self._level_clear = False
 
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
@@ -1572,13 +1648,17 @@ class MPCNode(Node):
                 step_scale = 1.0 if stair else min(
                     1.0, float(np.hypot(*v_leg)) / _STEP_VEL_REF
                 )
+                step_h_leg = step_h * step_scale
+                if self._rise_boost[leg]:
+                    # level-change swing: full clearance plus edge margin
+                    step_h_leg = max(step_h_leg, step_h + _RISE_CLEARANCE)
                 # Endpoint slope −v·T_swing: zero ground-relative foot velocity
                 # at lift-off/touchdown. If body sag keeps the "swinging" foot
                 # loaded near those moments, it then pushes the body the same
                 # way the stance legs do instead of dragging it backward.
                 t_swing = max(swing_ratio * self._gait.period, 1e-6)
                 p_foot = np.asarray(swing_foot_position(
-                    s, self._lift_pos[leg], p_land, step_h * step_scale,
+                    s, self._lift_pos[leg], p_land, step_h_leg,
                     xy_end_slope=-v_leg * t_swing,
                 ), dtype=float)
                 # Early touchdown (stepping UP: ground arrives mid-descent):

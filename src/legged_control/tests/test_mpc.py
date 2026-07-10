@@ -1145,3 +1145,35 @@ def test_sway_points_away_from_swing_corner():
     assert s_fr[0] > 0 and s_fr[1] < 0
     # opposite corners get opposite sway
     assert np.allclose(_sway_for("RL"), -_sway_for("FR"))
+
+
+# ── Operator step-up levels ──────────────────────────────────────────────────
+
+def test_renorm_levels_common_offset_drains():
+    """All four feet on the new step → the common offset slews to zero
+    (the body climbs); rate-limited, never a step."""
+    from legged_control.mpc.mpc_node import _renorm_levels, _LEVEL_RENORM_RATE
+    dz = {leg: 0.10 for leg in LEG_NAMES}
+    _renorm_levels(dz, 0.01)
+    assert all(v == pytest.approx(0.10 - _LEVEL_RENORM_RATE * 0.01) for v in dz.values())
+    for _ in range(1000):
+        _renorm_levels(dz, 0.01)
+    assert all(abs(v) < 1e-6 for v in dz.values())
+
+
+def test_renorm_levels_straddle_holds():
+    """Fronts up, rears not yet: offsets must NOT move — the straddle is
+    real geometry, only the common part is bookkeeping."""
+    from legged_control.mpc.mpc_node import _renorm_levels
+    dz = {"FR": 0.10, "FL": 0.10, "RR": 0.0, "RL": 0.0}
+    for _ in range(200):
+        _renorm_levels(dz, 0.01)
+    assert dz["FR"] == pytest.approx(0.10) and dz["RR"] == pytest.approx(0.0)
+
+
+def test_renorm_levels_clear_drains_everything():
+    from legged_control.mpc.mpc_node import _renorm_levels
+    dz = {"FR": 0.08, "FL": -0.05, "RR": 0.0, "RL": 0.02}
+    for _ in range(500):
+        _renorm_levels(dz, 0.01, clear=True)
+    assert all(abs(v) < 1e-6 for v in dz.values())

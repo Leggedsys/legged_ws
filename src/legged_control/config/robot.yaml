@@ -162,6 +162,18 @@ teleop:
   invert_vy:  false
   invert_yaw: true
   btn_emergency_stop: 1   # B button: hold → immediate lie-down to passive
+  # 手动上台阶触发（2026-07-10,人当感知、程序管执行）:
+  #   X(2) = 前腿对上一级:按下后 FR/FL 各自在下一次抬腿时把落脚目标抬高
+  #          stair_rise(默认 0.10m),两条前腿自然依次消化;
+  #   Y(3) = 后腿对上一级,同理——时机你自己看,后腿快到立板前按;
+  #   X+Y 同时 = 清除所有腿的台阶偏移(应急退出,只在平地用)。
+  #   四腿偏移出现公共部分(整级都上去了)会以 0.04m/s 自动归零 = 身体
+  #   爬升到新一级的标准站姿,这是正常退出,自动发生,不用操作。
+  #   未消化的按键 10 秒过期。配合 contact_detect_enabled(落地实测校准)
+  #   与慢步频使用;一次只跨一级——前腿没等后腿跟上就再按会顶到 ±0.12m
+  #   限幅并刷 IK miss。
+  btn_step_front: 2
+  btn_step_rear:  3
   axis_lt: 4
   axis_rt: 5
   max_dz:  0.03  # m/s height rate limit
@@ -394,6 +406,7 @@ mpc:
   # 用法:【站定后】ros2 param set /mpc_node stair_mode true,摇杆正对
   # 台阶轻推;结束后站定 set false。慢是特性:10 级台阶约 1.5~2 分钟。
   stair_mode: false
+  stair_rise: 0.10   # m — 每次 /step_command 抬升的台阶高度(100mm 台阶)
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp

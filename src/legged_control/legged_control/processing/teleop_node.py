@@ -77,7 +77,7 @@ try:
     from rclpy.node import Node
     from sensor_msgs.msg import Joy
     from geometry_msgs.msg import Twist
-    from std_msgs.msg import Bool, Float32
+    from std_msgs.msg import Bool, Float32, Int8
     from ament_index_python.packages import get_package_share_directory
 
     class TeleopNode(Node):
@@ -104,6 +104,12 @@ try:
             self._invert_yaw = bool(cfg["invert_yaw"])
             self._btn_estop = int(cfg["btn_emergency_stop"])
             self._btn_posture_toggle = int(cfg.get("btn_posture_toggle", 0))
+            # Stair step-up triggers: X = front pair, Y = rear pair, both
+            # together = clear all learned per-leg levels (manual exit).
+            self._btn_step_front = int(cfg.get("btn_step_front", 2))
+            self._btn_step_rear = int(cfg.get("btn_step_rear", 3))
+            self._prev_step_front = 0
+            self._prev_step_rear = 0
             self._axis_lt = int(cfg.get("axis_lt", 2))
             self._axis_rt = int(cfg.get("axis_rt", 5))
             self._max_dz = float(cfg.get("max_dz", 0.03))
@@ -120,6 +126,10 @@ try:
             self._pub = self.create_publisher(Twist, "/cmd_vel", 10)
             self._posture_command_pub = self.create_publisher(Bool, "/posture_command", 10)
             self._height_pub = self.create_publisher(Float32, "/height_command", 10)
+            # /step_command: 1 = front legs up one level, 2 = rear legs up,
+            # 3 = clear all levels. mpc_node consumes at each leg's next
+            # lift-off — press timing is the operator's job.
+            self._step_pub = self.create_publisher(Int8, "/step_command", 10)
             self.create_subscription(Joy, "/joy", self._on_joy, 10)
             # Publish the height target on a timer too, so a fresh /height_command
             # keeps flowing even when the gamepad is idle (joy_node may go silent).
@@ -157,6 +167,28 @@ try:
                     f"POSTURE: toggle -> standing={self._posture_standing}"
                 )
             self._prev_posture_toggle = posture_toggle_state
+
+            step_front = (
+                buttons[self._btn_step_front]
+                if 0 <= self._btn_step_front < len(buttons) else 0
+            )
+            step_rear = (
+                buttons[self._btn_step_rear]
+                if 0 <= self._btn_step_rear < len(buttons) else 0
+            )
+            front_edge = _button_is_rising_edge(self._prev_step_front, step_front)
+            rear_edge = _button_is_rising_edge(self._prev_step_rear, step_rear)
+            if (front_edge and step_rear) or (rear_edge and step_front):
+                self._step_pub.publish(Int8(data=3))  # both held → clear levels
+                self.get_logger().info("STEP: clear all levels")
+            elif front_edge:
+                self._step_pub.publish(Int8(data=1))
+                self.get_logger().info("STEP: front pair up one level")
+            elif rear_edge:
+                self._step_pub.publish(Int8(data=2))
+                self.get_logger().info("STEP: rear pair up one level")
+            self._prev_step_front = step_front
+            self._prev_step_rear = step_rear
 
             estop_active = (
                 self._btn_estop >= 0

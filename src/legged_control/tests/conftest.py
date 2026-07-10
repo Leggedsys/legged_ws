@@ -49,7 +49,7 @@ def _install_ros_stubs() -> None:
         "nav_msgs": [],
         "nav_msgs.msg": ["Odometry"],
         "std_msgs": [],
-        "std_msgs.msg": ["Bool", "Float32", "Float32MultiArray"],
+        "std_msgs.msg": ["Bool", "Float32", "Float32MultiArray", "Int8"],
         "rcl_interfaces": [],
         "rcl_interfaces.msg": [
             "Parameter",
