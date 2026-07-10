@@ -150,9 +150,13 @@ control:
   estimator_hz: 200.0    # state_estimator publish rate (was: per-IMU ≈400 Hz)
 
 teleop:
-  max_vx:  0.40  # m/s  forward/backward
-  max_vy:  0.10  # m/s  lateral
-  max_yaw: 0.5   # rad/s yaw rate
+  # 【2026-07-11 放大速度试验】原 0.40/0.10/0.5。mpc_node 平地对 cmd_vel
+  # 无二次限幅,遥控这里就是唯一上限;台阶模式(stair_mode/爬行步态)另有
+  # 程序锁速 0.08/0.03/0.15,不受此处影响。0.60 m/s 对应支撑步幅 ±14cm,
+  # 仍在 IK 可达范围内;若出现"IK miss"刷屏或摆动甩腿,先退回 0.40。
+  max_vx:  0.60  # m/s  forward/backward
+  max_vy:  0.20  # m/s  lateral
+  max_yaw: 0.8   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
   btn_posture_toggle: 0  # A button: toggle stand up / lie down
   axis_vx:  1
@@ -267,8 +271,12 @@ mpc:
   # 恢复硬 PD，不会出现"没前馈还软腿"。<=0 表示不启用（全程 kp_scale）。
   # 现场实验：ros2 param set /mpc_node kp_stance_scale 0.8，再逐步 0.6/0.5；
   # 塌 → 回调大一档。判据：height_check 站立 Δ 不变差、走路塌陷感减轻。
-  kp_stance_scale: -1.0
-  kd_stance_scale: -1.0
+  # 【2026-07-11 反向用法转正】原设想是支撑相"压低"kp 让前馈承重,上机
+  # 实测相反方向更好:支撑相偏软,调到 2.5(高于全局 1.5)明显更稳,写死。
+  # K_stance ≈ 1.0×2.5×40 = 100,离过流红线 K≈180(kp_scale 4.5 实测跳闸)
+  # 还有近一倍余量;再想加硬先试 3.0,别超 3.5。
+  kp_stance_scale: 2.5
+  kd_stance_scale: 2.0
   # 位置侧 IMU 调平（仅 WALK 相）：projected_gravity 倾斜量（0.1s 低通）+ 其
   # 数值微分 → 四脚 z 修正，±4cm 限幅 + 0.25 m/s 斜率硬限。
   # 【2026-07-09 实测确认：默认关闭】rate_fb（力级速率阻尼）上线后,这条慢环
