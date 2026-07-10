@@ -168,7 +168,7 @@ teleop:
   # Absolute stance-height command integrated from LT/RT (/height_command).
   # height_init must match mpc.stance_height — otherwise teleop connecting
   # drags the standing height toward its own initial value.
-  height_min:  0.15
+  height_min:  0.10
   height_max:  0.30
   height_init: 0.235   # 与 mpc.stance_height 同步（2026-07-10 降高度）
 

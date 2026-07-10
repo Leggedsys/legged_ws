@@ -100,8 +100,17 @@ def _lateral_spread(stance_h: float, start: float, s_max: float) -> float:
     to −1.92 rad. Capped at 0.06 m because the hips saturate at ±0.4 rad
     (q1 = 0.32 at h=0.16, s=0.06 — leaves margin for attitude offsets).
     Zero at normal heights: the validated baseline is untouched.
+
+    Below ~0.13 m the spread tapers back down: reaching the same lateral
+    offset from a lower hip needs MORE abduction, and the full 6 cm would
+    push q1 past the ±0.4 rad hip limit (0.42 at h=0.11, 0.45 at 0.10 —
+    the bridge clips it and feet land inboard of target). The taper keeps
+    q1 ≤ ~0.37 across the whole allowed height range: 5.5 cm at 0.13,
+    5 cm at 0.12–0.11, 4 cm at 0.10 (IK-swept offline).
     """
-    return float(np.clip(start - stance_h, 0.0, s_max))
+    spread = float(np.clip(start - stance_h, 0.0, s_max))
+    hip_cap = max(0.05 + 0.5 * (stance_h - 0.12), 0.03)
+    return min(spread, hip_cap)
 
 
 def _hip_mount_xy(leg: str) -> tuple[float, float]:
@@ -145,7 +154,12 @@ _VEL_FILTER_TAU = 0.25   # s — first-order lag on cmd_vel for trajectory strid
                          # the stick moves; walking only stops once the filtered
                          # stride has decayed to ~0, so start/stop never snaps.
 _HEIGHT_SLEW = 0.05      # m/s — max stance-height change rate (LT/RT via /height_command)
-_HEIGHT_MIN  = 0.15      # m — leg reach / collision guard on commanded height
+_HEIGHT_MIN  = 0.11      # m — leg reach / collision guard on commanded height.
+                         # 0.15 → 0.11 (2026-07-10): verified offline with the
+                         # hip-tapered spread — at 0.11 the mid-swing calf
+                         # keeps 0.28 rad off its −2.65 limit and the knee
+                         # 7.6 cm of ground clearance. 0.10 was measured too
+                         # (margins 0.22 rad / 7.1 cm) but not enabled.
 _HEIGHT_MAX  = 0.30      # m — L2+L3 = 0.361 m; 0.30 leaves stroke + swing margin
 _STEP_VEL_REF = 0.15     # m/s — leg speed at which swing clearance reaches full
                          # step_height. Below it clearance shrinks proportionally,

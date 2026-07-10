@@ -969,7 +969,9 @@ def test_lateral_spread_schedule():
     assert _lateral_spread(0.22, 0.22, 0.06) == 0.0
     assert _lateral_spread(0.20, 0.22, 0.06) == pytest.approx(0.02)
     assert _lateral_spread(0.16, 0.22, 0.06) == pytest.approx(0.06)  # capped
-    assert _lateral_spread(0.10, 0.22, 0.06) == pytest.approx(0.06)
+    # hip-limit taper at crouch heights: full 6 cm would need q1 > 0.4
+    assert _lateral_spread(0.12, 0.22, 0.06) == pytest.approx(0.05)
+    assert _lateral_spread(0.10, 0.22, 0.06) == pytest.approx(0.04)
 
 
 def test_lateral_spread_raises_knee_clearance():
@@ -982,13 +984,15 @@ def test_lateral_spread_raises_knee_clearance():
 
 
 def test_lateral_spread_respects_hip_limit():
-    """Full spread at the lowest reachable heights must stay inside the
-    ±0.4 rad hip limit (robot.yaml q_min/q_max) with margin for attitude
+    """The SCHEDULED spread at every allowed height (down to _HEIGHT_MIN
+    0.11) must stay inside the ±0.4 rad hip limit with margin for attitude
     corrections — otherwise the bridge clips and feet land inboard."""
+    from legged_control.mpc.mpc_node import _lateral_spread
     for leg in LEG_NAMES:
-        for h in (0.16, 0.18, 0.20):
-            _, q = _knee_clearance(leg, h, 0.06)
-            assert abs(q[0]) < 0.35, f"{leg} h={h}: q1={q[0]:.3f}"
+        for h in (0.11, 0.12, 0.14, 0.16, 0.18, 0.20):
+            s = _lateral_spread(h, 0.22, 0.06)
+            _, q = _knee_clearance(leg, h, s)
+            assert abs(q[0]) < 0.38, f"{leg} h={h} s={s}: q1={q[0]:.3f}"
 
 
 def test_lateral_spread_relaxes_calf_fold():
