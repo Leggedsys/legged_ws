@@ -167,17 +167,20 @@ teleop:
   invert_yaw: true
   btn_emergency_stop: 1   # B button: hold → immediate lie-down to passive
   # 手动上台阶触发（2026-07-10,人当感知、程序管执行）:
-  #   X(2) = 前腿对上一级:按下后 FR/FL 各自在下一次抬腿时把落脚目标抬高
+  #   X = 前腿对上一级:按下后 FR/FL 各自在下一次抬腿时把落脚目标抬高
   #          stair_rise(默认 0.10m),两条前腿自然依次消化;
-  #   Y(3) = 后腿对上一级,同理——时机你自己看,后腿快到立板前按;
+  #   Y = 后腿对上一级,同理——时机你自己看,后腿快到立板前按;
   #   X+Y 同时 = 清除所有腿的台阶偏移(应急退出,只在平地用)。
   #   四腿偏移出现公共部分(整级都上去了)会以 0.04m/s 自动归零 = 身体
   #   爬升到新一级的标准站姿,这是正常退出,自动发生,不用操作。
   #   未消化的按键 10 秒过期。配合 contact_detect_enabled(落地实测校准)
   #   与慢步频使用;一次只跨一级——前腿没等后腿跟上就再按会顶到 ±0.12m
   #   限幅并刷 IK miss。
-  btn_step_front: 2
-  btn_step_rear:  3
+  # 【2026-07-11 实测本手柄键位】/joy 的 buttons 从 0 开始数:echo 里第 4、
+  # 第 5 个亮 = 编号 3 和 4(A=0、B=1 不变,2 号空)。若按 X 时 teleop 日志
+  # 报的是 "rear pair",说明两个号写反,对调即可。
+  btn_step_front: 3
+  btn_step_rear:  4
   axis_lt: 4
   axis_rt: 5
   max_dz:  0.03  # m/s height rate limit
@@ -275,7 +278,7 @@ mpc:
   # 实测相反方向更好:支撑相偏软,调到 2.5(高于全局 1.5)明显更稳,写死。
   # K_stance ≈ 1.0×2.5×40 = 100,离过流红线 K≈180(kp_scale 4.5 实测跳闸)
   # 还有近一倍余量;再想加硬先试 3.0,别超 3.5。
-  kp_stance_scale: 2.5
+  kp_stance_scale: 3.0
   kd_stance_scale: 2.0
   # 位置侧 IMU 调平（仅 WALK 相）：projected_gravity 倾斜量（0.1s 低通）+ 其
   # 数值微分 → 四脚 z 修正，±4cm 限幅 + 0.25 m/s 斜率硬限。
