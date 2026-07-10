@@ -1103,3 +1103,45 @@ def test_aggregator_forwards_joint_frame_effort():
     # pure math check on the conversion used in _publish
     direction, gear_ratio, tau_rotor = -1.0, 12.66, 0.5
     assert direction * gear_ratio * tau_rotor == pytest.approx(-6.33)
+
+
+# ── Crawl gait (stair mode) ──────────────────────────────────────────────────
+
+def test_crawl_one_leg_at_a_time():
+    """Statically stable invariant: at every instant of a crawl cycle at
+    most ONE leg is in swing (three feet always planted)."""
+    g = GaitScheduler(period=1.2, swing_ratio=0.4)  # 0.4 → clamped on switch
+    g.set_mode("crawl")
+    assert g.swing_ratio <= 0.24
+    t0 = g._t0
+    for dt in np.linspace(0.0, 1.2, 400, endpoint=False):
+        st = g.query(t=t0 + dt)
+        in_air = [leg for leg in LEG_NAMES if not st[leg]["contact"]]
+        assert len(in_air) <= 1, f"dt={dt:.3f}: {in_air}"
+
+
+def test_crawl_creep_sequence():
+    """Swing order must be the classic creep RL → FL → RR → FR."""
+    g = GaitScheduler(period=1.2, swing_ratio=0.2)
+    g.set_mode("crawl")
+    t0 = g._t0
+    order = []
+    for dt in np.linspace(0.0, 1.2, 1200, endpoint=False):
+        st = g.query(t=t0 + dt)
+        for leg in LEG_NAMES:
+            if not st[leg]["contact"] and (not order or order[-1] != leg):
+                order.append(leg)
+    assert order == ["RL", "FL", "RR", "FR"], order
+
+
+def test_sway_points_away_from_swing_corner():
+    from legged_control.mpc.mpc_node import _sway_for
+    # _sway_for returns the FEET-target offset. Swinging RL (rear-left):
+    # body must move forward-right, so feet targets move rear-left (−x, +y).
+    s_rl = _sway_for("RL")
+    assert s_rl[0] < 0 and s_rl[1] > 0
+    # Swinging FR (front-right): body rear-left → feet targets (+x, −y).
+    s_fr = _sway_for("FR")
+    assert s_fr[0] > 0 and s_fr[1] < 0
+    # opposite corners get opposite sway
+    assert np.allclose(_sway_for("RL"), -_sway_for("FR"))

@@ -381,14 +381,17 @@ mpc:
   # contact_tau_thresh: 小腿关节系力矩阈值(Nm)。标定:开检测慢走平地,
   #   摆动腿本底 ~1Nm,触地 4~6Nm;误报(摆动中就冻结)→ 调大;漏报(照旧
   #   砸脚)→ 调小。
-  # 【台阶作业预设,全 runtime】上 100×300 台阶:
-  #   ros2 param set /mpc_node contact_detect_enabled true
-  #   ros2 param set /mpc_node step_height 0.13     # 越过 100mm 立板
-  #   ros2 param set /mpc_node stance_height 0.25   # 折叠余量
-  #   遥杆压慢速 ~0.15m/s 正对台阶直上;注意速度低于 0.15 抬脚会按比例
-  #   缩水(_STEP_VEL_REF),上台阶期间别再压速度。
   contact_detect_enabled: false
   contact_tau_thresh: 3.0
+  # 台阶模式（2026-07-10,一个开关）：爬行步态(一次抬一腿,三脚常撑地,
+  # 静态稳定,任意瞬间可停) + 重心侧移(抬腿前身体向支撑三角挪) + 程序锁速
+  # (前进 ≤0.08m/s、横移 ≤0.03、转向 ≤0.15——摇杆只管走/停/方向,不管快慢)
+  # + 抬脚定死 12cm 不随速度缩水 + 自动启用触地检测。
+  # 用法:【站定后】ros2 param set /mpc_node stair_mode true,然后摇杆
+  # 正对台阶轻推即可;下台阶/结束后站定再 set false。步态切换只在站立时
+  # 生效(行走中切相位会跳),走着切会等到下次站定才真正换。
+  # 慢是特性:一个周期(≥1.2s)四腿轮迈,10 级台阶约 1 分钟。
+  stair_mode: false
 
 standup:
   ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
