@@ -236,7 +236,7 @@ mpc:
   # 欠支撑靠 PD 硬扛 = 站立"昂头"的静态底子。力臂修正后 0.05 变回真实质心
   # 偏移的含义,数值先沿用,开 tau 站立跑 height_check 重新按"四腿 Δ 相等"
   # 微调（预期最终值仍在 0.03~0.07 邻域）。
-  com_x:   0.05
+  com_x:   0.08
   com_y:   0.0
   Ixx:     0.0196
   Iyy:     0.0228
@@ -263,9 +263,12 @@ mpc:
   #   ros2 param set /mpc_node tau_ff_enabled false   # 0.3s 内平滑退出
   # tau_ff 验证有效后可逐步下调 kp_scale（2.0 → 1.0），让力矩承重、PD 提供柔顺。
   tau_ff_enabled: true
-  gait_period:   0.8    # s — full stance+swing cycle per leg (trot)
+  # 【2026-07-11 摆动柔顺】0.8→1.0、0.04→0.03:周期加长+抬脚降低,直接砍
+  # 摆动相的速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。楼梯/跨栏
+  # 不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。颠簸回 0.8/0.04。
+  gait_period:   1.0    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
-  step_height:   0.04   # m — foot clearance at mid-swing
+  step_height:   0.03   # m — foot clearance at mid-swing
   # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
   # 无跳变;LT/RT 仍可 0.15~0.30 现场调。注意 0.22 以下自动进低姿态外撇。
   # 与 teleop.height_init 必须一致。
@@ -277,8 +280,10 @@ mpc:
   # K_joint = base kp × kp_scale × gr²。电机峰值 23.7 Nm：位置误差 > 23.7/K 即
   # 力矩饱和。实测 4.5(K≈180) 走路时电机过流保护跳闸（"腿忽然断"）——触地几度
   # 误差就顶满力矩；2.0(K≈80) 支撑误差 ~0.05 rad、离饱和一倍余量。
-  kp_scale: 1.5
-  kd_scale: 2.0
+  # 【2026-07-11】1.5→2.0:支撑加硬到 3.5 后摆动反成最软相,腿抬不到位。
+  # K_swing ≈ 80,离红线 180 仍有余量。kd 暂不动,若摆动腿触地弹跳再提 2.1。
+  kp_scale: 2.0
+  kd_scale: 1.8
   # "小kp大tau"分相增益：支撑腿随受力渐变把 kp/kd 交叉过渡到下面的低值
   # （前馈承重、PD 只管柔顺纠偏），摆动腿保持上面的 kp_scale/kd_scale 不变
   # ——摆动腿悬空没有 tau_ff，全靠 PD 跟轨迹，全局压 kp 时塌的正是它们。
@@ -290,7 +295,7 @@ mpc:
   # 实测相反方向更好:支撑相偏软,调到 2.5(高于全局 1.5)明显更稳,写死。
   # K_stance ≈ 1.0×2.5×40 = 100,离过流红线 K≈180(kp_scale 4.5 实测跳闸)
   # 还有近一倍余量;再想加硬先试 3.0,别超 3.5。
-  kp_stance_scale: 3.0
+  kp_stance_scale: 3.5
   kd_stance_scale: 2.0
   # 位置侧 IMU 调平（仅 WALK 相）：projected_gravity 倾斜量（0.1s 低通）+ 其
   # 数值微分 → 四脚 z 修正，±4cm 限幅 + 0.25 m/s 斜率硬限。
@@ -314,7 +319,7 @@ mpc:
   # 注意：别用 com_x 去顶前倾——com_x 只该按"四腿 Δ 相等"标定（≈0.05），
   # 拿它抬前身是在用错误的负载分配对抗错误的姿态零点，两个都失真。
   att_roll_offset:  0.0
-  att_pitch_offset: 0.0
+  att_pitch_offset: -0.08
   # 机体角速度直接进 QP 状态（力级姿态阻尼，MIT 的"快通道"）：gyro 无滤波
   # 延迟，直接变成反向支撑力矩——位置侧调平（att_kp/kd，0.1s 低通 + 微分再
   # 滤波）在 2Hz 步频下相位滞后 ~83°，越调越晃的根源。轴向按标准约定
