@@ -150,13 +150,14 @@ control:
   estimator_hz: 200.0    # state_estimator publish rate (was: per-IMU ≈400 Hz)
 
 teleop:
-  # 【2026-07-11 放大速度试验】原 0.40/0.10/0.5。mpc_node 平地对 cmd_vel
-  # 无二次限幅,遥控这里就是唯一上限;台阶模式(stair_mode/爬行步态)另有
-  # 程序锁速 0.08/0.03/0.15,不受此处影响。0.60 m/s 对应支撑步幅 ±14cm,
-  # 仍在 IK 可达范围内;若出现"IK miss"刷屏或摆动甩腿,先退回 0.40。
-  max_vx:  0.60  # m/s  forward/backward
-  max_vy:  0.20  # m/s  lateral
-  max_yaw: 0.8   # rad/s yaw rate
+  # mpc_node 平地对 cmd_vel 无二次限幅,遥控这里就是唯一上限;台阶模式
+  # (stair_mode/爬行步态)另有程序锁速 0.08/0.03/0.15,不受此处影响。
+  # 【2026-07-11 摆动柔顺】0.60/0.20/0.8 试验退回并压低:配合 gait_period
+  # 1.2 后步幅在 v≈0.33 就到 Raibert ±0.12m 钳位,再高的指令只是空转,
+  # 0.30 正好贴着饱和线以内。走稳了想快,先缩 gait_period 再提这里。
+  max_vx:  0.30  # m/s  forward/backward
+  max_vy:  0.12  # m/s  lateral
+  max_yaw: 0.5   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
   btn_posture_toggle: 0  # A button: toggle stand up / lie down
   axis_vx:  1
@@ -263,12 +264,13 @@ mpc:
   #   ros2 param set /mpc_node tau_ff_enabled false   # 0.3s 内平滑退出
   # tau_ff 验证有效后可逐步下调 kp_scale（2.0 → 1.0），让力矩承重、PD 提供柔顺。
   tau_ff_enabled: true
-  # 【2026-07-11 摆动柔顺】0.8→1.0、0.04→0.03:周期加长+抬脚降低,直接砍
-  # 摆动相的速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。楼梯/跨栏
-  # 不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。颠簸回 0.8/0.04。
-  gait_period:   1.0    # s — full stance+swing cycle per leg (trot)
+  # 【2026-07-11 摆动柔顺】0.8→1.0→1.2、0.04→0.03→0.025:周期加长+抬脚
+  # 降低,直接砍摆动相速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。
+  # 楼梯/跨栏不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。
+  # step_height 别再低了:0.02 以下地面稍不平就蹭脚。蹭地回 0.03。
+  gait_period:   1.2    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
-  step_height:   0.03   # m — foot clearance at mid-swing
+  step_height:   0.025  # m — foot clearance at mid-swing
   # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
   # 无跳变;LT/RT 仍可 0.15~0.30 现场调。注意 0.22 以下自动进低姿态外撇。
   # 与 teleop.height_init 必须一致。
