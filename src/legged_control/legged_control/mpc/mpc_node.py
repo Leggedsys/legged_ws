@@ -589,8 +589,9 @@ class MPCNode(Node):
         self.declare_parameter("stance_height",    float(mpc_cfg.get("stance_height", 0.27)))
         self.declare_parameter("ramp_duration",    float(standup_cfg.get("ramp_duration", 6.0)))
         self.declare_parameter("lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0)))
-        # Single fixed kp/kd scale applied for the whole gait cycle (no
-        # stance/swing gain switching — see dev/mpc-purepos branch notes).
+        # Base kp/kd scale: standup/liedown, balance stance, and the
+        # unloaded edges of every gait phase (both the stance and swing
+        # splits below crossfade back to this at contact flips).
         # Runtime-tunable: `ros2 param set /mpc_node kp_scale 0.5`
         self.declare_parameter("kp_scale", float(mpc_cfg.get("kp_scale", 0.6)))
         self.declare_parameter("kd_scale", float(mpc_cfg.get("kd_scale", 1.0)))
@@ -601,6 +602,15 @@ class MPCNode(Node):
         # Reverts to stiff automatically whenever tau_ff is off or ramping.
         self.declare_parameter("kp_stance_scale", float(mpc_cfg.get("kp_stance_scale", -1.0)))
         self.declare_parameter("kd_stance_scale", float(mpc_cfg.get("kd_stance_scale", -1.0)))
+        # Velocity-dominant swing (<= 0 disables → kp_scale everywhere):
+        # mid-swing the leg crossfades to low kp (position correction is the
+        # minor term) + higher kd (dq feedforward + damping is the major
+        # term). The crossfade weight is the same smoothstep load-ramp shape
+        # evaluated on SWING progress — zero at lift-off and touchdown, so
+        # the gains a leg carries across a contact flip are exactly the base
+        # kp_scale/kd_scale on both sides: no gain step at any transition.
+        self.declare_parameter("kp_swing_scale", float(mpc_cfg.get("kp_swing_scale", -1.0)))
+        self.declare_parameter("kd_swing_scale", float(mpc_cfg.get("kd_swing_scale", -1.0)))
         # IMU attitude leveling (WALK phase): tilt from projected_gravity,
         # damping from that signal's own derivative → per-foot z offsets.
         # att_kp in m per unit tilt (≈ m/rad for small angles); 0 disables.
@@ -1337,24 +1347,43 @@ class MPCNode(Node):
         kd = [self._base_kd[n] * kd_scale for n in _YAML_JOINTS]
         return kp, kd
 
-    def _walk_gains(self, leg_scale: dict[str, float]) -> tuple[list[float], list[float]]:
+    def _walk_gains(
+        self,
+        leg_scale: dict[str, float],
+        swing_w: dict[str, float] | None = None,
+    ) -> tuple[list[float], list[float]]:
         """Per-joint gains for WALK: loaded stance legs crossfade toward
-        kp_stance_scale/kd_stance_scale as tau_ff takes their weight, swing
-        legs keep the full kp_scale/kd_scale (no feedforward exists in the
-        air — PD alone tracks the swing arc). Crossfade weight is the same
-        load ramp that scales the leg's force, times the global tau blend,
-        so gains soften exactly where — and only while — the feedforward is
-        actually carrying the load. Call after _tau_feedforward so the blend
-        state is current."""
+        kp_stance_scale/kd_stance_scale as tau_ff takes their weight;
+        swinging legs crossfade toward kp_swing_scale/kd_swing_scale
+        (velocity-dominant tracking: dq feedforward + damping carry the arc,
+        position correction is the minor term). Stance crossfade weight is
+        the same load ramp that scales the leg's force, times the global tau
+        blend, so gains soften exactly where — and only while — the
+        feedforward is actually carrying the load. Swing weight (swing_w,
+        None → all zero) is zero at lift-off/touchdown, so both crossfades
+        meet at the base kp_scale/kd_scale at every contact flip — a leg
+        never steps its gains mid-error. Call after _tau_feedforward so the
+        blend state is current."""
         kp_base = float(self.get_parameter("kp_scale").value)
         kd_base = float(self.get_parameter("kd_scale").value)
         kp_st = float(self.get_parameter("kp_stance_scale").value)
         kd_st = float(self.get_parameter("kd_stance_scale").value)
+        kp_sw = float(self.get_parameter("kp_swing_scale").value)
+        kd_sw = float(self.get_parameter("kd_swing_scale").value)
         kp, kd = [], []
         for n in _YAML_JOINTS:
-            w = float(leg_scale.get(n.split("_")[0], 0.0)) * self._tau_blend
-            kp.append(self._base_kp[n] * _stance_gain_scale(kp_base, kp_st, w))
-            kd.append(self._base_kd[n] * _stance_gain_scale(kd_base, kd_st, w))
+            leg = n.split("_")[0]
+            w_st = float(leg_scale.get(leg, 0.0)) * self._tau_blend
+            w_sw = float(swing_w.get(leg, 0.0)) if swing_w is not None else 0.0
+            # w_st and w_sw are never both nonzero (a leg is either in
+            # scheduled contact or in swing), so the two crossfades compose
+            # without interacting.
+            kp_s = _stance_gain_scale(kp_base, kp_st, w_st)
+            kd_s = _stance_gain_scale(kd_base, kd_st, w_st)
+            kp_s = _stance_gain_scale(kp_s, kp_sw, w_sw)
+            kd_s = _stance_gain_scale(kd_s, kd_sw, w_sw)
+            kp.append(self._base_kp[n] * kp_s)
+            kd.append(self._base_kd[n] * kd_s)
         return kp, kd
 
     def _compute_stance_q(self, stance_h: float) -> list[float]:
@@ -2065,7 +2094,16 @@ class MPCNode(Node):
             stance_h, vel_xy, yaw_rate, att_ref=att_ref,
         )
 
-        kp, kd = self._walk_gains(leg_scale)
+        # Swing gain weight: same smoothstep ramp shape as the stance load
+        # ramp, on swing progress — 0 at lift-off/touchdown (gain continuity
+        # with the unloaded-stance base), 1 mid-swing (full velocity-dominant
+        # recipe).
+        swing_w = {
+            leg: (0.0 if gait_state[leg]["contact"]
+                  else _stance_load_ramp(self._gait.swing_phase(leg, now), ramp_frac))
+            for leg in LEG_NAMES
+        }
+        kp, kd = self._walk_gains(leg_scale, swing_w)
 
         return JointCommand(
             q=[joint_targets[n] for n in _YAML_JOINTS],

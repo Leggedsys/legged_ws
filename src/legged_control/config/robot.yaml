@@ -287,8 +287,8 @@ mpc:
   kp_scale: 2.0
   kd_scale: 1.8
   # "小kp大tau"分相增益：支撑腿随受力渐变把 kp/kd 交叉过渡到下面的低值
-  # （前馈承重、PD 只管柔顺纠偏），摆动腿保持上面的 kp_scale/kd_scale 不变
-  # ——摆动腿悬空没有 tau_ff，全靠 PD 跟轨迹，全局压 kp 时塌的正是它们。
+  # （前馈承重、PD 只管柔顺纠偏）；摆动腿另有 kp_swing_scale 分支（见下），
+  # 未启用时保持上面的 kp_scale/kd_scale。
   # 过渡权重 = 支撑力渐变 × tau 全局 blend：tau_ff 关闭/失效时支撑腿自动
   # 恢复硬 PD，不会出现"没前馈还软腿"。<=0 表示不启用（全程 kp_scale）。
   # 现场实验：ros2 param set /mpc_node kp_stance_scale 0.8，再逐步 0.6/0.5；
@@ -299,6 +299,16 @@ mpc:
   # 还有近一倍余量;再想加硬先试 3.0,别超 3.5。
   kp_stance_scale: 3.5
   kd_stance_scale: 2.0
+  # 【2026-07-12 摆动相速度主导】摆动腿中段交叉过渡到"低 kp + 高 kd":
+  # 速度前馈(dq,指令差分,motor_command_bridge 重算后发电机)+阻尼占大头,
+  # 位置修正占小头——目标是砍掉硬位置锁定对轨迹离散台阶/换向的过激反应。
+  # 过渡沿摆动进度用与 tau_ramp_frac 相同的 smoothstep 渐入渐出:离地/触地
+  # 端点回到上面的 kp_scale/kd_scale,相位切换零增益阶跃。<=0 关闭。
+  # K_swing_mid ≈ 1.0×1.0×40 = 40:摆动腿只扛自身连杆重力(~1 Nm 级,静差
+  # ~0.02 rad),不承体重,可以远低于支撑值;耷拉/抬不到位 → 先回 1.4 试。
+  # 现场调参:ros2 param set /mpc_node kp_swing_scale 1.4(实时生效)。
+  kp_swing_scale: 1.0
+  kd_swing_scale: 2.2
   # 位置侧 IMU 调平（仅 WALK 相）：projected_gravity 倾斜量（0.1s 低通）+ 其
   # 数值微分 → 四脚 z 修正，±4cm 限幅 + 0.25 m/s 斜率硬限。
   # 【2026-07-09 实测确认：默认关闭】rate_fb（力级速率阻尼）上线后,这条慢环

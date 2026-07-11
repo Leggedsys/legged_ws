@@ -475,6 +475,35 @@ def test_stance_gain_scale_crossfade():
     assert _stance_gain_scale(1.2, 0.6, -0.3) == pytest.approx(1.2)
 
 
+def test_swing_gain_crossfade_continuous_at_contact_flips():
+    """Velocity-dominant swing split (_walk_gains composition): the stance
+    and swing crossfades both anchor at the base scale when their weight is
+    zero, so a leg crossing a contact flip — stance load ramp at 0 on one
+    side, swing ramp at 0 on the other — carries exactly the base gain on
+    both sides: no gain step at lift-off or touchdown."""
+    from legged_control.mpc.mpc_node import _stance_gain_scale, _stance_load_ramp
+
+    kp_base, kp_st, kp_sw = 2.0, 3.5, 1.0
+
+    def composed(w_st: float, w_sw: float) -> float:
+        s = _stance_gain_scale(kp_base, kp_st, w_st)
+        return _stance_gain_scale(s, kp_sw, w_sw)
+
+    # lift-off: stance side ends at load-ramp 0, swing side starts at ramp 0
+    frac = 0.25
+    assert composed(_stance_load_ramp(1.0, frac), 0.0) == pytest.approx(kp_base)
+    assert composed(0.0, _stance_load_ramp(0.0, frac)) == pytest.approx(kp_base)
+    # touchdown: swing ramp back to 0, stance load ramp starts at 0
+    assert composed(0.0, _stance_load_ramp(1.0, frac)) == pytest.approx(kp_base)
+    assert composed(_stance_load_ramp(0.0, frac), 0.0) == pytest.approx(kp_base)
+    # mid-phase plateaus reach their respective recipes
+    assert composed(1.0, 0.0) == pytest.approx(kp_st)
+    assert composed(0.0, 1.0) == pytest.approx(kp_sw)
+    # swing split disabled (<= 0): swing weight has no effect
+    s = _stance_gain_scale(kp_base, kp_st, 0.0)
+    assert _stance_gain_scale(s, -1.0, 1.0) == pytest.approx(kp_base)
+
+
 def test_remove_mount_bias_round_trip():
     """IMU mounting-bias removal: corrected proj_g of a body at (roll, pitch)
     with offsets (r_off, p_off) must equal proj_g at (roll−r_off, pitch−p_off),
