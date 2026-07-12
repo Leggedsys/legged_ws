@@ -184,6 +184,35 @@ def test_swing_end_slope_matches_ground_velocity():
     assert p_mid[0] == pytest.approx((p_lift[0] + p_land[0]) / 2, abs=0.02)
 
 
+def test_swing_c2_continuous_with_stance():
+    """Quintic upgrade: endpoint ACCELERATION is zero in x, y and z (matching
+    the constant-velocity stance stroke), so contact flips carry no
+    acceleration step — no commanded-torque impulse through the PD. The
+    lift/land heights differ on purpose: the z baseline blend must also enter
+    and leave the swing with zero slope and curvature."""
+    v = np.array([0.3, 0.1])
+    t_sw = 0.48
+    p_lift = np.array([-0.054, -0.01, -0.27])
+    p_land = np.array([+0.054, +0.01, -0.24])  # height change mid-swing
+    slope = -v * t_sw
+
+    def p(s):
+        return swing_foot_position(s, p_lift, p_land, 0.025, xy_end_slope=slope)
+
+    eps = 1e-3
+    for s0, pa in ((0.0, p_lift), (1.0, p_land)):
+        s_in = (s0 + eps, s0 + 2 * eps) if s0 == 0.0 else (s0 - eps, s0 - 2 * eps)
+        a, b = p(s_in[0]), p(s_in[1])
+        # second difference against the exact endpoint ≈ accel·eps²  → ~0
+        acc = (b - 2 * a + pa) / eps**2
+        np.testing.assert_allclose(acc, np.zeros(3), atol=0.05,
+                                   err_msg=f"endpoint accel not zero at s={s0}")
+        # first difference still matches the requested slope (x, y) and 0 (z)
+        vel = (a - pa) / eps if s0 == 0.0 else (pa - a) / eps
+        np.testing.assert_allclose(vel[:2], slope, atol=1e-2)
+        assert vel[2] == pytest.approx(0.0, abs=1e-2)
+
+
 def test_backward_walk_reverses_stroke():
     """Negative vx: touchdown behind nominal, stroke sweeps forward."""
     vel = np.array([-0.3, 0.0])
@@ -1277,19 +1306,24 @@ def test_hurdle_swing_ik_feasible_within_limits():
                 f"{leg} s={s:.3f} calf {q3:.3f} (fold margin 0.05)"
 
 
-def test_hurdle_plain_arc_unchanged():
-    """flat_top=0 (and the default) must reproduce the original raised-cosine
-    arc bit-for-bit — hurdle mode off is the hardware-validated baseline."""
+def test_hurdle_plain_arc_is_quintic_bump():
+    """flat_top=0 (and the default) is the minimum-jerk quintic bump (the
+    raised cosine it replaced stepped z̈ at the contact flips): default and
+    explicit flat_top=0 agree, endpoints at ground, peak step_height at
+    s=0.5, symmetric about mid-swing."""
     from legged_control.mpc.swing_trajectory import swing_foot_position
-    import math as _m
     p0 = np.array([0.05, 0.11, -0.235])
     p1 = np.array([0.09, 0.11, -0.235])
+    H = 0.04
     for s in np.linspace(0.0, 1.0, 21):
-        z_default = swing_foot_position(s, p0, p1, 0.04)[2]
-        z_flat0 = swing_foot_position(s, p0, p1, 0.04, flat_top=0.0)[2]
-        z_ref = -0.235 + 0.04 * 0.5 * (1.0 - _m.cos(2.0 * _m.pi * s))
-        assert z_default == pytest.approx(z_ref, abs=1e-12)
-        assert z_flat0 == pytest.approx(z_ref, abs=1e-12)
+        z_default = swing_foot_position(s, p0, p1, H)[2]
+        z_flat0 = swing_foot_position(s, p0, p1, H, flat_top=0.0)[2]
+        z_mirror = swing_foot_position(1.0 - s, p0, p1, H)[2]
+        assert z_default == pytest.approx(z_flat0, abs=1e-12)
+        assert z_default == pytest.approx(z_mirror, abs=1e-12)
+    assert swing_foot_position(0.0, p0, p1, H)[2] == pytest.approx(-0.235, abs=1e-12)
+    assert swing_foot_position(1.0, p0, p1, H)[2] == pytest.approx(-0.235, abs=1e-12)
+    assert swing_foot_position(0.5, p0, p1, H)[2] == pytest.approx(-0.235 + H, abs=1e-12)
 
 # ── Shin mode (断桥: kneel and crawl on the shins) ───────────────────────────
 
