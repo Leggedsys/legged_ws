@@ -223,7 +223,11 @@ _VEL_FILTER_TAU = 0.25   # s — first-order lag on cmd_vel for trajectory strid
                          # Stride grows/shrinks smoothly instead of jumping when
                          # the stick moves; walking only stops once the filtered
                          # stride has decayed to ~0, so start/stop never snaps.
-_HEIGHT_SLEW = 0.05      # m/s — max stance-height change rate (LT/RT via /height_command)
+_HEIGHT_SLEW = 0.10      # m/s — max stance-height change rate (LT/RT via
+                         # /height_command, and the stair/hurdle body-height
+                         # floors). 0.05→0.10 (2026-07-13): manual LT/RT is
+                         # separately capped by teleop max_dz, so this mostly
+                         # paces the auto-rise on mode engage.
 _HEIGHT_MIN  = 0.11      # m — leg reach / collision guard on commanded height.
                          # 0.15 → 0.11 (2026-07-10): verified offline with the
                          # hip-tapered spread — at 0.11 the mid-swing calf
