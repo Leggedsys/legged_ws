@@ -275,6 +275,14 @@ mpc:
   # 无跳变;LT/RT 仍可 0.15~0.30 现场调。注意 0.22 以下自动进低姿态外撇。
   # 与 teleop.height_init 必须一致。
   stance_height: 0.235  # m — nominal body height above feet
+  # 【2026-07-13 落脚点整体前移】真实重心偏前,前腿常年多扛(压着容易过流
+  # "断")。所有落脚点(默认站姿+走路+断桥蹲姿)沿机体 x 前移这么多,支撑面
+  # 中心挪到重心正下方,四腿均载、身体保持水平——区别于抬头方案(用姿态换
+  # 负载)。数值应与 com_x 标定值一致(两者相等时 QP 力臂也对称)。
+  # 运行时:ros2 param set /mpc_node stance_x_offset 0.04(立即生效,站立
+  # 时敲;身体会相对脚往后坐同样距离)。注意:身高 0.28 以上+满速时前腿
+  # 接近可达边界,若刷 "IK miss" 先降身高或调小此值。
+  stance_x_offset: 0.05
   # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
   # for the whole gait cycle (no stance/swing gain switching). See
   # dev/mpc-purepos branch — removed SRBD-MPC + J^T·f torque path entirely

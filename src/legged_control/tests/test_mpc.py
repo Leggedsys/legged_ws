@@ -1411,3 +1411,22 @@ def test_shin_default_speed_fits_stride_budget():
     from legged_control.mpc.shin_gait import KNEE_OFFSET_MAX
     t_stance = _SHIN_MIN_PERIOD * (1.0 - _STAIR_SWING_RATIO)
     assert 0.07 * t_stance * 0.5 <= KNEE_OFFSET_MAX
+
+
+def test_stance_x_offset_ik_feasible_across_envelope():
+    """stance_x_offset (uniform forward foot shift, robot.yaml 0.05) must
+    keep every leg IK-solvable over the whole operating envelope: LT/RT
+    height range x Raibert stride clamp, offset included. The shift is
+    applied to the final foot target exactly like the lateral spread, so
+    this pure-geometry sweep is the same arithmetic mpc_node performs."""
+    from legged_control.kinematics import forward_kinematics, inverse_kinematics
+
+    x_off = 0.05
+    for leg in LEG_NAMES:
+        for h in (0.15, 0.20, 0.235, 0.27, 0.30):
+            for stride in (-0.12, 0.0, 0.12):
+                p = np.asarray(nominal_foot_position(leg, h), dtype=float).copy()
+                p[0] += x_off + stride
+                q = inverse_kinematics(leg, tuple(p))
+                assert q is not None, (leg, h, stride)
+                assert np.allclose(forward_kinematics(leg, q), p, atol=1e-6)

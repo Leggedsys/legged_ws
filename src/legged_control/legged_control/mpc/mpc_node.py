@@ -587,6 +587,18 @@ class MPCNode(Node):
         self.declare_parameter("swing_ratio",      float(mpc_cfg.get("swing_ratio",   0.4)))
         self.declare_parameter("step_height",      float(mpc_cfg.get("step_height",   0.06)))
         self.declare_parameter("stance_height",    float(mpc_cfg.get("stance_height", 0.27)))
+        # Uniform fore-aft foot shift (m, + = feet forward in the body
+        # frame): moves the support-polygon centroid under a CoM that sits
+        # ahead of the geometric center, so the front pair stops carrying
+        # the imbalance — the body stays LEVEL (unlike a pitch-reference
+        # fix, which trades attitude for load). Applied to every point-foot
+        # target: standup/balance stance, the walk loop (stance and swing
+        # alike, added after lift-pos capture exactly like the lateral
+        # spread, so phase transitions stay continuous), and the shin-mode
+        # crouch (shared endpoint with balance stance). Should track the
+        # calibrated com_x: with both equal, the QP arms come out symmetric
+        # and the static split is even.
+        self.declare_parameter("stance_x_offset",  float(mpc_cfg.get("stance_x_offset", 0.0)))
         self.declare_parameter("ramp_duration",    float(standup_cfg.get("ramp_duration", 6.0)))
         self.declare_parameter("lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0)))
         # Base kp/kd scale: standup/liedown, balance stance, and the
@@ -1389,9 +1401,11 @@ class MPCNode(Node):
     def _compute_stance_q(self, stance_h: float) -> list[float]:
         """IK-derived joint targets for nominal stance at stance_h. Used by both
         standup ramp and balance_stance so they share the same goal with no snap."""
+        x_off = float(self.get_parameter("stance_x_offset").value)
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
-            p_foot = nominal_foot_position(leg, stance_h)
+            p_foot = np.asarray(nominal_foot_position(leg, stance_h), dtype=float).copy()
+            p_foot[0] += x_off
             preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
             if q_leg is None:
@@ -1453,8 +1467,10 @@ class MPCNode(Node):
             float(self.get_parameter("low_spread_max").value),
         )
         targets: dict[str, float] = {}
+        x_off = float(self.get_parameter("stance_x_offset").value)
         for leg in _MPC_LEG_ORDER:
             p = np.asarray(nominal_foot_position(leg, h), dtype=float).copy()
+            p[0] += x_off
             p[1] += _leg_signs(leg)[1] * spread
             preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p), preferred_joints=preferred)
@@ -1664,6 +1680,7 @@ class MPCNode(Node):
         # the stop transition never steps the body sideways
         a_sw = min(1.0, self._dt / _SWAY_TAU)
         self._sway += a_sw * (0.0 - self._sway)
+        x_off = float(self.get_parameter("stance_x_offset").value)
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = nominal_foot_position(leg, stance_h)
@@ -1671,10 +1688,10 @@ class MPCNode(Node):
             mx, my = _hip_mount_xy(leg)
             dz_t = dz_on_plane(
                 terrain_plane[0], terrain_plane[1],
-                p_foot[0] + mx, p_foot[1] + y_sp + my,
+                p_foot[0] + x_off + mx, p_foot[1] + y_sp + my,
             )
             p_foot = np.array([
-                p_foot[0] + self._sway[0],
+                p_foot[0] + x_off + self._sway[0],
                 p_foot[1] + y_sp + self._sway[1],
                 # _leg_ground_dz: stopping on a staircase keeps each foot on
                 # the step it actually stands on, not the nominal plane
@@ -1943,6 +1960,7 @@ class MPCNode(Node):
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
         att_dz = self._attitude_dz()
+        x_off = float(self.get_parameter("stance_x_offset").value)
 
         for leg in LEG_NAMES:
             in_contact = gait_state[leg]["contact"]
@@ -2026,16 +2044,16 @@ class MPCNode(Node):
             # spot — this is what removes the slope-transition early/late
             # touchdown.
             self._last_p_foot[leg] = np.array(p_foot)
-            # Low-posture spread first (lateral), then terrain dz evaluated
-            # at the xy the foot will actually occupy.
+            # Low-posture spread (lateral) and stance x offset first, then
+            # terrain dz evaluated at the xy the foot will actually occupy.
             y_sp = _leg_signs(leg)[1] * spread
             mx, my = _hip_mount_xy(leg)
             dz_t = dz_on_plane(
                 terrain_plane[0], terrain_plane[1],
-                p_foot[0] + mx, p_foot[1] + y_sp + my,
+                p_foot[0] + x_off + mx, p_foot[1] + y_sp + my,
             )
             p_foot = np.array([
-                p_foot[0] + self._sway[0],
+                p_foot[0] + x_off + self._sway[0],
                 p_foot[1] + y_sp + self._sway[1],
                 p_foot[2] + att_dz[leg] + dz_t,
             ])
