@@ -1430,3 +1430,30 @@ def test_stance_x_offset_ik_feasible_across_envelope():
                 q = inverse_kinematics(leg, tuple(p))
                 assert q is not None, (leg, h, stride)
                 assert np.allclose(forward_kinematics(leg, q), p, atol=1e-6)
+
+
+def test_stance_x_offset_taper_protects_knee_clearance():
+    """_x_offset_at: full offset at normal heights, zero at crawl heights,
+    and the tapered offset keeps nominal-stance knee ground clearance
+    (h − L2·cos q2) above 50 mm across the whole height range — the full
+    0.05 applied at h=0.15 would leave only ~25 mm (knees knock the floor
+    while creeping)."""
+    import math
+
+    from legged_control.kinematics import L2, inverse_kinematics
+    from legged_control.mpc.mpc_node import _x_offset_at
+
+    x_full = 0.05
+    assert _x_offset_at(x_full, 0.235) == pytest.approx(x_full)
+    assert _x_offset_at(x_full, 0.30) == pytest.approx(x_full)
+    assert _x_offset_at(x_full, 0.16) == pytest.approx(0.0)
+    assert _x_offset_at(x_full, 0.10) == pytest.approx(0.0)
+
+    for leg in LEG_NAMES:
+        for h in (0.12, 0.15, 0.18, 0.20, 0.22, 0.235, 0.27, 0.30):
+            p = np.asarray(nominal_foot_position(leg, h), dtype=float).copy()
+            p[0] += _x_offset_at(x_full, h)
+            q = inverse_kinematics(leg, tuple(p))
+            assert q is not None, (leg, h)
+            clearance = h - L2 * math.cos(q[1])
+            assert clearance > 0.05, (leg, h, clearance)

@@ -237,7 +237,7 @@ mpc:
   # 欠支撑靠 PD 硬扛 = 站立"昂头"的静态底子。力臂修正后 0.05 变回真实质心
   # 偏移的含义,数值先沿用,开 tau 站立跑 height_check 重新按"四腿 Δ 相等"
   # 微调（预期最终值仍在 0.03~0.07 邻域）。
-  com_x:   0.08
+  com_x:   0.05
   com_y:   0.0
   Ixx:     0.0196
   Iyy:     0.0228
@@ -282,6 +282,10 @@ mpc:
   # 运行时:ros2 param set /mpc_node stance_x_offset 0.04(立即生效,站立
   # 时敲;身体会相对脚往后坐同样距离)。注意:身高 0.28 以上+满速时前腿
   # 接近可达边界,若刷 "IK miss" 先降身高或调小此值。
+  # 【2026-07-13 低趴护膝】前移量随身高渐退:0.22 以上全额,0.16 以下归零
+  # (平滑过渡)。低趴时脚在身前会把大腿拉竖、膝盖压向地面(h=0.15 实算:
+  # 膝盖离地 77mm→25mm),低姿态钻爬以膝盖净空优先,代价是低趴时前腿
+  # 恢复偏重——静态趴着可接受。
   stance_x_offset: 0.05
   # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
   # for the whole gait cycle (no stance/swing gain switching). See
@@ -500,7 +504,7 @@ mpc:
                         # 更偏脚端;调小→贴得更平但摆动膝盖易蹭桥面
 
 standup:
-  ramp_duration: 5.0       # seconds for 0 → q_default smooth-step ramp
+  ramp_duration: 3.0       # seconds for 0 → q_default smooth-step ramp
   lie_down_duration: 2.0   # seconds for current → 0 smooth-step ramp
 
 height_scan:

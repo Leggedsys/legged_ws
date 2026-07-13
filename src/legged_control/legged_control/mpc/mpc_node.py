@@ -161,6 +161,27 @@ def _lateral_spread(stance_h: float, start: float, s_max: float) -> float:
     return min(spread, hip_cap)
 
 
+# stance_x_offset height taper: full at/above _XOFF_TAPER_HI (aligned with
+# the low-posture spread onset), zero at/below _XOFF_TAPER_LO.
+_XOFF_TAPER_HI = 0.22
+_XOFF_TAPER_LO = 0.16
+
+
+def _x_offset_at(x_off: float, stance_h: float) -> float:
+    """Height-tapered stance x offset (m).
+
+    A forward foot at low body height pulls the thigh toward vertical and
+    the KNEE toward the ground: at h=0.15 the nominal-stance knee clearance
+    is 77 mm with no offset but only 25 mm with the full 0.05 (IK-swept
+    offline) — crawling knees knock the floor. Low posture is a static
+    creep where knee clearance outranks fore-aft load balance, so the
+    offset smoothsteps out as the body drops; at normal heights the full
+    CoM-centering shift applies. Smoothstep, so the height slew never
+    produces an x-rate step."""
+    u = (stance_h - _XOFF_TAPER_LO) / (_XOFF_TAPER_HI - _XOFF_TAPER_LO)
+    return x_off * _smoothstep(u)
+
+
 def _hip_mount_xy(leg: str) -> tuple[float, float]:
     """Hip-frame → body-frame xy offset for a leg. forward_kinematics and
     the foot targets live in per-leg HIP frames whose origins sit at the
@@ -597,7 +618,9 @@ class MPCNode(Node):
         # spread, so phase transitions stay continuous), and the shin-mode
         # crouch (shared endpoint with balance stance). Should track the
         # calibrated com_x: with both equal, the QP arms come out symmetric
-        # and the static split is even.
+        # and the static split is even. Height-tapered (_x_offset_at): fades
+        # to zero below normal stance heights — a forward foot at crawl
+        # height drops the knee to the floor.
         self.declare_parameter("stance_x_offset",  float(mpc_cfg.get("stance_x_offset", 0.0)))
         self.declare_parameter("ramp_duration",    float(standup_cfg.get("ramp_duration", 6.0)))
         self.declare_parameter("lie_down_duration", float(standup_cfg.get("lie_down_duration", 2.0)))
@@ -1401,7 +1424,9 @@ class MPCNode(Node):
     def _compute_stance_q(self, stance_h: float) -> list[float]:
         """IK-derived joint targets for nominal stance at stance_h. Used by both
         standup ramp and balance_stance so they share the same goal with no snap."""
-        x_off = float(self.get_parameter("stance_x_offset").value)
+        x_off = _x_offset_at(
+            float(self.get_parameter("stance_x_offset").value), stance_h
+        )
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = np.asarray(nominal_foot_position(leg, stance_h), dtype=float).copy()
@@ -1467,7 +1492,9 @@ class MPCNode(Node):
             float(self.get_parameter("low_spread_max").value),
         )
         targets: dict[str, float] = {}
-        x_off = float(self.get_parameter("stance_x_offset").value)
+        x_off = _x_offset_at(
+            float(self.get_parameter("stance_x_offset").value), h
+        )
         for leg in _MPC_LEG_ORDER:
             p = np.asarray(nominal_foot_position(leg, h), dtype=float).copy()
             p[0] += x_off
@@ -1680,7 +1707,9 @@ class MPCNode(Node):
         # the stop transition never steps the body sideways
         a_sw = min(1.0, self._dt / _SWAY_TAU)
         self._sway += a_sw * (0.0 - self._sway)
-        x_off = float(self.get_parameter("stance_x_offset").value)
+        x_off = _x_offset_at(
+            float(self.get_parameter("stance_x_offset").value), stance_h
+        )
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = nominal_foot_position(leg, stance_h)
@@ -1960,7 +1989,9 @@ class MPCNode(Node):
         joint_targets: dict[str, float] = {}
         dq_targets:    dict[str, float] = {}
         att_dz = self._attitude_dz()
-        x_off = float(self.get_parameter("stance_x_offset").value)
+        x_off = _x_offset_at(
+            float(self.get_parameter("stance_x_offset").value), stance_h
+        )
 
         for leg in LEG_NAMES:
             in_contact = gait_state[leg]["contact"]
