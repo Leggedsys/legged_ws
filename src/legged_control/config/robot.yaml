@@ -269,7 +269,7 @@ mpc:
   # 降低,直接砍摆动相速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。
   # 楼梯/跨栏不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。
   # step_height 别再低了:0.02 以下地面稍不平就蹭脚。蹭地回 0.03。
-  gait_period:   0.8    # s — full stance+swing cycle per leg (trot)
+  gait_period:   0.6    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
   step_height:   0.035  # m — foot clearance at mid-swing
   # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
@@ -518,7 +518,7 @@ mpc:
                         # 更偏脚端;调小→贴得更平但摆动膝盖易蹭桥面
 
 standup:
-  ramp_duration: 3.0       # seconds for 0 → q_default smooth-step ramp
+  ramp_duration: 2.0       # seconds for 0 → q_default smooth-step ramp
   lie_down_duration: 2.0   # seconds for current → 0 smooth-step ramp
 
 height_scan:
