@@ -243,8 +243,14 @@ _STEP_VEL_REF = 0.15     # m/s — leg speed at which swing clearance reaches fu
 # clock-scheduled touchdown height wrong by ±50 mm+ per foot):
 _PROBE_RATE = 0.15       # m/s — downward probe speed when the scheduled
                          # touchdown finds air (stepping DOWN off a riser)
-_PROBE_MAX = 0.08        # m — probe depth limit; past this the leg holds and
-                         # stays force-unloaded rather than reaching further
+_PROBE_MAX = 0.12        # m — probe depth limit; past this the leg holds and
+                         # stays force-unloaded rather than reaching further.
+                         # MUST exceed stair_rise (0.10): descending a step,
+                         # the probe is what finds the lower tread — at the
+                         # old 0.08 the foot stopped 2 cm above it and the
+                         # edge leg stayed unloaded through its whole stance
+                         # (2026-07-13, the descent tip hazard). 0.12 takes
+                         # 0.8 s at _PROBE_RATE, inside the 1.8 s stance.
 _GROUND_DZ_CLAMP = 0.12  # m — per-foot learned ground offset clamp (a 100 mm
                          # step plus margin; also the landing prior clamp)
 _DETECT_BLEND_TAU = 0.08 # s — per-leg load-gate blend when measured contact
@@ -308,6 +314,16 @@ _XY_SETTLE_RATE = 0.15    # m/s — drain rate of the face-hit xy shortfall
                           # during the following stance: the foot is planted,
                           # so the command walking back to the analytic
                           # stroke moves the BODY, smoothly, not the foot
+# Tip watchdog (stair mode): attitude deviating from the terrain-following
+# reference by more than the trip angle means the body is actually tipping
+# (a ramp's slope lives in the reference, so slopes don't trip). The stride
+# is gated to zero — the crawl marches in place, statically stable — until
+# the attitude recovers. Last line of defense against momentum tipping at a
+# step edge, descent especially. The gate slews over _TIP_GATE_TAU: an
+# instant stride cut would step every stance stroke target by the Raibert
+# offset (up to ~7 cm).
+_STAIR_TIP_TRIP = 0.15    # rad (~8.6°) — roll/pitch error that trips the gate
+_TIP_GATE_TAU = 0.3       # s — stride gate slew time constant (trip + recover)
 # Shin mode (断桥): kneel and walk on the shins — see shin_gait.py for the
 # geometry. Transitions are slow whole-body blends, phased one leg at a time
 # in the creep order; walking is the crawl schedule driven in joint space.
@@ -412,6 +428,15 @@ def _is_face_hit(s: float, contact: bool, held: bool) -> bool:
     traversing, where ground cannot be: it's a wall. `held` short-circuits
     after the first hit of a swing."""
     return (not held) and contact and _FACE_HIT_S_MIN <= s < 0.5
+
+
+def _att_error(g: np.ndarray, att_ref: tuple[float, float]) -> float:
+    """Max |roll/pitch deviation| of a (bias-corrected) projected-gravity
+    vector from the attitude reference — the tip-watchdog signal. Slope
+    following lives in att_ref, so walking a ramp reads ≈ 0 here."""
+    roll = float(np.arctan2(-g[1], -g[2]))
+    pitch = float(np.arctan2(g[0], float(np.hypot(g[1], g[2]))))
+    return max(abs(roll - float(att_ref[0])), abs(pitch - float(att_ref[1])))
 
 
 def _drain_xy(offset: np.ndarray, dt: float,
@@ -912,6 +937,7 @@ class MPCNode(Node):
             leg: None for leg in LEG_NAMES
         }
         self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
+        self._tip_gate = 1.0  # stride gate, slewed (see _STAIR_TIP_TRIP)
         # hurdle_mode latched at standstill only (mid-walk flips are inert)
         self._hurdle_latch = False
         # shin mode mini-FSM: off → lower → lay → on → unlay → off
@@ -2045,6 +2071,32 @@ class MPCNode(Node):
         }
         R_body = self._R_body_est()
         terrain_plane, att_ref = self._terrain_tick(leg_scale, R_body)
+
+        # Tip watchdog (stairs): attitude off the terrain reference beyond
+        # the trip angle → gate the stride to zero (march in place) until it
+        # recovers. Estimate freshness is already guaranteed above (stale
+        # estimate returns _balance_stance before reaching here).
+        tip_tgt = 1.0
+        if stair:
+            g_est = _remove_mount_bias(
+                np.asarray(self._state_estimate[6:9], dtype=float),
+                float(self.get_parameter("att_roll_offset").value),
+                float(self.get_parameter("att_pitch_offset").value),
+            )
+            if _att_error(g_est, att_ref) > _STAIR_TIP_TRIP:
+                tip_tgt = 0.0
+                self.get_logger().warn(
+                    "[tip] attitude off terrain reference by "
+                    f"{_att_error(g_est, att_ref):.2f} rad — stride gated, "
+                    "marching in place until it recovers",
+                    throttle_duration_sec=2.0,
+                )
+        a_tip = min(1.0, self._dt / _TIP_GATE_TAU)
+        self._tip_gate += a_tip * (tip_tgt - self._tip_gate)
+        if self._tip_gate < 0.999:
+            vel_xy = vel_xy * self._tip_gate
+            yaw_rate = yaw_rate * self._tip_gate
+
         spread = _lateral_spread(
             stance_h,
             float(self.get_parameter("low_spread_start").value),
@@ -2113,6 +2165,14 @@ class MPCNode(Node):
                             self._probe_dz[leg] - _PROBE_RATE * self._dt,
                             -_PROBE_MAX,
                         )
+                        if self._probe_dz[leg] <= -_PROBE_MAX + 1e-9:
+                            self.get_logger().warn(
+                                f"[probe] {leg} bottomed out at "
+                                f"{_PROBE_MAX:.2f} m without finding ground "
+                                "— drop deeper than a riser? leg stays "
+                                "unloaded",
+                                throttle_duration_sec=2.0,
+                            )
                 p_foot[2] += self._leg_ground_dz[leg] + self._probe_dz[leg]
                 if self._face_hold[leg] is not None:
                     # first stance tick after a face-hit swing: the swing
@@ -2374,6 +2434,7 @@ class MPCNode(Node):
                     self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
                     self._face_hold = {leg: None for leg in LEG_NAMES}
                     self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
+                    self._tip_gate = 1.0
                     # a lie-down mid-shin-mode must not resume "on" from a
                     # standing pose — re-enter through the transitions
                     self._shin_phase = "off"
@@ -2398,6 +2459,7 @@ class MPCNode(Node):
                 self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
                 self._face_hold = {leg: None for leg in LEG_NAMES}
                 self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
+                self._tip_gate = 1.0
                 self._shin_phase = "off"
                 self._shin_walking = False
                 self.get_logger().warn("[mpc] standup timeout → WALK")

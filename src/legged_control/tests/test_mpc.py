@@ -1236,6 +1236,40 @@ def test_renorm_levels_clear_drains_everything():
         _renorm_levels(dz, 0.01, clear=True)
     assert all(abs(v) < 1e-6 for v in dz.values())
 
+def test_probe_reaches_below_a_riser_within_stance():
+    """Descent: the stance probe must reach DEEPER than one stair riser
+    (0.10 m stair_rise default) — at the old 0.08 limit the foot stopped
+    2 cm above the lower tread and the edge leg stayed unloaded through its
+    whole stance (tip hazard). And the full probe must fit inside one crawl
+    stance window at the period floor."""
+    from legged_control.mpc.mpc_node import (
+        _PROBE_MAX, _PROBE_RATE, _STAIR_MIN_PERIOD, _STAIR_SWING_RATIO,
+    )
+    assert _PROBE_MAX >= 0.10 + 0.015, "probe must out-reach a riser + margin"
+    t_probe = _PROBE_MAX / _PROBE_RATE
+    t_stance = _STAIR_MIN_PERIOD * (1.0 - _STAIR_SWING_RATIO)
+    assert t_probe < 0.6 * t_stance, "probe must finish well within stance"
+
+
+def test_att_error_slope_following_does_not_trip():
+    """Tip-watchdog signal: level gravity against a level reference reads 0;
+    a pitched body against a MATCHING terrain reference also reads ~0 (ramps
+    must not trip the gate); the same pitch against a level reference reads
+    the pitch itself."""
+    from legged_control.mpc.mpc_node import _att_error
+    g_level = np.array([0.0, 0.0, -1.0])
+    assert _att_error(g_level, (0.0, 0.0)) == pytest.approx(0.0, abs=1e-12)
+    pitch = 0.2
+    g_pitched = np.array([np.sin(pitch), 0.0, -np.cos(pitch)])
+    assert _att_error(g_pitched, (0.0, pitch)) == pytest.approx(0.0, abs=1e-9)
+    assert _att_error(g_pitched, (0.0, 0.0)) == pytest.approx(pitch, abs=1e-9)
+    # projected gravity convention: g = [sin p, −sin r·cos p, −cos r·cos p]
+    roll = -0.15
+    g_rolled = np.array([0.0, -np.sin(roll), -np.cos(roll)])
+    assert _att_error(g_rolled, (roll, 0.0)) == pytest.approx(0.0, abs=1e-9)
+    assert _att_error(g_rolled, (0.0, 0.0)) == pytest.approx(abs(roll), abs=1e-9)
+
+
 def test_face_hit_window():
     """Blind climb reflex trigger: contact during the rising/traversing part
     of the swing only — never right after lift-off (unload decay), never in
