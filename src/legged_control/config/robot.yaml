@@ -155,9 +155,9 @@ teleop:
   # 【2026-07-11 摆动柔顺】0.60/0.20/0.8 试验退回并压低:配合 gait_period
   # 1.2 后步幅在 v≈0.33 就到 Raibert ±0.12m 钳位,再高的指令只是空转,
   # 0.30 正好贴着饱和线以内。走稳了想快,先缩 gait_period 再提这里。
-  max_vx:  0.30  # m/s  forward/backward
-  max_vy:  0.12  # m/s  lateral
-  max_yaw: 0.5   # rad/s yaw rate
+  max_vx:  0.40  # m/s  forward/backward
+  max_vy:  0.20  # m/s  lateral
+  max_yaw: 0.8   # rad/s yaw rate
   deadzone: 0.05  # joystick axis deadzone (fraction of full range)
   btn_posture_toggle: 0  # A button: toggle stand up / lie down
   axis_vx:  1
@@ -202,7 +202,7 @@ teleop:
   # drags the standing height toward its own initial value.
   height_min:  0.10
   height_max:  0.30
-  height_init: 0.235   # 与 mpc.stance_height 同步（2026-07-10 降高度）
+  height_init: 0.20   # 与 mpc.stance_height 同步（2026-07-10 降高度）
 
 mpc:
   # tick_hz: mpc_node's own solve/publish rate — deliberately separate from
@@ -237,7 +237,7 @@ mpc:
   # 欠支撑靠 PD 硬扛 = 站立"昂头"的静态底子。力臂修正后 0.05 变回真实质心
   # 偏移的含义,数值先沿用,开 tau 站立跑 height_check 重新按"四腿 Δ 相等"
   # 微调（预期最终值仍在 0.03~0.07 邻域）。
-  com_x:   0.05
+  com_x:   0.04
   com_y:   0.0
   Ixx:     0.0196
   Iyy:     0.0228
@@ -268,9 +268,9 @@ mpc:
   # 降低,直接砍摆动相速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。
   # 楼梯/跨栏不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。
   # step_height 别再低了:0.02 以下地面稍不平就蹭脚。蹭地回 0.03。
-  gait_period:   1.0    # s — full stance+swing cycle per leg (trot)
+  gait_period:   0.8    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
-  step_height:   0.025  # m — foot clearance at mid-swing
+  step_height:   0.035  # m — foot clearance at mid-swing
   # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
   # 无跳变;LT/RT 仍可 0.15~0.30 现场调。注意 0.22 以下自动进低姿态外撇。
   # 与 teleop.height_init 必须一致。
@@ -286,7 +286,7 @@ mpc:
   # (平滑过渡)。低趴时脚在身前会把大腿拉竖、膝盖压向地面(h=0.15 实算:
   # 膝盖离地 77mm→25mm),低姿态钻爬以膝盖净空优先,代价是低趴时前腿
   # 恢复偏重——静态趴着可接受。
-  stance_x_offset: 0.05
+  stance_x_offset: 0.04
   # Pure position control: no GRF/tau_ff feedforward, one fixed kp/kd scale
   # for the whole gait cycle (no stance/swing gain switching). See
   # dev/mpc-purepos branch — removed SRBD-MPC + J^T·f torque path entirely
@@ -297,7 +297,7 @@ mpc:
   # 【2026-07-11】1.5→2.0:支撑加硬到 3.5 后摆动反成最软相,腿抬不到位。
   # K_swing ≈ 80,离红线 180 仍有余量。kd 暂不动,若摆动腿触地弹跳再提 2.1。
   kp_scale: 2.0
-  kd_scale: 1.8
+  kd_scale: 2.2
   # "小kp大tau"分相增益：支撑腿随受力渐变把 kp/kd 交叉过渡到下面的低值
   # （前馈承重、PD 只管柔顺纠偏）；摆动腿另有 kp_swing_scale 分支（见下），
   # 未启用时保持上面的 kp_scale/kd_scale。
@@ -462,16 +462,22 @@ mpc:
   # 台阶模式（2026-07-10,一个开关）：爬行步态(一次抬一腿,三脚常撑地,
   # 静态稳定,任意瞬间可停) + 重心侧移(抬腿前身体向支撑三角挪) + 程序锁速
   # (前进 ≤0.08m/s、横移 ≤0.03、转向 ≤0.15——摇杆只管走/停/方向,不管快慢)
-  # + 抬脚定死 12cm 不随速度缩水 + 自动启用触地检测。
+  # + 抬脚定死 14cm 不随速度缩水 + 自动启用触地检测。
   # 【v2 修正】所有台阶参数跟随"实际步态",不跟开关:走路中切开关完全
   # 无效果,直到站定、步态真切成爬行才一起生效——v1 在行走中切会出现
-  # trot 扛爬行参数的甩腿(已复现,危险)。周期下限 1.2→2.0s:摆动 0.48s,
-  # 12cm 抬脚竖直峰速 ~0.8m/s(约平地 2 倍,v1 是 4 倍)。
+  # trot 扛爬行参数的甩腿(已复现,危险)。
+  # 【v3 抬腿加高 2026-07-13】实测抬腿不够高。物理上限是小腿折叠限位:
+  # 脚最多抬到 身高−8.9cm,光加大摆动弧没用,必须先升身体——所以加了
+  # stair_body_h 身高地板(和跨栏模式同一套路)。三处联动:抬脚 12→14cm、
+  # 上台阶步的额外余量 4→6cm(专治蹭台阶棱角)、周期下限 2.0→2.4s
+  # (摆动 0.576s,竖直峰速仍 ~0.9m/s,不甩腿,代价是再慢 ~17%)。
   # 用法:【站定后】按手柄 LB(或 ros2 param set /mpc_node stair_mode
-  # true),摇杆正对台阶轻推;结束后站定再按 LB 关。慢是特性:10 级台阶
-  # 约 1.5~2 分钟。
+  # true),身体自动升到 0.28,摇杆正对台阶轻推;结束后站定再按 LB 关。
+  # 慢是特性:10 级台阶约 2 分钟。
   stair_mode: false
   stair_rise: 0.10   # m — 每次 /step_command 抬升的台阶高度(100mm 台阶)
+  stair_body_h: 0.28 # m — 台阶模式身高地板(硬上限 0.30;LT 只能再调高)。
+                     # 0.28 时脚真实最多抬 ~19cm;还嫌蹭就升到 0.29
   # 跨栏模式(2026-07-11):跨过高 ~150mm 的薄板(跨过去,不站上去)。
   # 抬脚硬上限来自小腿折叠限位(髋到脚最短 8.8cm):默认站高 0.235 最多抬
   # ~13cm,过不了 150;髋外展 ±0.4 rad 实测是机械限位,只赚 7mm,不采用。

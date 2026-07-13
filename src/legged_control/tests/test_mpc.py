@@ -1236,6 +1236,80 @@ def test_renorm_levels_clear_drains_everything():
         _renorm_levels(dz, 0.01, clear=True)
     assert all(abs(v) < 1e-6 for v in dz.values())
 
+def test_stair_swing_ik_feasible_at_body_floor():
+    """A normal crawl swing (clearance floor _STAIR_MIN_STEP_H) at the
+    stair_body_h default (0.28) must be IK-reachable AND inside the
+    robot.yaml joint limits for a front and a rear leg — the body floor
+    exists precisely so the taller lift fits under the calf fold limit."""
+    from legged_control.mpc.mpc_node import (
+        _STAIR_MIN_PERIOD, _STAIR_MIN_STEP_H, _STAIR_SWING_RATIO,
+    )
+    from legged_control.mpc.swing_trajectory import (
+        swing_foot_position, landing_target, stance_foot_position,
+    )
+    from legged_control.kinematics import inverse_kinematics
+    h = 0.28  # stair_body_h default
+    v = np.array([0.08, 0.0])
+    t_sw = _STAIR_MIN_PERIOD * _STAIR_SWING_RATIO
+    thigh_max = {"FR": 1.8, "RL": 2.0}
+    for leg in ("FR", "RL"):
+        p_lift = np.asarray(stance_foot_position(
+            leg, 1.0, v, _STAIR_MIN_PERIOD, _STAIR_SWING_RATIO, h
+        ))
+        p_land = np.asarray(landing_target(
+            leg, v, _STAIR_MIN_PERIOD, _STAIR_SWING_RATIO, h
+        ))
+        for s in np.linspace(0.0, 1.0, 41):
+            p = swing_foot_position(
+                s, p_lift, p_land, _STAIR_MIN_STEP_H, xy_end_slope=-v * t_sw
+            )
+            q = inverse_kinematics(leg, tuple(p))
+            assert q is not None, f"{leg} s={s:.3f} unreachable at {p}"
+            q1, q2, q3 = q
+            assert abs(q1) <= 0.4 + 1e-6, f"{leg} s={s:.3f} hip {q1:.3f}"
+            assert -0.5 - 1e-6 <= q2 <= thigh_max[leg] + 1e-6, \
+                f"{leg} s={s:.3f} thigh {q2:.3f}"
+            assert -2.60 <= q3 <= -0.9 + 1e-6, \
+                f"{leg} s={s:.3f} calf {q3:.3f} (fold margin 0.05)"
+
+
+def test_stair_rise_swing_clears_riser_edge_early():
+    """Operator step-up swing (H = floor + _RISE_CLEARANCE, landing one
+    0.10 m riser higher): commanded height above the LOWER tread must
+    exceed riser + 3 cm already at s = 0.3 — the early-arc region where
+    the riser edge actually got clipped at the old 0.04 clearance — and
+    stay above riser + 2 cm over a wide fraction of the swing."""
+    from legged_control.mpc.mpc_node import _STAIR_MIN_STEP_H, _RISE_CLEARANCE
+    from legged_control.mpc.swing_trajectory import swing_foot_position
+    rise = 0.10
+    H = _STAIR_MIN_STEP_H + _RISE_CLEARANCE
+    p0 = np.array([0.0645, 0.1127, -0.28])
+    p1 = p0 + np.array([0.05, 0.0, rise])
+    z03 = swing_foot_position(0.3, p0, p1, H)[2] - p0[2]
+    assert z03 > rise + 0.03, f"s=0.3 only {z03:.3f} above the lower tread"
+    ss = np.linspace(0.0, 1.0, 1001)
+    zs = np.array([swing_foot_position(s, p0, p1, H)[2] - p0[2] for s in ss])
+    assert float(np.mean(zs > rise + 0.02)) > 0.45
+
+
+def test_stair_vertical_speed_stays_in_validated_band():
+    """Raising the clearance floor 0.12→0.14 came WITH the period floor
+    2.0→2.4: peak vertical foot speed at the floors must stay in the
+    stair-v2 hardware-validated band (no flailing)."""
+    from legged_control.mpc.mpc_node import (
+        _STAIR_MIN_PERIOD, _STAIR_MIN_STEP_H, _STAIR_SWING_RATIO,
+    )
+    from legged_control.mpc.swing_trajectory import swing_foot_position
+    t_sw = _STAIR_MIN_PERIOD * _STAIR_SWING_RATIO
+    p0 = np.array([0.0645, 0.1127, -0.28])
+    ss = np.linspace(0.0, 1.0, 2001)
+    zs = np.array([
+        swing_foot_position(s, p0, p0, _STAIR_MIN_STEP_H)[2] for s in ss
+    ])
+    vz = np.abs(np.diff(zs) / (np.diff(ss) * t_sw))
+    assert float(vz.max()) < 1.0
+
+
 # ── Hurdle mode (cross a thin ~150 mm board) ─────────────────────────────────
 
 def test_hurdle_flat_top_holds_full_height():

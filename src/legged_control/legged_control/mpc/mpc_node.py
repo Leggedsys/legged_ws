@@ -249,17 +249,19 @@ _EFF_FRESH_S = 0.5       # s — effort telemetry older than this disables
                          # detection (old aggregator build / sim would read
                          # all-zero torque = "no leg ever touches ground")
 # Stair mode (crawl gait): the program owns the pace, the stick only points.
-_STAIR_MIN_PERIOD = 2.0  # s — crawl cycle floor. Sets the swing time
-                         # (0.24 × 2.0 = 0.48 s): with the 12 cm stair
-                         # clearance the foot's peak vertical speed is
-                         # ~0.8 m/s — twice normal walking, not the 4×
-                         # that a 1.2 s cycle produced (hardware verdict:
-                         # dangerous flailing).
+_STAIR_MIN_PERIOD = 2.4  # s — crawl cycle floor. Sets the swing time
+                         # (0.24 × 2.4 = 0.576 s): with the 14 cm stair
+                         # clearance the foot's peak vertical speed stays
+                         # ~0.9 m/s — the stair-v2 validated band (a 1.2 s
+                         # cycle produced 4× normal-walk speed; hardware
+                         # verdict: dangerous flailing). Raised with
+                         # _STAIR_MIN_STEP_H 0.12→0.14 to keep speed flat.
 _STAIR_SWING_RATIO = 0.24 # one leg at a time, 3 always planted (max 0.24)
 _STAIR_SPEED_CAP = 0.08  # m/s — governed forward speed on stairs
 _STAIR_VY_CAP = 0.03     # m/s — lateral cap (alignment nudges only)
 _STAIR_YAW_CAP = 0.15    # rad/s — heading nudges only
-_STAIR_MIN_STEP_H = 0.12 # m — clearance floor over a 100 mm riser
+_STAIR_MIN_STEP_H = 0.14 # m — clearance floor over a 100 mm riser (0.12
+                         # clipped tread nosings on hardware 2026-07-13)
 _LEVEL_RENORM_RATE = 0.04 # m/s — once ALL feet share a common level offset
                           # (both pairs climbed the step), the common part
                           # slews to zero: the body rises to nominal height
@@ -279,9 +281,13 @@ _HURDLE_FLAT_TOP = 0.3    # fraction of swing held at FULL height: widens
                           # the ">150 mm" window along the stride from ~4 cm
                           # (cosine arc) to ~12 cm — clearing the board stops
                           # depending on which centimeter it sits under.
-_RISE_CLEARANCE = 0.04    # m — extra swing clearance while a leg executes a
+_RISE_CLEARANCE = 0.06    # m — extra swing clearance while a leg executes a
                           # level change (the arc must clear the riser EDGE,
-                          # not just reach the tread height)
+                          # not just reach the tread height). Mid-swing the
+                          # command may saturate the calf fold limit (max
+                          # physical lift = body_h − 0.089); the value earns
+                          # its keep EARLY in the arc (s≈0.3, where the edge
+                          # actually gets clipped), which is below the fold.
 # Shin mode (断桥): kneel and walk on the shins — see shin_gait.py for the
 # geometry. Transitions are slow whole-body blends, phased one leg at a time
 # in the creep order; walking is the crawl schedule driven in joint space.
@@ -744,6 +750,13 @@ class MPCNode(Node):
         # Operator-triggered step-up: rise per /step_command press (the
         # 100 mm stair, plus a little for the foot to land flat on it).
         self.declare_parameter("stair_rise", float(mpc_cfg.get("stair_rise", 0.10)))
+        # Stair body-height floor: physical foot lift is capped by the calf
+        # fold limit at body_h − ~0.089 m, so a taller commanded arc alone
+        # cannot raise the foot — the body must come up (same reasoning as
+        # hurdle_body_h). 0.28 buys ~0.19 m of real lift.
+        self.declare_parameter(
+            "stair_body_h", float(mpc_cfg.get("stair_body_h", 0.28))
+        )
         # Hurdle mode: raise the body + flat-topped 0.17 m swings to cross a
         # thin ~150 mm board. Rides on stair mode (crawl gait + governed
         # speed); latched only while standing, like every gait-level switch.
@@ -1002,6 +1015,14 @@ class MPCNode(Node):
             # Same slew path as LT/RT, so engaging/releasing never steps.
             target = max(
                 target, float(self.get_parameter("hurdle_body_h").value)
+            )
+        elif self._gait.mode == "crawl":
+            # stair body-height floor, for the same reason as hurdle's: the
+            # rise-swing arc (0.14 + 0.06 clearance over a 0.10 riser) only
+            # fits under the calf fold limit with the body raised. Floor,
+            # not pin — LT can still take it higher.
+            target = max(
+                target, float(self.get_parameter("stair_body_h").value)
             )
         target = min(max(target, _HEIGHT_MIN), _HEIGHT_MAX)
         max_step = _HEIGHT_SLEW * self._dt
