@@ -40,6 +40,7 @@ from geometry_msgs.msg import Twist
 from legged_control.kinematics import (
     forward_kinematics,
     inverse_kinematics,
+    leg_gravity_torque,
     leg_kinematic_velocity,
     _leg_signs,
     _numerical_jacobian,
@@ -646,6 +647,11 @@ class MPCNode(Node):
         # kp_scale/kd_scale on both sides: no gain step at any transition.
         self.declare_parameter("kp_swing_scale", float(mpc_cfg.get("kp_swing_scale", -1.0)))
         self.declare_parameter("kd_swing_scale", float(mpc_cfg.get("kd_swing_scale", -1.0)))
+        # Swing-leg gravity compensation feedforward (see leg_gravity_torque
+        # and the block in _compute_mpc_joints).
+        self.declare_parameter(
+            "swing_grav_ff_enabled", bool(mpc_cfg.get("swing_grav_ff_enabled", True))
+        )
         # IMU attitude leveling (WALK phase): tilt from projected_gravity,
         # damping from that signal's own derivative → per-foot z offsets.
         # att_kp in m per unit tilt (≈ m/rad for small angles); 0 disables.
@@ -2152,6 +2158,28 @@ class MPCNode(Node):
                   else _stance_load_ramp(self._gait.swing_phase(leg, now), ramp_frac))
             for leg in LEG_NAMES
         }
+
+        # Swing gravity feedforward: the QP force path covers loaded legs
+        # only — a swinging leg's own link weight otherwise comes out of kp
+        # position error (~0.02 rad droop at the mid-swing K≈40, biggest on
+        # the hip roll: the whole leg hangs outboard of that axis). Weighted
+        # by the same mid-swing crossfade as the gain split (zero at every
+        # contact flip — complements the stance load ramp, never overlaps
+        # it) times the global tau blend, so `tau_ff_enabled false` retires
+        # this path too and pure-PD fallback stays pure.
+        if bool(self.get_parameter("swing_grav_ff_enabled").value):
+            for leg in LEG_NAMES:
+                w = swing_w[leg] * self._tau_blend
+                if w <= 1e-3:
+                    continue
+                g_tau = leg_gravity_torque(
+                    leg, tuple(joint_targets[j] for j in _leg_joints(leg))
+                )
+                for jname, gt in zip(_leg_joints(leg), g_tau):
+                    tau[_YAML_JOINTS.index(jname)] += w * float(
+                        np.clip(gt, -2.5, 2.5)
+                    )
+
         kp, kd = self._walk_gains(leg_scale, swing_w)
 
         return JointCommand(

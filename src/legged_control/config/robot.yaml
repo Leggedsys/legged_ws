@@ -268,7 +268,7 @@ mpc:
   # 降低,直接砍摆动相速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。
   # 楼梯/跨栏不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。
   # step_height 别再低了:0.02 以下地面稍不平就蹭脚。蹭地回 0.03。
-  gait_period:   1.2    # s — full stance+swing cycle per leg (trot)
+  gait_period:   1.0    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
   step_height:   0.025  # m — foot clearance at mid-swing
   # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
@@ -321,6 +321,13 @@ mpc:
   # 现场调参:ros2 param set /mpc_node kp_swing_scale 1.4(实时生效)。
   kp_swing_scale: 1.0
   kd_swing_scale: 2.2
+  # 【2026-07-13 摆动重力前馈】摆动腿自重实时算成关节力矩填进 tau,PD 从
+  # "扛腿"解放成纯纠偏:中段 K≈40 的 ~0.02 rad 重力下垂消失。量级(URDF
+  # 惯量实算):髋滚转 ~0.92 Nm(整条腿挂在滚转轴外侧,最大项)、大腿 <0.35、
+  # 小腿 <0.15。权重 = 摆动中段渐变 × tau 全局 blend——换相零阶跃,支撑腿
+  # 永远不加(QP 已按整机重量配力,加了就双算)。关闭回退:
+  #   ros2 param set /mpc_node swing_grav_ff_enabled false
+  swing_grav_ff_enabled: true
   # 位置侧 IMU 调平（仅 WALK 相）：projected_gravity 倾斜量（0.1s 低通）+ 其
   # 数值微分 → 四脚 z 修正，±4cm 限幅 + 0.25 m/s 斜率硬限。
   # 【2026-07-09 实测确认：默认关闭】rate_fb（力级速率阻尼）上线后,这条慢环

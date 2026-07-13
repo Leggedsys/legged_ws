@@ -66,6 +66,59 @@ def forward_kinematics(
     return x, y, z
 
 
+# Leg link inertials from dog_urdf (FL values; the other legs mirror through
+# lat_sign/hip_sign). Only the components that move potential energy matter:
+# lateral COM offsets (they load the hip ROLL joint — the largest term, the
+# whole leg's mass hangs D_LAT-ish outboard of the roll axis) and the planar
+# distances below each pitch joint. The thigh's 0.98 kg sits 13 mm from the
+# hip axis (motors live at the hip), so the pitch-plane terms are small.
+_M_HIP = 0.230146330118093
+_Y_HIP_COM = 0.00174712967469963          # hip-link COM lateral offset (m)
+_M_THIGH = 0.978596689781306
+_D_THIGH_COM = 0.0127549994713949         # thigh COM below thigh joint (m)
+_Y_THIGH_COM = HIP_Y_OFFSET + 0.0530216135226285
+_M_FOOT = 0.0179075406761494
+_M_CALF = 0.174854579981966 + _M_FOOT     # foot (fixed joint) lumped in
+_D_CALF_COM = (
+    0.174854579981966 * 0.0670819670227258
+    + _M_FOOT * (0.181256552442634 - 0.00474142838422875)
+) / _M_CALF                               # combined COM below knee (m)
+_GRAV = 9.81
+
+
+def leg_gravity_torque(
+    leg: str, joints: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Holding torque (Nm, URDF joint frame) against the leg's OWN link
+    weights, with the body level: tau = dU/dq of the leg's gravitational
+    potential. Add as feedforward on a SWINGING leg so the PD no longer
+    generates these torques out of position error (droop). Magnitudes:
+    hip roll ~0.92 Nm at q2=q3=0 (lateral offsets), thigh <~0.35 Nm,
+    calf <~0.15 Nm. Stance legs must NOT get this — the QP force path
+    already balances the whole body's weight there."""
+    hip_sign, lat_sign, _ = _leg_signs(leg)
+    q1, q2, q3 = joints
+    h = hip_sign * q1
+    ch, sh = math.cos(h), math.sin(h)
+    s2 = math.sin(q2)
+    s23 = math.sin(q2 + q3)
+    z_th = -_D_THIGH_COM * math.cos(q2)
+    z_cf = -L2 * math.cos(q2) - _D_CALF_COM * math.cos(q2 + q3)
+    y_h = lat_sign * _Y_HIP_COM
+    y_th = lat_sign * _Y_THIGH_COM
+    y_cf = lat_sign * D_LAT
+    tau1 = _GRAV * hip_sign * (
+        _M_HIP * y_h * ch
+        + _M_THIGH * (y_th * ch - z_th * sh)
+        + _M_CALF * (y_cf * ch - z_cf * sh)
+    )
+    tau2 = _GRAV * ch * (
+        _M_THIGH * _D_THIGH_COM * s2 + _M_CALF * (L2 * s2 + _D_CALF_COM * s23)
+    )
+    tau3 = _GRAV * ch * _M_CALF * _D_CALF_COM * s23
+    return tau1, tau2, tau3
+
+
 def _wrap_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 

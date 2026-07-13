@@ -1457,3 +1457,85 @@ def test_stance_x_offset_taper_protects_knee_clearance():
             assert q is not None, (leg, h)
             clearance = h - L2 * math.cos(q[1])
             assert clearance > 0.05, (leg, h, clearance)
+
+
+def _leg_potential_over_g(leg: str, q) -> float:
+    """Independent potential-energy construction for leg_gravity_torque
+    verification: full 3-vector COM positions through explicit rotation
+    matrices (URDF chain: roll at hip, pitch at thigh and calf joints in the
+    rolled frame), no small-component pruning. Returns U/g = sum m_i * z_i."""
+    import math
+
+    from legged_control.kinematics import (
+        HIP_Y_OFFSET, L2, _leg_signs,
+        _M_HIP, _Y_HIP_COM, _M_THIGH, _D_THIGH_COM, _Y_THIGH_COM,
+        _M_CALF, _D_CALF_COM,
+    )
+
+    hip_sign, lat_sign, x_sign = _leg_signs(leg)
+
+    def rot_x(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=float)
+
+    def rot_y(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=float)
+
+    R1 = rot_x(hip_sign * q[0])
+    thigh_origin = np.array([x_sign * 0.0645133382530963,
+                             lat_sign * HIP_Y_OFFSET, 0.0])
+    p_hip = R1 @ np.array([x_sign * 0.0587, lat_sign * _Y_HIP_COM, 0.0])
+    p_thigh = R1 @ (thigh_origin + rot_y(q[1]) @ np.array(
+        [0.0, lat_sign * (_Y_THIGH_COM - HIP_Y_OFFSET), -_D_THIGH_COM]))
+    knee = thigh_origin + rot_y(q[1]) @ np.array(
+        [0.0, lat_sign * 0.0922, -L2])
+    p_calf = R1 @ (knee + rot_y(q[1] + q[2]) @ np.array(
+        [0.0, 0.0, -_D_CALF_COM]))
+    return _M_HIP * p_hip[2] + _M_THIGH * p_thigh[2] + _M_CALF * p_calf[2]
+
+
+def test_leg_gravity_torque_matches_potential_gradient():
+    """Analytic swing-leg gravity feedforward == dU/dq of an independently
+    built potential (explicit rotation matrices), all four legs, poses
+    across the working envelope. Plus physical anchors: straight-down pose
+    has zero pitch torque and ~+0.92 Nm hip-roll holding torque (URDF
+    positive q1 is abduction for every leg — the leg mass hangs outboard of
+    the roll axis on both sides), and magnitudes stay within the clip."""
+    from legged_control.kinematics import leg_gravity_torque
+
+    rng = np.random.default_rng(7)
+    eps = 1e-6
+    for leg in LEG_NAMES:
+        for _ in range(24):
+            q = (
+                float(rng.uniform(-0.4, 0.4)),
+                float(rng.uniform(-0.5, 1.8)),
+                float(rng.uniform(-2.6, -0.3)),
+            )
+            tau = leg_gravity_torque(leg, q)
+            for k in range(3):
+                qp = list(q)
+                qm = list(q)
+                qp[k] += eps
+                qm[k] -= eps
+                num = 9.81 * (
+                    _leg_potential_over_g(leg, qp)
+                    - _leg_potential_over_g(leg, qm)
+                ) / (2 * eps)
+                assert tau[k] == pytest.approx(num, abs=2e-4), (leg, q, k)
+
+        t1, t2, t3 = leg_gravity_torque(leg, (0.0, 0.0, 0.0))
+        assert t2 == pytest.approx(0.0, abs=1e-12)
+        assert t3 == pytest.approx(0.0, abs=1e-12)
+        assert t1 == pytest.approx(0.92, abs=0.03)
+
+    for leg in LEG_NAMES:
+        for _ in range(200):
+            q = (
+                float(rng.uniform(-0.4, 0.4)),
+                float(rng.uniform(-0.5, 1.8)),
+                float(rng.uniform(-2.6, -0.3)),
+            )
+            t1, t2, t3 = leg_gravity_torque(leg, q)
+            assert abs(t1) < 1.5 and abs(t2) < 0.7 and abs(t3) < 0.16
