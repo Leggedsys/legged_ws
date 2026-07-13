@@ -292,6 +292,22 @@ _RISE_CLEARANCE = 0.06    # m — extra swing clearance while a leg executes a
                           # physical lift = body_h − 0.089); the value earns
                           # its keep EARLY in the arc (s≈0.3, where the edge
                           # actually gets clipped), which is below the fold.
+# Blind stair-climb reflex (stair mode + contact detection): measured contact
+# while the swing foot is still rising/traversing — BEFORE the early-touchdown
+# window at s ≥ 0.5 — cannot be ground; the foot ran into the stair's vertical
+# FACE. The reflex holds the commanded target where it hit (stop pushing into
+# the wall) and queues a rise for that leg's next swing: the automatic
+# equivalent of the operator's X/Y press. The held z reuses the touchdown
+# fold, and the stance probe then walks the learned level down to the real
+# tread, so a queued rise always starts from true ground. Repeated hits are
+# bounded by _GROUND_DZ_CLAMP (one riser + margin). Disabled while hurdling —
+# a thin board must be crossed, never stepped onto.
+_FACE_HIT_S_MIN = 0.15    # ignore contact right after lift-off: the leg is
+                          # still unloading and effort telemetry decays
+_XY_SETTLE_RATE = 0.15    # m/s — drain rate of the face-hit xy shortfall
+                          # during the following stance: the foot is planted,
+                          # so the command walking back to the analytic
+                          # stroke moves the BODY, smoothly, not the foot
 # Shin mode (断桥): kneel and walk on the shins — see shin_gait.py for the
 # geometry. Transitions are slow whole-body blends, phased one leg at a time
 # in the creep order; walking is the crawl schedule driven in joint space.
@@ -387,6 +403,26 @@ def _stance_load_ramp(s: float, frac: float = _TAU_RAMP_FRAC) -> float:
     s = float(np.clip(s, 0.0, 1.0))
     frac = max(1e-3, float(frac))
     return _smoothstep(s / frac) * _smoothstep((1.0 - s) / frac)
+
+
+def _is_face_hit(s: float, contact: bool, held: bool) -> bool:
+    """Riser-face collision test for one swing tick (callers gate on stair
+    mode, detection on, and not hurdling). True when measured contact fires
+    while the swing is below the early-touchdown window — rising or
+    traversing, where ground cannot be: it's a wall. `held` short-circuits
+    after the first hit of a swing."""
+    return (not held) and contact and _FACE_HIT_S_MIN <= s < 0.5
+
+
+def _drain_xy(offset: np.ndarray, dt: float,
+              rate: float = _XY_SETTLE_RATE) -> np.ndarray:
+    """Slew a 2-vector toward zero at `rate` m/s, preserving direction,
+    never overshooting."""
+    n = float(np.hypot(offset[0], offset[1]))
+    step = rate * float(dt)
+    if n <= step:
+        return np.zeros(2)
+    return offset * (1.0 - step / n)
 
 
 def _remove_mount_bias(g: np.ndarray, roll_off: float, pitch_off: float) -> np.ndarray:
@@ -761,6 +797,14 @@ class MPCNode(Node):
         self.declare_parameter(
             "stair_body_h", float(mpc_cfg.get("stair_body_h", 0.28))
         )
+        # Blind climb reflex: a swing that hits the riser FACE holds and
+        # auto-queues a rise for its next swing — stairs climb on a plain
+        # forward stick, no X/Y press. Escape hatch for a miscalibrated
+        # contact threshold (false hits would queue phantom rises).
+        self.declare_parameter(
+            "climb_reflex_enabled",
+            bool(mpc_cfg.get("climb_reflex_enabled", True)),
+        )
         # Hurdle mode: raise the body + flat-topped 0.17 m swings to cross a
         # thin ~150 mm board. Rides on stair mode (crawl gait + governed
         # speed); latched only while standing, like every gait-level switch.
@@ -861,6 +905,13 @@ class MPCNode(Node):
         self._level_pending: dict[str, float] = {}
         self._level_clear = False
         self._rise_boost = {leg: False for leg in LEG_NAMES}
+        # Blind climb reflex state: commanded xy held for the rest of a
+        # face-hit swing, and the leftover xy shortfall drained during the
+        # following stance (see _FACE_HIT_S_MIN / _XY_SETTLE_RATE).
+        self._face_hold: dict[str, np.ndarray | None] = {
+            leg: None for leg in LEG_NAMES
+        }
+        self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
         # hurdle_mode latched at standstill only (mid-walk flips are inert)
         self._hurdle_latch = False
         # shin mode mini-FSM: off → lower → lay → on → unlay → off
@@ -1864,6 +1915,8 @@ class MPCNode(Node):
             # restarting mid-staircase, the feet are still on their steps
             self._td_z = {leg: None for leg in LEG_NAMES}
             self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
+            self._face_hold = {leg: None for leg in LEG_NAMES}
+            self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
             self._walking = True
 
         gait_state = self._gait.query(now)
@@ -1949,6 +2002,10 @@ class MPCNode(Node):
                 # as this foot's landing prior (300 mm treads: the next
                 # footfall usually lands on the same step)
                 self._probe_dz[leg] = 0.0
+                # face-hit reflex state is per-swing/per-stance transient:
+                # a stale xy_settle would offset the NEXT stance's stroke
+                self._face_hold[leg] = None
+                self._xy_settle[leg] = np.zeros(2)
                 # operator step-up: consume a pending level rise — this
                 # swing lands one stair level higher, with extra clearance
                 # for the riser edge
@@ -2057,6 +2114,23 @@ class MPCNode(Node):
                             -_PROBE_MAX,
                         )
                 p_foot[2] += self._leg_ground_dz[leg] + self._probe_dz[leg]
+                if self._face_hold[leg] is not None:
+                    # first stance tick after a face-hit swing: the swing
+                    # ended short of its landing target. Convert the
+                    # shortfall into an offset applied on top of the analytic
+                    # stroke — exact continuity now — and drain it at
+                    # _XY_SETTLE_RATE: the foot is planted, so the command
+                    # walking back moves the body smoothly, not the foot.
+                    self._xy_settle[leg] = (
+                        np.asarray(self._face_hold[leg], dtype=float)
+                        - p_foot[:2]
+                    )
+                    self._face_hold[leg] = None
+                else:
+                    self._xy_settle[leg] = _drain_xy(
+                        self._xy_settle[leg], self._dt
+                    )
+                p_foot[0:2] += self._xy_settle[leg]
             else:
                 s = self._gait.swing_phase(leg, now)
                 p_land = landing_target(
@@ -2095,8 +2169,40 @@ class MPCNode(Node):
                 if detect_on and s >= 0.5:
                     if self._td_z[leg] is None and contact_meas[leg]:
                         self._td_z[leg] = float(p_foot[2])
+                elif (
+                    stair and not hurdle and detect_on
+                    and bool(self.get_parameter("climb_reflex_enabled").value)
+                    and _is_face_hit(
+                        s, contact_meas[leg], self._face_hold[leg] is not None
+                    )
+                ):
+                    # Blind climb reflex: contact while the swing is still
+                    # rising/traversing is the riser FACE, not ground. Hold
+                    # the commanded target right here (stop pushing into the
+                    # wall) and queue this leg's next swing as a rise swing —
+                    # exactly what the operator's X/Y press does. The z hold
+                    # reuses the touchdown fold; the stance probe then walks
+                    # the held level down to the real tread, so the queued
+                    # rise starts from true ground. Not while hurdling: a
+                    # thin board is crossed, never stepped onto.
+                    self._face_hold[leg] = p_foot[:2].copy()
+                    self._td_z[leg] = float(p_foot[2])
+                    self._level_pending[leg] = now
+                    if self._rise_boost[leg]:
+                        self.get_logger().warn(
+                            f"[climb] {leg} hit the riser again on a BOOSTED "
+                            "swing — step taller than stair_rise, or "
+                            "contact_tau_thresh too low"
+                        )
+                    else:
+                        self.get_logger().info(
+                            f"[climb] {leg} riser face at s={s:.2f} — "
+                            "holding; next swing rises"
+                        )
                 if self._td_z[leg] is not None:
                     p_foot[2] = self._td_z[leg]
+                if self._face_hold[leg] is not None:
+                    p_foot[0:2] = self._face_hold[leg]
             # Lift-pos capture stays in the un-leveled, un-terrained frame;
             # leveling and terrain offsets are added after, to stance and
             # swing alike, so phase transitions stay continuous and neither
@@ -2266,6 +2372,8 @@ class MPCNode(Node):
                     self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}
                     self._td_z = {leg: None for leg in LEG_NAMES}
                     self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
+                    self._face_hold = {leg: None for leg in LEG_NAMES}
+                    self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
                     # a lie-down mid-shin-mode must not resume "on" from a
                     # standing pose — re-enter through the transitions
                     self._shin_phase = "off"
@@ -2288,6 +2396,8 @@ class MPCNode(Node):
                 self._leg_ground_dz = {leg: 0.0 for leg in LEG_NAMES}
                 self._td_z = {leg: None for leg in LEG_NAMES}
                 self._probe_dz = {leg: 0.0 for leg in LEG_NAMES}
+                self._face_hold = {leg: None for leg in LEG_NAMES}
+                self._xy_settle = {leg: np.zeros(2) for leg in LEG_NAMES}
                 self._shin_phase = "off"
                 self._shin_walking = False
                 self.get_logger().warn("[mpc] standup timeout → WALK")

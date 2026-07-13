@@ -1236,6 +1236,45 @@ def test_renorm_levels_clear_drains_everything():
         _renorm_levels(dz, 0.01, clear=True)
     assert all(abs(v) < 1e-6 for v in dz.values())
 
+def test_face_hit_window():
+    """Blind climb reflex trigger: contact during the rising/traversing part
+    of the swing only — never right after lift-off (unload decay), never in
+    the early-touchdown window (s ≥ 0.5, that's ground, handled separately),
+    never without contact, and only once per swing (held short-circuits)."""
+    from legged_control.mpc.mpc_node import _is_face_hit, _FACE_HIT_S_MIN
+    assert not _is_face_hit(_FACE_HIT_S_MIN - 1e-3, True, False)
+    assert _is_face_hit(_FACE_HIT_S_MIN, True, False)
+    assert _is_face_hit(0.3, True, False)
+    assert _is_face_hit(0.49, True, False)
+    assert not _is_face_hit(0.5, True, False)
+    assert not _is_face_hit(0.3, False, False)
+    assert not _is_face_hit(0.3, True, True)
+
+
+def test_drain_xy_rate_direction_and_zero():
+    """The face-hit xy shortfall drains at exactly _XY_SETTLE_RATE,
+    direction-preserving, reaches exactly zero without overshoot, and zero
+    stays zero."""
+    from legged_control.mpc.mpc_node import _drain_xy, _XY_SETTLE_RATE
+    dt = 0.01
+    off = np.array([0.06, -0.03])
+    n0 = float(np.hypot(*off))
+    u0 = off / n0
+    steps = 0
+    while float(np.hypot(*off)) > 0.0:
+        prev = float(np.hypot(*off))
+        off = _drain_xy(off, dt)
+        n = float(np.hypot(*off))
+        assert n < prev
+        if n > 0.0:
+            assert (prev - n) == pytest.approx(_XY_SETTLE_RATE * dt, abs=1e-12)
+            np.testing.assert_allclose(off / n, u0, atol=1e-12)
+        steps += 1
+        assert steps < 200, "drain must terminate"
+    assert steps == int(np.ceil(n0 / (_XY_SETTLE_RATE * dt)))
+    np.testing.assert_allclose(_drain_xy(np.zeros(2), dt), np.zeros(2))
+
+
 def test_stair_swing_ik_feasible_at_body_floor():
     """A normal crawl swing (clearance floor _STAIR_MIN_STEP_H) at the
     stair_body_h default (0.28) must be IK-reachable AND inside the
