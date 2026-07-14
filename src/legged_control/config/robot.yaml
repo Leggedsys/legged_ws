@@ -269,7 +269,7 @@ mpc:
   # 降低,直接砍摆动相速度/加速度需求(竖直摆速 ∝ step_height/摆动时长)。
   # 楼梯/跨栏不受影响(各有 _STAIR_MIN_STEP_H / hurdle_step_h 下限)。
   # step_height 别再低了:0.02 以下地面稍不平就蹭脚。蹭地回 0.03。
-  gait_period:   0.6    # s — full stance+swing cycle per leg (trot)
+  gait_period:   0.8    # s — full stance+swing cycle per leg (trot)
   swing_ratio:   0.4    # fraction of gait_period spent in swing
   step_height:   0.035  # m — foot clearance at mid-swing
   # 0.27 → 0.235（2026-07-10 需求:再降 3~4cm）。起立终点跟随此值(IK 解),
@@ -298,7 +298,7 @@ mpc:
   # 【2026-07-11】1.5→2.0:支撑加硬到 3.5 后摆动反成最软相,腿抬不到位。
   # K_swing ≈ 80,离红线 180 仍有余量。kd 暂不动,若摆动腿触地弹跳再提 2.1。
   kp_scale: 2.0
-  kd_scale: 2.2
+  kd_scale: 2.0
   # "小kp大tau"分相增益：支撑腿随受力渐变把 kp/kd 交叉过渡到下面的低值
   # （前馈承重、PD 只管柔顺纠偏）；摆动腿另有 kp_swing_scale 分支（见下），
   # 未启用时保持上面的 kp_scale/kd_scale。
