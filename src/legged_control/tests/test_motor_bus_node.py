@@ -1,5 +1,9 @@
 # src/legged_control/tests/test_motor_bus_node.py
-from legged_control.real.motor_bus_node import _ns_from_joint_name, _filter_joints
+from legged_control.real.motor_bus_node import (
+    _filter_joints,
+    _health_summary,
+    _ns_from_joint_name,
+)
 
 
 def test_ns_hip():
@@ -71,3 +75,25 @@ def test_gains_stale_after_timeout():
 
 def test_gains_stale_when_never_received():
     assert _gains_are_fresh(None, time.monotonic()) is False
+
+
+def test_health_summary_percentages_and_worst():
+    ok = {'FR_hip': 94, 'FL_hip': 15}
+    attempts = {'FR_hip': 100, 'FL_hip': 100}
+    line, worst = _health_summary(ok, attempts, ticks=1000, elapsed=10.0)
+    assert 'FR_hip 94%' in line
+    assert 'FL_hip 15%' in line
+    assert 'loop 100Hz' in line
+    assert worst == 15
+
+
+def test_health_summary_no_attempts_counts_as_healthy():
+    line, worst = _health_summary({}, {'FR_hip': 0}, ticks=0, elapsed=10.0)
+    assert 'FR_hip 100%' in line
+    assert worst == 100
+
+
+def test_health_summary_zero_elapsed_no_crash():
+    line, worst = _health_summary({'a': 1}, {'a': 2}, ticks=5, elapsed=0.0)
+    assert 'a 50%' in line
+    assert worst == 50

@@ -42,6 +42,9 @@ _EXTRAPOLATE_CAP = 0.05  # s — max lookahead for velocity-based target extrapo
                           # below _ESTOP_HOLD so a stalled command stream still
                           # falls back to the plain hold, not runaway extrapolation.
 
+_HEALTH_PERIOD = 10.0  # s — interval between bus-health log lines
+_HEALTH_WARN_PCT = 70  # warn when any motor's reply rate drops below this
+
 _YAML_JOINTS = [
     "FR_hip", "FR_thigh", "FR_calf",
     "FL_hip", "FL_thigh", "FL_calf",
@@ -61,6 +64,18 @@ def _filter_joints(all_joints: list, joint_names: list) -> list:
     preserving the order they appear in all_joints."""
     name_set = set(joint_names)
     return [j for j in all_joints if j["name"] in name_set]
+
+
+def _health_summary(ok: dict, attempts: dict, ticks: int, elapsed: float) -> tuple[str, int]:
+    """Format per-motor reply rates + effective loop rate; returns (line, worst_pct)."""
+    parts = []
+    worst = 100
+    for name, att in attempts.items():
+        pct = (100 * ok.get(name, 0) // att) if att else 100
+        worst = min(worst, pct)
+        parts.append(f"{name} {pct}%")
+    hz = ticks / elapsed if elapsed > 0 else 0.0
+    return f"loop {hz:.0f}Hz | " + "  ".join(parts), worst
 
 
 class MotorBusNode(Node):
@@ -89,7 +104,19 @@ class MotorBusNode(Node):
         self._sdk = sdk
         _sdk_ratio = sdk.queryGearRatio(sdk.MotorType.GO_M8010_6)
         serial_port = self.get_parameter("serial_port").value
-        self._serial = sdk.SerialPort(serial_port)
+        control_cfg = cfg.get("control", {})
+        # 闭源 SDK 的收包超时写死 20ms(正常应答 <0.3ms):丢包时每丢一包全总线
+        # 卡 20ms,1kHz 循环实测掉到 30~40Hz。FastSerialPort 是 wrapper.cpp 里
+        # 自己实现的串口 I/O(编解码仍用闭源库),超时真正可控。
+        timeout_us = int(control_cfg.get("serial_timeout_us", 1500))
+        self._retries = int(control_cfg.get("serial_retries", 1))
+        try:
+            self._serial = sdk.FastSerialPort(serial_port, timeout_us)
+        except AttributeError:
+            # old extension without FastSerialPort — rebuild unitree_actuator_sdk
+            timeout_us = 20000
+            self._serial = sdk.SerialPort(serial_port)
+        self._timeout_us = timeout_us
 
         self._names = [j["name"] for j in joints]
         # Latest position command received from /joint_commands (motor frame).
@@ -105,7 +132,6 @@ class MotorBusNode(Node):
         global_kd = float(self.get_parameter("kd").value)
         self._global_kp_init = global_kp
         self._global_kd_init = global_kd
-        control_cfg = cfg.get("control", {})
         calf_kp = float(control_cfg["kp_calf"]) if "kp_calf" in control_cfg else global_kp
         calf_kd = float(control_cfg["kd_calf"]) if "kd_calf" in control_cfg else global_kd
 
@@ -146,6 +172,13 @@ class MotorBusNode(Node):
             for name in self._names
         ]
 
+        # bus health stats — reply rate per motor + effective loop rate, logged
+        # every _HEALTH_PERIOD so packet loss is visible in the field console.
+        self._stat_ok = {name: 0 for name in self._names}
+        self._stat_attempts = {name: 0 for name in self._names}
+        self._stat_ticks = 0
+        self._stat_t0 = time.monotonic()
+
         self._offsets = self._calibrate_offsets()
         # velocity feedforward targets (motor-convention joint frame, rad/s)
         self._dq_targets: dict[str, float] = {j["name"]: 0.0 for j in joints}
@@ -167,7 +200,36 @@ class MotorBusNode(Node):
         kd = self.get_parameter("kd").value
         self.get_logger().info(
             f"Motor bus ready — {len(joints)} joints on {serial_port}  kp={kp}  kd={kd}"
+            f"  recv_timeout={self._timeout_us}us  retries={self._retries}"
         )
+        if self._timeout_us >= 20000:
+            self.get_logger().warn(
+                "SDK binding without timeOutUs — rebuild unitree_actuator_sdk; "
+                "using 20ms recv timeout (lossy bus will stall the loop)"
+            )
+
+    def _send_recv(self, cmd, data, mid: int) -> bool:
+        """sendRecv with stale-flag reset + bounded retries.
+
+        The SDK does NOT clear data.correct/motor_id on a failed exchange, so
+        after one success every later failure still looks like fresh data
+        (measured 2026-07-14 on a lossy motor: 16/100 real replies but 92/100
+        'correct' flags). Reset both before every attempt, or stale readings
+        get republished as live ones.
+        """
+        sdk = self._sdk
+        for _ in range(1 + self._retries):
+            # sendRecv may overwrite these fields — re-set on every attempt
+            data.motorType = sdk.MotorType.GO_M8010_6
+            cmd.motorType = sdk.MotorType.GO_M8010_6
+            cmd.mode = sdk.queryMotorMode(sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
+            cmd.id = mid
+            data.correct = False
+            data.motor_id = 255
+            self._serial.sendRecv(cmd, data)
+            if data.correct and int(data.motor_id) == mid:
+                return True
+        return False
 
     def _calibrate_offsets(self, n_samples: int = 50) -> dict:
         """Sample current positions at power-on and use them as zero reference.
@@ -176,7 +238,6 @@ class MotorBusNode(Node):
         joint. Uses the median to reject occasional garbage frames. All
         subsequent position readings and commands are relative to this offset.
         """
-        sdk = self._sdk
         samples: dict = {name: [] for name in self._names}
 
         self.get_logger().info("Calibrating zero offsets — keep robot still...")
@@ -184,34 +245,21 @@ class MotorBusNode(Node):
         # before we sample. Without this, early frames may return garbage positions.
         for _ in range(100):
             for cmd, data, name in zip(self._cmds, self._datas, self._names):
-                data.motorType = sdk.MotorType.GO_M8010_6
-                cmd.motorType = sdk.MotorType.GO_M8010_6
-                cmd.mode = sdk.queryMotorMode(
-                    sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC
-                )
-                cmd.id = self._motor_ids[name]
                 cmd.kp = 0.0
                 cmd.kd = 0.0
                 cmd.q = 0.0
                 cmd.dq = 0.0
                 cmd.tau = 0.0
-                self._serial.sendRecv(cmd, data)
+                self._send_recv(cmd, data, self._motor_ids[name])
             time.sleep(0.01)
         for _ in range(n_samples):
             for cmd, data, name in zip(self._cmds, self._datas, self._names):
-                data.motorType = sdk.MotorType.GO_M8010_6
-                cmd.motorType = sdk.MotorType.GO_M8010_6
-                cmd.mode = sdk.queryMotorMode(
-                    sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC
-                )
-                cmd.id = self._motor_ids[name]
                 cmd.kp = 0.0
                 cmd.kd = 0.0
                 cmd.q = 0.0
                 cmd.dq = 0.0
                 cmd.tau = 0.0
-                self._serial.sendRecv(cmd, data)
-                if data.correct and int(data.motor_id) == self._motor_ids[name]:
+                if self._send_recv(cmd, data, self._motor_ids[name]):
                     samples[name].append(float(data.q) / self._gear_ratios[name])
             time.sleep(0.01)
 
@@ -268,7 +316,6 @@ class MotorBusNode(Node):
         now = time.monotonic()
         kp = self.get_parameter("kp").value
         kd = self.get_parameter("kd").value
-        sdk = self._sdk
 
         # Graceful stop: fade kp to 0 when commands have been absent too long.
         # kd is preserved so the descent is damped, not a free-fall.
@@ -300,11 +347,6 @@ class MotorBusNode(Node):
             self._cmds, self._datas, self._pubs, self._names
         ):
             gr = self._gear_ratios[name]
-            # Re-set motorType/mode/id every tick — sendRecv may overwrite them
-            data.motorType = sdk.MotorType.GO_M8010_6
-            cmd.motorType = sdk.MotorType.GO_M8010_6
-            cmd.mode = sdk.queryMotorMode(sdk.MotorType.GO_M8010_6, sdk.MotorMode.FOC)
-            cmd.id = self._motor_ids[name]
             offset = self._offsets[name]
             ratio = effective_kp / self._global_kp_init if self._global_kp_init > 0 else 0.0
             ratio_kd = effective_kd / self._global_kd_init if self._global_kd_init > 0 else 0.0
@@ -326,10 +368,12 @@ class MotorBusNode(Node):
             # velocity feedforward in rotor rad/s; fades to 0 with kp on estop
             cmd.dq  = self._dq_targets[name] * gr * ratio
             cmd.tau = ratio * self._tau_targets.get(name, 0.0)
-            self._serial.sendRecv(cmd, data)
+            ok = self._send_recv(cmd, data, self._motor_ids[name])
 
-            if not data.correct or int(data.motor_id) != self._motor_ids[name]:
+            self._stat_attempts[name] += 1
+            if not ok:
                 continue
+            self._stat_ok[name] += 1
 
             # Motor temp / error monitoring
             t = int(data.temp)
@@ -353,6 +397,24 @@ class MotorBusNode(Node):
             msg.velocity = [float(data.dq) / gr]
             msg.effort = [float(data.tau)]
             pub.publish(msg)
+
+        self._stat_ticks += 1
+        elapsed = now - self._stat_t0
+        if elapsed >= _HEALTH_PERIOD:
+            line, worst = _health_summary(
+                self._stat_ok, self._stat_attempts, self._stat_ticks, elapsed
+            )
+            log = (
+                self.get_logger().warn
+                if worst < _HEALTH_WARN_PCT
+                else self.get_logger().info
+            )
+            log(f"[485] {line}")
+            for name in self._names:
+                self._stat_ok[name] = 0
+                self._stat_attempts[name] = 0
+            self._stat_ticks = 0
+            self._stat_t0 = now
 
 
 def main() -> None:

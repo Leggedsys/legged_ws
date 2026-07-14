@@ -5,6 +5,8 @@
   一次扫描:  /usr/bin/python3 scripts/motor_ping.py --port /dev/ttyUSB0 --ids 0,1,2,3,4,5 2>/dev/null
   摇线定位:  加 --watch,每秒刷新应答率;此时逐个轻晃各段线缆/接插件,
              哪一晃应答率跳水,坏点就在哪(经典 wiggle test)。Ctrl-C 退出。
+  加 --fast 用 FastSerialPort(1.5ms 超时,motor_bus 同款):扫得快得多,
+  适合摇线;应答率与默认(闭源库 20ms 超时)可比但不完全相同。
 
 kp=kd=tau=0,纯读,任何状态下运行都安全(但别和 motor_bus 节点同时开)。
 2026-07-13 实录:走机 FL_calf"连不上",实测是全总线丢包
@@ -57,10 +59,12 @@ def main():
                     help="逗号分隔;后总线用 6,7,11,9,10,8")
     ap.add_argument("-n", type=int, default=50, help="每电机 ping 次数")
     ap.add_argument("--watch", action="store_true", help="循环刷新(摇线定位)")
+    ap.add_argument("--fast", action="store_true",
+                    help="用 FastSerialPort(1.5ms 超时)代替闭源库(20ms)")
     args = ap.parse_args()
 
     sdk = load_sdk()
-    serial = sdk.SerialPort(args.port)
+    serial = sdk.FastSerialPort(args.port) if args.fast else sdk.SerialPort(args.port)
     ids = [int(x) for x in args.ids.split(",")]
     n = 10 if args.watch else args.n
 

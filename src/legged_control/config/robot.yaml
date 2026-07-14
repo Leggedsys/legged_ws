@@ -122,6 +122,17 @@ control:
   serial_port_front: /dev/ttyUSB0   # FR, FL legs
   serial_port_rear:  /dev/ttyUSB1   # RR, RL legs
   motor_hz: 1000.0
+  # 【2026-07-14 丢包缓解】实测总线丢包(FL_hip 仅 ~15% 应答)时的卡顿机理:
+  # SDK 收一条应答的超时默认 20ms,而正常应答 <0.3ms——每丢一包全总线卡 20ms,
+  # "1kHz"主循环实测掉到 30~40Hz 且抖动巨大,所有电机(包括线好的)一起卡。
+  # serial_timeout_us: 等应答的上限(µs)。实测成功应答最慢 0.7ms,1500 留 2 倍余量;
+  #   别低于 1000,否则会把迟到的真应答误判成丢包。
+  # serial_retries: 同一周期内失败立即重发的次数(位置指令重发无副作用)。
+  # 两个值都在串口打开时设定,改了要重启节点。另:motor_bus 每 10s 打一行
+  # "[485] loop xxxHz | FR_hip 94% ..."健康统计,任一电机 <70% 时用 WARN。
+  # 软件只能缓解卡顿——丢包本身是线缆/终端电阻问题,摇线定位照做。
+  serial_timeout_us: 1500
+  serial_retries: 1
   # PD 增益是 SDK/转子侧（motor_bus 里 cmd.q 乘了 gear_ratio），
   # 所以关节刚度 K_joint = kp × gear_ratio²。甲方目标：关节 kp=20、kd=0.5。
   # 理论 kp = 20/gr²：hip/thigh(gr 6.33)→0.50 / kd 0.0125；calf(gr 12.66)→0.125 / kd 0.0031。
