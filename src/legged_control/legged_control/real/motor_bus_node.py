@@ -527,12 +527,13 @@ class MotorBusNode(Node):
                 self._stat_ok, self._stat_attempts, self._stat_ticks, elapsed,
                 backoff=frozenset(self._backoff),
             )
-            log = (
-                self.get_logger().warn
-                if worst < _HEALTH_WARN_PCT
-                else self.get_logger().info
-            )
-            log(f"[485] {line}")
+            # rclpy caches log severity per call site — reusing one line for
+            # both levels raises ValueError and kills the node (2026-07-15:
+            # front bus died mid-run when FL_hip crossed 70%). Keep two calls.
+            if worst < _HEALTH_WARN_PCT:
+                self.get_logger().warn(f"[485] {line}")
+            else:
+                self.get_logger().info(f"[485] {line}")
             for name in self._names:
                 self._stat_ok[name] = 0
                 self._stat_attempts[name] = 0
