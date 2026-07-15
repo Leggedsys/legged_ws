@@ -219,6 +219,11 @@ _VEL_SETTLED  = 0.05   # rad/s — velocity threshold
 _LIEDOWN_TIMEOUT = 3.0
 _WALK_VEL_THRESH = 0.04  # m/s or rad/s — below this in all axes → hold stance
 _EST_TIMEOUT = 0.5       # s — state_estimate older than this → fall back to balance stance
+_CMD_VEL_TIMEOUT = 0.5   # s — /cmd_vel older than this → zero it. joy_node
+                         # autorepeats at 20Hz while the pad is connected, so
+                         # staleness means the link died (BT pad out of range /
+                         # battery dead); without this the robot keeps walking
+                         # on the last stick value with no way to stop it.
 _VEL_FILTER_TAU = 0.25   # s — first-order lag on cmd_vel for trajectory stride.
                          # Stride grows/shrinks smoothly instead of jumping when
                          # the stick moves; walking only stops once the filtered
@@ -952,6 +957,7 @@ class MPCNode(Node):
         self._state_estimate = np.zeros(10, dtype=float)
         self._est_stamp: float | None = None
         self._cmd_vel = np.zeros(3)           # [vx, vy, yaw_rate] world frame
+        self._cmd_vel_stamp: float | None = None  # monotonic time of last /cmd_vel
         self._vel_filt = np.zeros(3)          # low-passed cmd_vel used for stride
         self._att_gx = 0.0                    # filtered tilt, fore-aft
         self._att_gy = 0.0                    # filtered tilt, lateral
@@ -1056,6 +1062,7 @@ class MPCNode(Node):
             float(msg.linear.y),
             float(msg.angular.z),
         ])
+        self._cmd_vel_stamp = time.monotonic()
 
     def _on_step(self, msg: Int8) -> None:
         now = time.monotonic()
@@ -2383,6 +2390,21 @@ class MPCNode(Node):
 
     def _tick(self) -> None:
         now = time.monotonic()
+        # Dead-man on the teleop link: /cmd_vel flows at ≥20Hz while the pad
+        # is connected, so a gap of _CMD_VEL_TIMEOUT means the gamepad dropped
+        # (BT out of range / battery). Zero the command so the robot glides to
+        # a standstill instead of walking away on the last stick value. Zeroing
+        # also stops the warn from repeating; a reconnect stamps fresh again.
+        if (
+            self._cmd_vel_stamp is not None
+            and now - self._cmd_vel_stamp > _CMD_VEL_TIMEOUT
+            and np.any(self._cmd_vel != 0.0)
+        ):
+            self._cmd_vel = np.zeros(3)
+            self.get_logger().warn(
+                f"[mpc] /cmd_vel stale >{_CMD_VEL_TIMEOUT:.1f}s "
+                "(gamepad disconnected?) — zeroing velocity command"
+            )
         self._update_stance_height()
 
         if self._phase == _PHASE_PASSIVE:
