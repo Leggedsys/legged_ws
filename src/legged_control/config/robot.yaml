@@ -177,24 +177,25 @@ teleop:
   #   未消化的按键 10 秒过期。配合 contact_detect_enabled(落地实测校准)
   #   与慢步频使用;一次只跨一级——前腿没等后腿跟上就再按会顶到 ±0.12m
   #   限幅并刷 IK miss。
-  # 【2026-07-11 实测本手柄键位】/joy 的 buttons 从 0 开始数:echo 里第 4、
-  # 第 5 个亮 = 编号 3 和 4(A=0、B=1 不变,2 号空)。若按 X 时 teleop 日志
-  # 报的是 "rear pair",说明两个号写反,对调即可。
-  btn_step_front: 3
-  btn_step_rear:  4
+  # 【2026-07-14 换 Xbox 蓝牙手柄实测键位】老 2.4G 接收器坏了,改为 Xbox
+  # Wireless Controller 蓝牙直连机载 NUC(已配对+信任,开机自动重连)。
+  # 蓝牙驱动编号连续:A=0 B=1 X=2 Y=3 LB=4 RB=5 菜单=7 左摇杆按下=8
+  # 右摇杆按下=9;共 11 键 8 轴。换手柄后照老办法 ros2 topic echo /joy 重测。
+  btn_step_front: 2
+  btn_step_rear:  3
   # 步态模式切换(2026-07-11,全手柄操作,不用命令行):
   #   LB = 台阶模式开/关(爬行步态+锁速+触地检测,上楼梯用,配合 X/Y);
   #   RB = 跨栏模式开/关。开 = 连台阶模式一起开(一键准备好);
   #        关 = 只关跨栏,台阶模式要再按 LB 关——楼梯中途跨板不丢步态。
   #   按键通过 mpc_node 的参数服务生效,和 ros2 param 看到的是同一份状态;
   #   开关仍旧"站定才生效",走路中按了会等到站定。
-  #   键位 6/7 是常见 LB/RB 编号,没反应就按老办法 ros2 topic echo /joy
-  #   看按下时哪一位变 1(从 0 数),改这里再重建。
-  btn_stair_mode:  6
-  btn_hurdle_mode: 7
-  # 断桥(跪走)模式开/关,见 mpc: shin_mode 注释。11 = 本手柄实测键位。
-  btn_shin_mode:   11
-  axis_lt: 4
+  #   键位 4/5 = Xbox 蓝牙手柄 LB/RB 实测(2026-07-14)。
+  btn_stair_mode:  4
+  btn_hurdle_mode: 5
+  # 断桥(跪走)模式开/关,见 mpc: shin_mode 注释。7 = 菜单键(三横线),
+  # 蓝牙手柄实测;故意不用摇杆按下(8/9),激烈操作时容易误触。
+  btn_shin_mode:   7
+  axis_lt: 2   # Xbox 蓝牙:LT=轴2(松开+1,扣满-1),RT=轴5
   axis_rt: 5
   max_dz:  0.06  # m/s — LT/RT 满按时的升降速度(0.03→0.06,全程 0.10→0.30
                  # 约 3.3s;mpc 侧 _HEIGHT_SLEW=0.10 是另一道上限)
