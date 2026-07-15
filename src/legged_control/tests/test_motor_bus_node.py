@@ -1,8 +1,14 @@
 # src/legged_control/tests/test_motor_bus_node.py
 from legged_control.real.motor_bus_node import (
+    _BACKOFF_ENTER,
+    _BACKOFF_EXIT,
+    _BACKOFF_INTERVAL,
+    _backoff_next,
+    _ema_update,
     _filter_joints,
     _health_summary,
     _ns_from_joint_name,
+    _should_poll,
 )
 
 
@@ -97,3 +103,48 @@ def test_health_summary_zero_elapsed_no_crash():
     line, worst = _health_summary({'a': 1}, {'a': 2}, ticks=5, elapsed=0.0)
     assert 'a 50%' in line
     assert worst == 50
+
+
+def test_health_summary_marks_backoff_motors():
+    line, _ = _health_summary(
+        {'FR_hip': 90, 'FL_hip': 30}, {'FR_hip': 100, 'FL_hip': 100},
+        ticks=100, elapsed=10.0, backoff=frozenset({'FL_hip'}),
+    )
+    assert 'FL_hip* 30%' in line
+    assert 'FR_hip 90%' in line  # healthy motor has no star
+
+
+def test_ema_converges_to_reply_rate():
+    ema = 1.0
+    for _ in range(500):        # all failures → EMA decays toward 0
+        ema = _ema_update(ema, False)
+    assert ema < 0.01
+    for _ in range(500):        # all successes → EMA recovers toward 1
+        ema = _ema_update(ema, True)
+    assert ema > 0.99
+
+
+def test_backoff_hysteresis():
+    # healthy stays healthy above the enter threshold
+    assert _backoff_next(False, _BACKOFF_ENTER + 0.05) is False
+    # drops below enter threshold → backoff
+    assert _backoff_next(False, _BACKOFF_ENTER - 0.05) is True
+    # inside the hysteresis band a backoff motor stays in backoff...
+    assert _backoff_next(True, (_BACKOFF_ENTER + _BACKOFF_EXIT) / 2) is True
+    # ...and a healthy motor stays healthy — no flapping
+    assert _backoff_next(False, (_BACKOFF_ENTER + _BACKOFF_EXIT) / 2) is False
+    # recovers only above the exit threshold
+    assert _backoff_next(True, _BACKOFF_EXIT + 0.05) is False
+
+
+def test_should_poll_healthy_every_tick():
+    assert all(_should_poll(t, False, phase=2) for t in range(10))
+
+
+def test_should_poll_backoff_every_nth_staggered():
+    for phase in range(_BACKOFF_INTERVAL + 2):  # phases beyond N wrap around
+        polled = [t for t in range(4 * _BACKOFF_INTERVAL)
+                  if _should_poll(t, True, phase)]
+        assert len(polled) == 4
+        assert all(t % _BACKOFF_INTERVAL == phase % _BACKOFF_INTERVAL
+                   for t in polled)

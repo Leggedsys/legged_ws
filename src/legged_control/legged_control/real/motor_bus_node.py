@@ -45,6 +45,25 @@ _EXTRAPOLATE_CAP = 0.05  # s — max lookahead for velocity-based target extrapo
 _HEALTH_PERIOD = 10.0  # s — interval between bus-health log lines
 _HEALTH_WARN_PCT = 70  # warn when any motor's reply rate drops below this
 
+# Lossy-motor backoff: a motor whose per-attempt reply rate (EMA) drops below
+# _BACKOFF_ENTER is polled only every _BACKOFF_INTERVAL ticks, with up to
+# _RETRIES_LOSSY retries when polled. One dead branch (FL_hip measured at 10%)
+# otherwise stalls the whole sequential loop with recv timeouts, so the nine
+# healthy motors also get their commands late and jittery — that is the
+# stutter. Backoff keeps healthy motors near full loop rate while the lossy
+# motor's effective data rate stays the same (concentrated retries deliver as
+# much as spread-out single polls). Hysteresis (exit above _BACKOFF_EXIT) plus
+# per-motor phase staggering stop flapping and pile-ups on one tick.
+_EMA_ALPHA = 0.02        # per-attempt EMA weight (~50-attempt time constant)
+# ENTER deliberately low: a ~50-60% motor still delivers more data polled at
+# full rate than in backoff, and its retry cost is moderate — backoff only
+# pays off for near-dead links (field test 2026-07-15: 0.40 made FR_calf at
+# ~60% raw flap in and out at the boundary).
+_BACKOFF_ENTER = 0.30    # enter backoff below this per-attempt reply rate
+_BACKOFF_EXIT = 0.60     # leave backoff above this (hysteresis band)
+_BACKOFF_INTERVAL = 4    # poll a backoff motor every Nth tick
+_RETRIES_LOSSY = 3       # extra retries when a backoff motor is polled
+
 _YAML_JOINTS = [
     "FR_hip", "FR_thigh", "FR_calf",
     "FL_hip", "FL_thigh", "FL_calf",
@@ -66,16 +85,43 @@ def _filter_joints(all_joints: list, joint_names: list) -> list:
     return [j for j in all_joints if j["name"] in name_set]
 
 
-def _health_summary(ok: dict, attempts: dict, ticks: int, elapsed: float) -> tuple[str, int]:
-    """Format per-motor reply rates + effective loop rate; returns (line, worst_pct)."""
+def _health_summary(
+    ok: dict, attempts: dict, ticks: int, elapsed: float,
+    backoff: frozenset = frozenset(),
+) -> tuple[str, int]:
+    """Format per-motor reply rates + effective loop rate; returns (line, worst_pct).
+
+    Motors currently in lossy-backoff are marked with '*' (their pct is the
+    per-poll bundle rate, boosted by the extra retries).
+    """
     parts = []
     worst = 100
     for name, att in attempts.items():
         pct = (100 * ok.get(name, 0) // att) if att else 100
         worst = min(worst, pct)
-        parts.append(f"{name} {pct}%")
+        star = "*" if name in backoff else ""
+        parts.append(f"{name}{star} {pct}%")
     hz = ticks / elapsed if elapsed > 0 else 0.0
     return f"loop {hz:.0f}Hz | " + "  ".join(parts), worst
+
+
+def _ema_update(prev: float, ok: bool, alpha: float = _EMA_ALPHA) -> float:
+    """One EMA step of the per-attempt reply rate."""
+    return (1.0 - alpha) * prev + (alpha if ok else 0.0)
+
+
+def _backoff_next(in_backoff: bool, ema: float) -> bool:
+    """Hysteresis: enter below _BACKOFF_ENTER, stay until above _BACKOFF_EXIT."""
+    if in_backoff:
+        return ema < _BACKOFF_EXIT
+    return ema < _BACKOFF_ENTER
+
+
+def _should_poll(tick_index: int, in_backoff: bool, phase: int) -> bool:
+    """Healthy motors are polled every tick; backoff motors every Nth (staggered)."""
+    if not in_backoff:
+        return True
+    return tick_index % _BACKOFF_INTERVAL == phase % _BACKOFF_INTERVAL
 
 
 class MotorBusNode(Node):
@@ -179,6 +225,12 @@ class MotorBusNode(Node):
         self._stat_ticks = 0
         self._stat_t0 = time.monotonic()
 
+        # lossy-motor backoff state (see module constants for the rationale)
+        self._ema = {name: 1.0 for name in self._names}  # per-attempt reply EMA
+        self._backoff: set[str] = set()
+        self._backoff_phase = {name: i for i, name in enumerate(self._names)}
+        self._tick_index = 0
+
         self._offsets = self._calibrate_offsets()
         # velocity feedforward targets (motor-convention joint frame, rad/s)
         self._dq_targets: dict[str, float] = {j["name"]: 0.0 for j in joints}
@@ -208,7 +260,8 @@ class MotorBusNode(Node):
                 "using 20ms recv timeout (lossy bus will stall the loop)"
             )
 
-    def _send_recv(self, cmd, data, mid: int) -> bool:
+    def _send_recv(self, cmd, data, mid: int, name: str | None = None,
+                   attempts: int | None = None) -> bool:
         """sendRecv with stale-flag reset + bounded retries.
 
         The SDK does NOT clear data.correct/motor_id on a failed exchange, so
@@ -216,9 +269,15 @@ class MotorBusNode(Node):
         (measured 2026-07-14 on a lossy motor: 16/100 real replies but 92/100
         'correct' flags). Reset both before every attempt, or stale readings
         get republished as live ones.
+
+        When name is given, every individual attempt also feeds that motor's
+        reply-rate EMA (the backoff signal) — per-attempt, so the estimate is
+        the raw link quality regardless of how many retries are in play.
         """
         sdk = self._sdk
-        for _ in range(1 + self._retries):
+        if attempts is None:
+            attempts = 1 + self._retries
+        for _ in range(attempts):
             # sendRecv may overwrite these fields — re-set on every attempt
             data.motorType = sdk.MotorType.GO_M8010_6
             cmd.motorType = sdk.MotorType.GO_M8010_6
@@ -227,7 +286,10 @@ class MotorBusNode(Node):
             data.correct = False
             data.motor_id = 255
             self._serial.sendRecv(cmd, data)
-            if data.correct and int(data.motor_id) == mid:
+            ok = bool(data.correct) and int(data.motor_id) == mid
+            if name is not None:
+                self._ema[name] = _ema_update(self._ema[name], ok)
+            if ok:
                 return True
         return False
 
@@ -343,9 +405,13 @@ class MotorBusNode(Node):
 
         extrap_dt = min(now - self._cmd_time, _EXTRAPOLATE_CAP) if self._cmd_time is not None else 0.0
 
+        self._tick_index += 1
         for cmd, data, pub, name in zip(
             self._cmds, self._datas, self._pubs, self._names
         ):
+            in_backoff = name in self._backoff
+            if not _should_poll(self._tick_index, in_backoff, self._backoff_phase[name]):
+                continue
             gr = self._gear_ratios[name]
             offset = self._offsets[name]
             ratio = effective_kp / self._global_kp_init if self._global_kp_init > 0 else 0.0
@@ -368,7 +434,25 @@ class MotorBusNode(Node):
             # velocity feedforward in rotor rad/s; fades to 0 with kp on estop
             cmd.dq  = self._dq_targets[name] * gr * ratio
             cmd.tau = ratio * self._tau_targets.get(name, 0.0)
-            ok = self._send_recv(cmd, data, self._motor_ids[name])
+            attempts = 1 + (_RETRIES_LOSSY if in_backoff else self._retries)
+            ok = self._send_recv(
+                cmd, data, self._motor_ids[name], name=name, attempts=attempts
+            )
+
+            want_backoff = _backoff_next(in_backoff, self._ema[name])
+            if want_backoff and not in_backoff:
+                self._backoff.add(name)
+                self.get_logger().warn(
+                    f"[485] backoff: {name} reply rate {self._ema[name]:.0%} — "
+                    f"polling every {_BACKOFF_INTERVAL} ticks, "
+                    f"{1 + _RETRIES_LOSSY} attempts per poll"
+                )
+            elif not want_backoff and in_backoff:
+                self._backoff.discard(name)
+                self.get_logger().info(
+                    f"[485] recovered: {name} reply rate {self._ema[name]:.0%} — "
+                    "back to full-rate polling"
+                )
 
             self._stat_attempts[name] += 1
             if not ok:
@@ -402,7 +486,8 @@ class MotorBusNode(Node):
         elapsed = now - self._stat_t0
         if elapsed >= _HEALTH_PERIOD:
             line, worst = _health_summary(
-                self._stat_ok, self._stat_attempts, self._stat_ticks, elapsed
+                self._stat_ok, self._stat_attempts, self._stat_ticks, elapsed,
+                backoff=frozenset(self._backoff),
             )
             log = (
                 self.get_logger().warn
