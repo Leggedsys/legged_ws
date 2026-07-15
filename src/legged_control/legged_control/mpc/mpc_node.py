@@ -219,6 +219,12 @@ _VEL_SETTLED  = 0.05   # rad/s — velocity threshold
 _LIEDOWN_TIMEOUT = 3.0
 _WALK_VEL_THRESH = 0.04  # m/s or rad/s — below this in all axes → hold stance
 _EST_TIMEOUT = 0.5       # s — state_estimate older than this → fall back to balance stance
+_SETTLE_BLEND_T = 0.3    # s — blend from the last published q into the balance
+                         # stance over this window when entering standing (from
+                         # standup or from a walk stop). The stance pose never
+                         # exactly matches the handover pose (feet mid-stroke,
+                         # xy_settle leftovers, terrain re-anchor step), and
+                         # publishing it in one tick twitched every joint.
 _CMD_VEL_TIMEOUT = 0.5   # s — /cmd_vel older than this → zero it. joy_node
                          # autorepeats at 20Hz while the pad is connected, so
                          # staleness means the link died (BT pad out of range /
@@ -1008,6 +1014,9 @@ class MPCNode(Node):
         self._initial_pos: list[float] | None = None
         self._lie_down_start: list[float] | None = None
         self._last_published: list[float] | None = None
+        # standing-entry settle blend (see _SETTLE_BLEND_T / _arm_settle)
+        self._settle_q0: list[float] | None = None
+        self._settle_t0 = 0.0
         self._passive_broadcast = False
 
         self._pub = self.create_publisher(JointState, "/joint_commands", 10)
@@ -1542,10 +1551,20 @@ class MPCNode(Node):
         x_off = _x_offset_at(
             float(self.get_parameter("stance_x_offset").value), stance_h
         )
+        # Same low-height lateral spread as _balance_stance / the walk
+        # trajectory: without it the standup ramp ends 2 cm narrower than
+        # the standing pose whenever stance_h < low_spread_start, and every
+        # leg twitched sideways the moment STANDUP handed over to WALK.
+        spread = _lateral_spread(
+            stance_h,
+            float(self.get_parameter("low_spread_start").value),
+            float(self.get_parameter("low_spread_max").value),
+        )
         targets: dict[str, float] = {}
         for leg in _MPC_LEG_ORDER:
             p_foot = np.asarray(nominal_foot_position(leg, stance_h), dtype=float).copy()
             p_foot[0] += x_off
+            p_foot[1] += _leg_signs(leg)[1] * spread
             preferred = tuple(self._joint_pos.get(j, 0.0) for j in _leg_joints(leg))
             q_leg = inverse_kinematics(leg, tuple(p_foot), preferred_joints=preferred)
             if q_leg is None:
@@ -1800,6 +1819,16 @@ class MPCNode(Node):
                 targets[jname] = float(qval)
         return self._shin_cmd(targets, with_dq=True)
 
+    def _arm_settle(self) -> None:
+        """Start the standing-entry blend from the last published pose.
+
+        Called at the STANDUP→WALK handover and at the walk→stand stop so
+        _balance_stance eases into its own targets instead of stepping them.
+        """
+        if self._last_published is not None:
+            self._settle_q0 = list(self._last_published)
+            self._settle_t0 = time.monotonic()
+
     def _balance_stance(self, stance_h: float) -> JointCommand:
         """Four-foot stance: nominal IK pose + attitude leveling + MPC tau_ff.
         Terrain adaptation stays live here too — standing on a slope keeps
@@ -1857,10 +1886,19 @@ class MPCNode(Node):
             att_ref=att_ref,
         )
         kp, kd = self._walk_gains(leg_scale)
-        return JointCommand(
-            q=[targets[n] for n in _YAML_JOINTS],
-            dq=[0.0] * 12, tau=tau, kp=kp, kd=kd,
-        )
+        q_out = [targets[n] for n in _YAML_JOINTS]
+        if self._settle_q0 is not None:
+            a = _smoothstep(
+                (time.monotonic() - self._settle_t0) / _SETTLE_BLEND_T
+            )
+            if a >= 1.0:
+                self._settle_q0 = None
+            else:
+                q_out = [
+                    (1.0 - a) * q0 + a * q
+                    for q0, q in zip(self._settle_q0, q_out)
+                ]
+        return JointCommand(q=q_out, dq=[0.0] * 12, tau=tau, kp=kp, kd=kd)
 
     def _compute_mpc_joints(self, now: float) -> JointCommand:
         """Run one gait-scheduler step and return a full JointCommand."""
@@ -1971,6 +2009,7 @@ class MPCNode(Node):
             # Coherent re-anchor before the standing freeze — see
             # _terrain_snapshot (all four feet grounded in this window).
             self._terrain_snapshot()
+            self._arm_settle()
             return self._balance_stance(stance_h)
         # Read back from the scheduler (post-clamp), not the raw parameter:
         # trajectory and contact schedule must share one swing_ratio.
@@ -2461,6 +2500,7 @@ class MPCNode(Node):
                     # standing pose — re-enter through the transitions
                     self._shin_phase = "off"
                     self._shin_walking = False
+                    self._arm_settle()
                     self.get_logger().info("[mpc] standup done → WALK")
             elif done and elapsed > float(self.get_parameter("ramp_duration").value) + 5.0:
                 self._phase = _PHASE_WALK
