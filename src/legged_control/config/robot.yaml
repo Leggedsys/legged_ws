@@ -181,7 +181,7 @@ teleop:
   axis_yaw: 3
   invert_vx:  false
   invert_vy:  false
-  invert_yaw: true
+  invert_yaw: false  # 2026-07-15: Xbox 蓝牙手柄转向轴方向与老手柄相反,实走确认后翻转
   btn_emergency_stop: 1   # B button: hold → immediate lie-down to passive
   # 手动上台阶触发（2026-07-10,人当感知、程序管执行）:
   #   X = 前腿对上一级:按下后 FR/FL 各自在下一次抬腿时把落脚目标抬高
