@@ -25,6 +25,7 @@ import time
 import yaml
 from ament_index_python.packages import get_package_share_directory
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import JointState
@@ -122,6 +123,13 @@ def _should_poll(tick_index: int, in_backoff: bool, phase: int) -> bool:
     if not in_backoff:
         return True
     return tick_index % _BACKOFF_INTERVAL == phase % _BACKOFF_INTERVAL
+
+
+def _ack_summary(acks: dict) -> tuple[str, list]:
+    """Format shutdown-burst ack counts; returns (line, names_with_no_ack)."""
+    parts = [f"{name} {n}ack" for name, n in acks.items()]
+    silent = [name for name, n in acks.items() if n == 0]
+    return "  ".join(parts), silent
 
 
 class MotorBusNode(Node):
@@ -292,6 +300,36 @@ class MotorBusNode(Node):
             if ok:
                 return True
         return False
+
+    def shutdown_passive(self, rounds: int = 40) -> None:
+        """Blast kp=0 (kd kept) to every motor so Ctrl+C leaves the robot limp.
+
+        GO motors keep executing the last received command autonomously — if
+        the node dies while kp>0 the joints stay servo-locked at the last
+        target and only a motor power cycle frees them. Many blind rounds
+        spread over ~300ms because lossy links drop bursts in correlated
+        streaks: a 10%-reply motor still receives ≥1 of 40 spaced sends with
+        ~99% probability (and TX often lands even when the reply is lost, so
+        the ack count is a lower bound on delivery).
+        """
+        acks = {name: 0 for name in self._names}
+        for _ in range(rounds):
+            for cmd, data, name in zip(self._cmds, self._datas, self._names):
+                cmd.kp = 0.0
+                cmd.kd = float(self.get_parameter(f"kd_{name}").value)
+                cmd.q = 0.0
+                cmd.dq = 0.0
+                cmd.tau = 0.0
+                if self._send_recv(cmd, data, self._motor_ids[name], attempts=1):
+                    acks[name] += 1
+            time.sleep(0.002)
+        line, silent = _ack_summary(acks)
+        if silent:
+            self.get_logger().warn(
+                f"[shutdown] passive cmd NOT acked by: {', '.join(silent)} — "
+                "if those joints feel locked, power-cycle the motors"
+            )
+        self.get_logger().info(f"[shutdown] motors released (kp=0, kd kept): {line}")
 
     def _calibrate_offsets(self, n_samples: int = 50) -> dict:
         """Sample current positions at power-on and use them as zero reference.
@@ -507,7 +545,15 @@ def main() -> None:
     node = MotorBusNode()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
+        # Runs on Ctrl+C / launch teardown: without it the motors keep
+        # servoing their last kp>0 command forever (see shutdown_passive).
+        try:
+            node.shutdown_passive()
+        except Exception as exc:  # never let cleanup block node teardown
+            print(f"[shutdown] passive burst failed: {exc}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

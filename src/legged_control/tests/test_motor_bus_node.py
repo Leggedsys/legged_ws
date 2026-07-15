@@ -3,6 +3,7 @@ from legged_control.real.motor_bus_node import (
     _BACKOFF_ENTER,
     _BACKOFF_EXIT,
     _BACKOFF_INTERVAL,
+    _ack_summary,
     _backoff_next,
     _ema_update,
     _filter_joints,
@@ -139,6 +140,18 @@ def test_backoff_hysteresis():
 
 def test_should_poll_healthy_every_tick():
     assert all(_should_poll(t, False, phase=2) for t in range(10))
+
+
+def test_ack_summary_reports_silent_motors():
+    line, silent = _ack_summary({'FR_hip': 38, 'FL_hip': 0, 'FL_calf': 3})
+    assert 'FR_hip 38ack' in line
+    assert 'FL_hip 0ack' in line
+    assert silent == ['FL_hip']
+
+
+def test_ack_summary_all_acked():
+    _, silent = _ack_summary({'FR_hip': 40, 'FR_thigh': 39})
+    assert silent == []
 
 
 def test_should_poll_backoff_every_nth_staggered():

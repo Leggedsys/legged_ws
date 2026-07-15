@@ -26,6 +26,11 @@ def _install_ros_stubs() -> None:
     rclpy.shutdown = lambda *a, **k: None
     _module("rclpy.parameter")
 
+    executors_mod = _module("rclpy.executors")
+    executors_mod.ExternalShutdownException = type(
+        "ExternalShutdownException", (Exception,), {}
+    )
+
     node_mod = _module("rclpy.node")
 
     class _Node:  # real class so `class Foo(Node)` works at import time
