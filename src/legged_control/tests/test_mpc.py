@@ -1499,28 +1499,40 @@ def test_shin_geometry_all_legs():
 
 
 def test_shin_joint_limits_and_flat_contract():
-    """Across the full stride and swing: hip 0, thigh far inside ±limits,
-    calf inside [−2.65, −0.9] with ≥ 0.3 rad fold margin; stance keeps the
-    shin-tilt identity q2 + q3 = −π/2 + pitch exactly."""
+    """Across the full stride, strafe and swing envelope: hip inside ±0.4,
+    thigh inside ±limits, calf inside [−2.65, −0.9] with ≥ 0.3 rad fold
+    margin; stance keeps the shin-tilt identity q2 + q3 = −π/2 + pitch
+    exactly (the hip-roll strafe never disturbs it — roll keeps the shin
+    parallel to the deck)."""
     from legged_control.mpc.shin_gait import (
-        shin_stance_joints, shin_swing_joints, KNEE_OFFSET_MAX, SHIN_PITCH,
+        shin_stance_joints, shin_swing_joints,
+        KNEE_OFFSET_MAX, Y_OFFSET_MAX, SHIN_PITCH,
     )
     for off in (-KNEE_OFFSET_MAX, 0.0, KNEE_OFFSET_MAX):
-        for s in np.linspace(0.0, 1.0, 41):
-            q1, q2, q3 = shin_stance_joints(s, off)
-            assert q1 == 0.0
-            assert q2 + q3 == pytest.approx(-np.pi / 2 + SHIN_PITCH, abs=1e-9)
-            assert abs(q2) <= 0.32
-            assert -2.40 <= q3 <= -0.9
-            q1, q2, q3 = shin_swing_joints(s, off)
-            assert q1 == 0.0
-            assert abs(q2) <= 0.32
-            assert -2.40 <= q3 <= -0.9
+        for y_off in (-Y_OFFSET_MAX, 0.0, Y_OFFSET_MAX):
+            for hs in (-1.0, 1.0):
+                for s in np.linspace(0.0, 1.0, 41):
+                    q1, q2, q3 = shin_stance_joints(
+                        s, off, y_offset=y_off, hip_sign=hs
+                    )
+                    assert abs(q1) <= 0.4
+                    assert q2 + q3 == pytest.approx(
+                        -np.pi / 2 + SHIN_PITCH, abs=1e-9
+                    )
+                    assert abs(q2) <= 0.41
+                    assert -2.40 <= q3 <= -0.9
+                    q1, q2, q3 = shin_swing_joints(
+                        s, off, y_offset=y_off, hip_sign=hs
+                    )
+                    assert abs(q1) <= 0.4
+                    assert abs(q2) <= 0.41
+                    assert -2.40 <= q3 <= -0.9
 
 
 def test_shin_body_height_bob_small():
-    """Body height variation over the stance sweep at max stride ≤ 10 mm —
-    the knee-under-hip sweet spot (cos flat near q2=0)."""
+    """Body height variation over the stance sweep at max stride ≤ 15 mm —
+    the knee-under-hip sweet spot (cos flat near q2=0). 2026-07-16: stride
+    clamp 0.055 → 0.07 spent bob budget (9 → 14 mm) on speed."""
     from legged_control.mpc.shin_gait import (
         shin_stance_joints, shin_body_height, KNEE_OFFSET_MAX,
     )
@@ -1529,7 +1541,7 @@ def test_shin_body_height_bob_small():
         forward_kinematics("FR", shin_stance_joints(s, KNEE_OFFSET_MAX))[2]
         for s in np.linspace(0.0, 1.0, 41)
     ]
-    assert max(zs) - min(zs) < 0.010
+    assert max(zs) - min(zs) < 0.015
     # deepest foot target (= tallest body) is exactly mid-sweep, q2 = 0
     assert min(zs) == pytest.approx(-shin_body_height(), abs=1e-9)
 
@@ -1553,11 +1565,43 @@ def test_shin_swing_lifts_foot_and_is_continuous():
 
 def test_shin_default_speed_fits_stride_budget():
     """Default speed cap at the shin period floor must stay inside the
-    single-link knee stroke (saturating the clip = commanded slip)."""
-    from legged_control.mpc.mpc_node import _SHIN_MIN_PERIOD, _STAIR_SWING_RATIO
-    from legged_control.mpc.shin_gait import KNEE_OFFSET_MAX
+    single-link knee stroke (saturating the clip = commanded slip); same
+    for the strafe cap vs the lateral (hip-roll) stroke."""
+    from legged_control.mpc.mpc_node import (
+        _SHIN_MIN_PERIOD, _SHIN_VY_CAP, _STAIR_SWING_RATIO,
+    )
+    from legged_control.mpc.shin_gait import KNEE_OFFSET_MAX, Y_OFFSET_MAX
     t_stance = _SHIN_MIN_PERIOD * (1.0 - _STAIR_SWING_RATIO)
-    assert 0.07 * t_stance * 0.5 <= KNEE_OFFSET_MAX
+    assert 0.12 * t_stance * 0.5 <= KNEE_OFFSET_MAX
+    assert _SHIN_VY_CAP * t_stance * 0.5 <= Y_OFFSET_MAX
+
+
+def test_shin_strafe_moves_foot_laterally_all_legs():
+    """A +y_offset at stance start must place every leg's contact +y_offset
+    to the body's LEFT of nominal (same world direction on all four legs —
+    the hip_sign plumbing), sweeping to −y_offset at stance end, with the
+    deck height disturbed only by the small D_LAT·a roll coupling."""
+    from legged_control.mpc.shin_gait import (
+        shin_stance_joints, shin_swing_joints, shin_body_height, Y_OFFSET_MAX,
+    )
+    from legged_control.kinematics import forward_kinematics, _leg_signs
+    h = shin_body_height()
+    for leg in LEG_NAMES:
+        hs = _leg_signs(leg)[0]
+        y0 = forward_kinematics(leg, shin_stance_joints(0.5, 0.0))[1]
+        for s, want in ((0.0, Y_OFFSET_MAX), (1.0, -Y_OFFSET_MAX)):
+            q = shin_stance_joints(s, 0.0, y_offset=Y_OFFSET_MAX, hip_sign=hs)
+            x, y, z = forward_kinematics(leg, q)
+            assert y - y0 == pytest.approx(want, abs=2e-3), leg
+            # roll coupling: |dz| ≤ D_LAT·a_max ≈ 13 mm
+            assert abs(z - (-h)) < 0.015, leg
+        # stance↔swing hand-offs still match bit-for-bit with strafe on
+        a = shin_stance_joints(1.0, 0.03, y_offset=0.015, hip_sign=hs)
+        b = shin_swing_joints(0.0, 0.03, y_offset=0.015, hip_sign=hs)
+        assert np.allclose(a, b, atol=1e-9), leg
+        a = shin_swing_joints(1.0, 0.03, y_offset=0.015, hip_sign=hs)
+        b = shin_stance_joints(0.0, 0.03, y_offset=0.015, hip_sign=hs)
+        assert np.allclose(a, b, atol=1e-9), leg
 
 
 def test_stance_x_offset_ik_feasible_across_envelope():

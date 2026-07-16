@@ -64,6 +64,7 @@ from legged_control.mpc.shin_gait import (
     shin_stance_joints,
     shin_swing_joints,
     KNEE_OFFSET_MAX,
+    Y_OFFSET_MAX,
 )
 
 
@@ -340,14 +341,25 @@ _TIP_GATE_TAU = 0.3       # s — stride gate slew time constant (trip + recover
 # in the creep order; walking is the crawl schedule driven in joint space.
 _SHIN_LOWER_T = 2.5      # s — crouch from current height to shin height
 _SHIN_LAY_T = 1.5        # s — per-leg lay-down / stand-up blend
-_SHIN_MIN_PERIOD = 1.8   # s — crawl cycle floor while on shins. With the
-                         # 0.07 m/s default cap this uses ~87% of the
-                         # single-link stride budget (v·T_stance/2 = 0.048
-                         # of the 0.055 knee stroke); swing 0.43 s puts the
-                         # foot-lift peak ~0.63 m/s, inside the stair-v2
-                         # validated band. Pace history (2026-07-11):
-                         # 3.5/0.02 "太慢" → 2.4/0.04 "很稳" → this.
-_SHIN_WZ_CAP = 0.08      # rad/s — heading nudges only on the bridge
+_SHIN_MIN_PERIOD = 1.4   # s — crawl cycle floor while on shins. With the
+                         # 0.12 m/s default cap this uses ~91% of the
+                         # single-link stride budget (v·T_stance/2 = 0.064
+                         # of the 0.07 knee stroke); swing 0.34 s puts the
+                         # foot-lift peak ~0.8 m/s, at the top of the
+                         # stair-v2 validated band — don't lower this
+                         # further without re-validating swing impacts.
+                         # Pace history: 3.5/0.02 "太慢" → 2.4/0.04 "很稳"
+                         # → 1.8/0.07 (2026-07-11) → this (2026-07-16).
+_SHIN_WZ_CAP = 0.30      # rad/s — tank-style differential stride (the shin
+                         # lines skid-yaw like tracks); kinematic budget is
+                         # ~0.88 rad/s at the stride clamp, and the clip
+                         # saturates gracefully, but skid friction grows
+                         # with rate — raised 0.08 → 0.30 (2026-07-16,
+                         # "转向几乎没效果").
+_SHIN_VY_CAP = 0.04      # m/s — strafe via hip-roll lateral stroke; small
+                         # because the roll couples ±D_LAT·a height error
+                         # into the stroke ends (~13 mm at this cap). An
+                         # alignment nudge on the bridge, not a cruise axis.
 _SHIN_LAY_ORDER = ["RL", "FL", "RR", "FR"]  # creep order, same as the crawl
 _SWAY_X = 0.015          # m — crawl body sway, fore-aft component
 _SWAY_Y = 0.03           # m — crawl body sway, lateral component
@@ -856,7 +868,7 @@ class MPCNode(Node):
         # sequences run inside _shin_tick.
         self.declare_parameter("shin_mode", bool(mpc_cfg.get("shin_mode", False)))
         self.declare_parameter(
-            "shin_speed_cap", float(mpc_cfg.get("shin_speed_cap", 0.07))
+            "shin_speed_cap", float(mpc_cfg.get("shin_speed_cap", 0.12))
         )
         self.declare_parameter(
             "shin_pitch", float(mpc_cfg.get("shin_pitch", 0.05))
@@ -1643,6 +1655,21 @@ class MPCNode(Node):
 
     def _shin_cmd(self, targets: dict[str, float], with_dq: bool = False) -> JointCommand:
         q = [float(targets[n]) for n in _YAML_JOINTS]
+        # same standing-entry blend as _balance_stance: armed at the shin
+        # walk start/stop flips, where the residual stride would otherwise
+        # snap to the pose (or the pose to the first stance target) in one
+        # frame — the same twitch class fixed at the point-foot boundaries.
+        if self._settle_q0 is not None:
+            a = _smoothstep(
+                (time.monotonic() - self._settle_t0) / _SETTLE_BLEND_T
+            )
+            if a >= 1.0:
+                self._settle_q0 = None
+            else:
+                q = [
+                    (1.0 - a) * q0 + a * qi
+                    for q0, qi in zip(self._settle_q0, q)
+                ]
         dq = [0.0] * 12
         for i, n in enumerate(_YAML_JOINTS):
             prev = self._shin_prev_q.get(n)
@@ -1776,6 +1803,7 @@ class MPCNode(Node):
         self._vel_filt += alpha * (self._cmd_vel - self._vel_filt)
         cap = float(self.get_parameter("shin_speed_cap").value)
         vx = float(np.clip(self._vel_filt[0], -cap, cap))
+        vy = float(np.clip(self._vel_filt[1], -_SHIN_VY_CAP, _SHIN_VY_CAP))
         wz = float(np.clip(self._vel_filt[2], -_SHIN_WZ_CAP, _SHIN_WZ_CAP))
         moving = (
             float(np.max(np.abs(self._cmd_vel))) >= _WALK_VEL_THRESH
@@ -1791,29 +1819,40 @@ class MPCNode(Node):
                 return self._shin_cmd(self._shin_pose_targets())
             self._gait.reset()
             self._shin_walking = True
+            self._arm_settle()
         gait_state = self._gait.query(now)
         if not moving and all(gait_state[leg]["contact"] for leg in LEG_NAMES):
             self._gait.reset()
             self._vel_filt[:] = 0.0
             self._shin_walking = False
+            self._arm_settle()
             return self._shin_cmd(self._shin_pose_targets())
 
         t_stance = self._gait.period * (1.0 - self._gait.swing_ratio)
         pitch = self._shin_pitch()
         targets: dict[str, float] = {}
         for leg in LEG_NAMES:
-            v_leg = leg_velocity(np.array([vx, 0.0]), wz, leg)
+            v_leg = leg_velocity(np.array([vx, vy]), wz, leg)
             off = float(np.clip(
                 float(v_leg[0]) * t_stance * 0.5,
                 -KNEE_OFFSET_MAX, KNEE_OFFSET_MAX,
             ))
+            # lateral stroke (strafe + yaw tangential component) via the
+            # hip-roll sweep; hip_sign maps the world-y stroke onto q1
+            y_off = float(np.clip(
+                float(v_leg[1]) * t_stance * 0.5,
+                -Y_OFFSET_MAX, Y_OFFSET_MAX,
+            ))
+            hip_sign = _leg_signs(leg)[0]
             if gait_state[leg]["contact"]:
                 q = shin_stance_joints(
-                    self._gait.stance_phase(leg, now), off, pitch
+                    self._gait.stance_phase(leg, now), off, pitch,
+                    y_offset=y_off, hip_sign=hip_sign,
                 )
             else:
                 q = shin_swing_joints(
-                    self._gait.swing_phase(leg, now), off, pitch
+                    self._gait.swing_phase(leg, now), off, pitch,
+                    y_offset=y_off, hip_sign=hip_sign,
                 )
             for jname, qval in zip(_leg_joints(leg), q):
                 targets[jname] = float(qval)
